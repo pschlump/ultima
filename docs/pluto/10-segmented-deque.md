@@ -46,11 +46,11 @@ func (q *QuickList[T]) InsertAfter(i int, v T) bool
 func (q *QuickList[T]) Delete(i int) bool
 func (q *QuickList[T]) DeleteRange(start, stop int) int // LTRIM's complement
 func (q *QuickList[T]) Trim(start, stop int)            // keep [start, stop]
-func (q *QuickList[T]) Range(start, stop int) iter.Seq[T]
+func (q *QuickList[T]) Range(start, stop int) iter.Seq2[int,T]
 
 // Iteration:
-func (q *QuickList[T]) All() iter.Seq[T]
-func (q *QuickList[T]) Backward() iter.Seq[T]
+func (q *QuickList[T]) All() iter.Seq2[int,T]
+func (q *QuickList[T]) Backward() iter.Seq2[int,T]
 
 // Rotation (RPOPLPUSH / LMOVE): move head of src to tail of dst, O(1) amortized.
 func MoveHeadToTail[T any](src, dst *QuickList[T]) (T, bool)

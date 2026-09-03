@@ -6,7 +6,8 @@ WebSocket/protobuf), plus a web-based management UI. The driving goal is
 **substantially higher throughput than Redis** by replacing Redis's single-threaded
 command execution with a parallel, goroutine-based architecture.
 
-- Status: Draft v0.1
+- Status: Draft v0.3 (open questions in §14 resolved; pluto gaps 1–9 implemented;
+  gRPC/WS protocol redesigned to typed command envelope, §6.2)
 - Reference sources: Redis `unstable` branch (version **8.9.241**) checked out at
   `./note/redis`; data-structure library `github.com/pschlump/pluto` at `../pluto`;
   layout/tooling model project `github.com/Agentic-Quartz/exsms`.
@@ -85,11 +86,11 @@ that parallelizes is exactly `processCommand`.
 
 One process, three network surfaces, each with its own port (all configurable):
 
-| Surface | Default port | Purpose |
-|---|---|---|
-| **RESP port** | 6379 | Redis-compatible wire protocol (RESP2/RESP3, TLS optional, Unix socket optional). Drop-in replacement surface. |
-| **gRPC port** | 6380 | Protobuf service API — typed, binary, no parsing. Streaming support for pub/sub and monitor-like feeds. |
-| **HTTP/WS port** | 6381 | chi-based HTTP mux: management/monitoring REST API (OpenAPI 3.0), `/metrics` (Prometheus), health checks, the React web UI, **and** the WebSocket endpoint for binary protobuf command access. |
+| Surface          | Default port | Purpose                                                                                                                                                                                        |
+|------------------|--------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **RESP port**    | 6379         | Redis-compatible wire protocol (RESP2/RESP3, TLS optional, Unix socket optional). Drop-in replacement surface.                                                                                 |
+| **gRPC port**    | 6380         | Protobuf service API — typed, binary, no parsing. Streaming support for pub/sub and monitor-like feeds.                                                                                        |
+| **HTTP/WS port** | 6381         | chi-based HTTP mux: management/monitoring REST API (OpenAPI 3.0), `/metrics` (Prometheus), health checks, the React web UI, **and** the WebSocket endpoint for binary protobuf command access. |
 
 Rationale for combining HTTP + WebSocket on one port: they share the chi mux
 (WS upgrade handled by a chi route), one TLS stack, one middleware chain, one
@@ -104,7 +105,8 @@ set of ops endpoints. The RESP and gRPC ports stay dedicated for max throughput.
 The keyspace is split into **N shards** (default: `4 × GOMAXPROCS`, rounded up to
 a power of two; configurable). Each shard owns:
 
-- its own hash table (`pluto/cuckoo_ts` or `pluto/hash_grow_ts` — see §5),
+- its own hash table (pluto's native sharded hash table, §5.3 #3 — one striped
+  table per keyspace; per-shard views derive from the striping),
 - its own expiry min-heap (`pluto/heap_ts`),
 - its own stats counters.
 
@@ -119,15 +121,15 @@ conn goroutine ──parse──► route by key ──► shard queue ──►
 
 ### 4.2 Execution model per command class
 
-| Command class | Execution |
-|---|---|
-| Single-key (GET/SET/HSET/LPUSH/…) | Dispatched to the key's shard goroutine; fully parallel across shards. |
-| Multi-key same-shard (MSET/MGET/DEL when all keys hash together) | Single shard task, atomic within shard. |
-| Multi-key cross-shard (MGET, DEL, EXISTS, cross-slot rename) | Fanned out to shards, results joined by the connection goroutine. **Documented semantic**: cross-shard commands are *not* transactional across shards in v1 fast path (per-shard atomicity only), matching what clients tolerate from Cluster mode. A strict mode (two-phase shard locking, Redis-exact semantics) is available via config for DROP-IN strictness. |
-| Keyspace-wide (KEYS, SCAN, DBSIZE, FLUSHALL, RANDOMKEY) | SCAN iterates shard-by-shard with cursors `shard:inner-cursor`; KEYS/FLUSHALL fan out. |
-| Pub/Sub | Dedicated broker goroutine (per-channel sharded if needed); SUBSCRIBE moves the connection into push mode. |
-| Transactions (MULTI/EXEC) | All commands of a transaction are coalesced and executed with the strict cross-shard path (shard locks taken in shard-id order to avoid deadlock). WATCH uses per-shard version counters. |
-| Blocking (BLPOP, XREAD BLOCK, …) | The *wait* never occupies a shard goroutine: the command registers interest and parks the connection goroutine; shard events wake waiters via channels. |
+| Command class                                                    | Execution                                                                                                                                                                                                                                                                                                                                                          |
+|------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Single-key (GET/SET/HSET/LPUSH/…)                                | Dispatched to the key's shard goroutine; fully parallel across shards.                                                                                                                                                                                                                                                                                             |
+| Multi-key same-shard (MSET/MGET/DEL when all keys hash together) | Single shard task, atomic within shard.                                                                                                                                                                                                                                                                                                                            |
+| Multi-key cross-shard (MGET, DEL, EXISTS, cross-slot rename)     | Fanned out to shards, results joined by the connection goroutine. **Documented semantic**: cross-shard commands are *not* transactional across shards in v1 fast path (per-shard atomicity only), matching what clients tolerate from Cluster mode. A strict mode (two-phase shard locking, Redis-exact semantics) is available via config for DROP-IN strictness. |
+| Keyspace-wide (KEYS, SCAN, DBSIZE, FLUSHALL, RANDOMKEY)          | SCAN iterates shard-by-shard with cursors `shard:inner-cursor`; KEYS/FLUSHALL fan out.                                                                                                                                                                                                                                                                             |
+| Pub/Sub                                                          | Dedicated broker goroutine (per-channel sharded if needed); SUBSCRIBE moves the connection into push mode.                                                                                                                                                                                                                                                         |
+| Transactions (MULTI/EXEC)                                        | All commands of a transaction are coalesced and executed with the strict cross-shard path (shard locks taken in shard-id order to avoid deadlock). WATCH uses per-shard version counters.                                                                                                                                                                          |
+| Blocking (BLPOP, XREAD BLOCK, …)                                 | The *wait* never occupies a shard goroutine: the command registers interest and parks the connection goroutine; shard events wake waiters via channels.                                                                                                                                                                                                            |
 
 ### 4.3 Why owner-goroutines instead of striped locks
 
@@ -158,21 +160,26 @@ iterators) rule: packages are goroutine-safe **only** if suffixed `_ts`
 (internal `sync.RWMutex`; ten also expose `Lock()`/`Unlock()` + `Nl*` no-lock
 methods for atomic compound ops).
 
+Implementation note: the pluto structures built for Ultima (§5.3, items 1–9)
+use `iter.Seq2[int, T]` for their index-ordered iterators in a number of places
+where the original requirement documents specified other iterator shapes. Callers
+should expect `Seq2` (index, value) pairs rather than plain `Seq[T]` scans.
+
 ### 5.1 Redis type → pluto structure
 
-| Redis type | Ultima encoding | pluto package(s) |
-|---|---|---|
-| Keyspace (per shard) | Hash: key → `*Entry` (type tag, value ptr, expire-at, version) | `cuckoo_ts` (O(1) guaranteed search/delete, background resize) — benchmark against `hash_grow_ts` |
-| String | `[]byte` + int-detection for INCR fast path | stdlib |
-| Hash | small: sorted slice or `dll` of field/value pairs; large: hash of fields | `hash_grow_ts` / `cuckoo_ts` per-hash, or Go map under shard lock |
-| List | deque | `dqueue_ts` (Push/Pop both ends); large lists may need segmented deque (gap, §5.3) |
-| Set | small-int: sorted int slice (intset equivalent); large: hash with unit values | `hash_grow_ts`/`cuckoo_ts` |
-| Sorted set | skiplist + hash pair (like Redis large zset) | `skip_list_ts` + `hash_grow_ts` — **needs rank/range API added (§5.3)** |
-| Stream | append-only segmented log keyed by ID | **gap — new structure needed** |
-| Expiry (per shard) | min-heap on expire-at ms | `heap_ts` |
-| Eviction (LRU) | capacity-bounded LRU | `lru` (wrap in shard lock; not `_ts`) |
-| RDB checksums | CRC-64 | `crc` |
-| Glob matching for KEYS | wildcard matching | `trie.KeysThatMatch` or simple glob (Redis uses `stringmatchlen`) |
+| Redis type             | Ultima encoding                                                               | pluto package(s)                                                                                  |
+|------------------------|-------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------|
+| Keyspace (per shard)   | Hash: key → `*Entry` (type tag, value ptr, expire-at, version)                | pluto's native **sharded hash table** (§5.3 #3, implemented) — fallback: `cuckoo_ts` per shard |
+| String                 | `[]byte` + int-detection for INCR fast path                                   | stdlib                                                                                            |
+| Hash                   | small: sorted slice or `dll` of field/value pairs; large: hash of fields      | `hash_grow_ts` / `cuckoo_ts` per-hash, or Go map under shard lock                                 |
+| List                   | deque                                                                         | `dqueue_ts` (Push/Pop both ends); large lists may need segmented deque (gap, §5.3)                |
+| Set                    | small-int: sorted int slice (intset equivalent); large: hash with unit values | `hash_grow_ts`/`cuckoo_ts`                                                                        |
+| Sorted set             | skiplist + hash pair (like Redis large zset)                                  | `skip_list_ts` + `hash_grow_ts` — rank/range API implemented (§5.3 #1)                              |
+| Stream                 | append-only segmented log keyed by ID                                         | pluto stream structure (§5.3 #2, implemented)                                                         |
+| Expiry (per shard)     | min-heap on expire-at ms                                                      | `heap_ts`                                                                                         |
+| Eviction (LRU)         | capacity-bounded LRU                                                          | `lru_ts` (thread-safe LRU, §5.3 #6)                                                                 |
+| RDB checksums          | CRC-64                                                                        | `crc`                                                                                             |
+| Glob matching for KEYS | wildcard matching                                                             | `trie.KeysThatMatch` or simple glob (Redis uses `stringmatchlen`)                                 |
 
 ### 5.2 Expiry design (replacing expire.c/ebuckets.c)
 
@@ -184,46 +191,46 @@ methods for atomic compound ops).
 - Hash-field TTLs (Redis 7.4+/8 feature, `HEXPIRE` etc.) stored in a per-hash
   mini-heap — phase 2.
 
-### 5.3 Gaps — structures to request from the pluto side
+### 5.3 Gaps — structures requested from the pluto side
 
-The following do not exist in pluto today and are needed for full parity
-(user has offered to build these; listed in priority order). Each has a
-detailed requirements/prompt document in `docs/pluto/`:
+**Status update:** items **1–9 are implemented** in pluto. Items 10 and 11
+remain open. Where the implementations differ from the original requirement
+documents in `docs/pluto/`, the notable difference is the use of
+`iter.Seq2[int, T]` iterators (see the note in §5).
 
-1. **Sorted-set range/rank ops on skip_list** (`Range(lo,hi)`, `Rank`, `Ceil`,
-   `Floor`, by-index access). Blocks: ZRANGEBYSCORE, ZRANK, ZREMRANGEBYRANK, …
-   Currently only full-scan iterators exist.
+1. ~~**Sorted-set range/rank ops on skip_list**~~ — **done** (`Range(lo,hi)`,
+   `Rank`, `Ceil`, `Floor`, by-index access; unblocks ZRANGEBYSCORE, ZRANK,
+   ZREMRANGEBYRANK, …).
    → `docs/pluto/01-skip-list-range-rank.md`
-2. **Stream structure**: radix-ordered map of stream IDs → packed entry blocks,
-   with consumer-group metadata. Blocks: XADD/XRANGE/XREAD/XGROUP…
+2. ~~**Stream structure**~~ — **done**: radix-ordered map of stream IDs → packed
+   entry blocks, with consumer-group metadata; unblocks XADD/XRANGE/XREAD/XGROUP…
    → `docs/pluto/02-stream.md`
-3. **Sharded concurrent hash table** (single logical table, internal striping) —
-   optional; Ultima can shard at the keyspace layer with N `cuckoo_ts` tables,
-   but a native striped table with a unified SCAN cursor would simplify
-   keyspace-wide iteration.
+3. ~~**Sharded concurrent hash table**~~ — **done** (single logical table,
+   internal striping, unified SCAN cursor). This is now the planned keyspace
+   table (§5.1) instead of N independent `cuckoo_ts` tables.
    → `docs/pluto/03-sharded-hash-table.md`
-4. **HyperLogLog** (or a good cardinality estimator). Blocks: PFADD/PFCOUNT/PFMERGE.
+4. ~~**HyperLogLog**~~ — **done**; unblocks PFADD/PFCOUNT/PFMERGE.
    → `docs/pluto/04-hyperloglog.md`
-5. **LFU counter structure** (Morris-counter approx frequency) for
-   `allkeys-lfu`/`volatile-lfu` eviction. LRU is covered by `lru`; LFU is not.
+5. ~~**LFU counter structure**~~ — **done** (Morris-counter approx frequency);
+   unblocks `allkeys-lfu`/`volatile-lfu` eviction policies.
    → `docs/pluto/05-lfu-counter.md`
-6. **Thread-safe LRU** (`lru_ts`) — minor; currently callers must lock.
+6. ~~**Thread-safe LRU** (`lru_ts`)~~ — **done**; this is the eviction LRU for
+   the project (§11.2).
    → `docs/pluto/06-lru-ts.md`
-7. **Thread-safe patricia/radix trie** (`patricia_trie_ts`) — for keyspace prefix
-   ops and possibly the stream ID index.
+7. ~~**Thread-safe patricia/radix trie** (`patricia_trie_ts`)~~ — **done**.
    → `docs/pluto/07-patricia-trie-ts.md`
-8. **Geo helpers** (geohash encode/decode + neighbor search on a sorted set).
-   Blocks: GEOADD/GEOSEARCH… (Redis implements GEO on zset; we can too once #1 lands).
+8. ~~**Geo helpers**~~ — **done** (geohash encode/decode + neighbor search on a
+   sorted set); unblocks GEOADD/GEOSEARCH…
    → `docs/pluto/08-geo.md`
-9. **Bitmap/bitfield helpers** — thin; can be plain `[]byte` ops in Ultima, but a
-   shared package avoids duplication.
+9. ~~**Bitmap/bitfield helpers**~~ — **done**.
    → `docs/pluto/09-bitmap-bitfield.md`
 10. **Bounded segmented deque** for very large lists (quicklist equivalent) —
-    memory-efficiency phase, not v1.
+    memory-efficiency phase, not v1. **Open.**
     → `docs/pluto/10-segmented-deque.md`
 11. **Cursor-based incremental Scan on hash tables** (`hash_grow`, `cuckoo` +
     `_ts` twins) — Redis-`dictScan`-style cursors that survive resize; needed
-    for SCAN/HSCAN/SSCAN/ZSCAN without whole-shard snapshots.
+    for SCAN/HSCAN/SSCAN/ZSCAN without whole-shard snapshots. **Open** (partially
+    mitigated by #3's unified cursor).
     → `docs/pluto/11-hash-table-cursor-scan.md`
 
 ### 5.4 Memory expectations
@@ -269,31 +276,77 @@ Required modifications:
 
 - IDL in `proto/ultima/v1/*.proto`; generated to `gen/go` (and `gen/ts` for the
   web UI) via `bin/gen.sh` (same pattern as exsms).
-- Core service sketch:
+- **Decided (benchmarked): typed command envelope, not string-parsed commands.**
+  The original sketch had a single generic `Exec(command string, args []bytes)`,
+  forcing the server to re-parse the command name and every non-blob argument
+  out of text. A benchmark (`note/grpc-vs-text-benchmark`, results in its
+  README) measured the two designs end-to-end over real gRPC: typing saves
+  ~150–280 ns/op round-trip with 3× fewer allocations (server unmarshal+exec
+  is 2.4× faster for an option-bearing SET), while a unary RPC costs ~45 µs —
+  so the decisive throughput lever is transport amortization (stream/batch:
+  45 µs → 2.8 µs/op), with typing adding ~3.5% on top and, just as
+  importantly, exact float fidelity (no `%.17g` round-trip), no
+  option-grammar ambiguity, and compile-time-checked clients.
+- Design: hot commands (GET/SET/DEL/INCR/HGET/HSET/LPUSH/RPUSH/LPOP/RPOP/
+  SADD/ZADD/MGET/MSET/EXPIRE/… — the ~30 commands that carry >95% of
+  traffic) get fully typed protobuf messages, one per command, riding in a
+  `Command` envelope over a bidi stream. The generic form remains as an
+  escape hatch for the long tail, so the proto surface does not have to
+  model all ~250 commands (BITFIELD, XADD auto-IDs, etc.) up front:
 
 ```proto
 service Ultima {
-  rpc Exec(CommandRequest) returns (CommandResponse);          // unary single command
-  rpc ExecBatch(BatchRequest) returns (BatchResponse);          // pipelined batch, ordered
-  rpc Subscribe(SubscribeRequest) returns (stream PushEvent);   // pub/sub + keyspace notifications
-  rpc Monitor(MonitorRequest) returns (stream CommandEvent);    // MONITOR equivalent
+  rpc Exec(stream Command) returns (stream CommandResponse);     // pipelined, ordered, typed
+  rpc ExecBatch(BatchRequest) returns (BatchResponse);           // same envelope, unary batch
+  rpc ExecGeneric(CommandRequest) returns (CommandResponse);     // tooling/CLI convenience
+  rpc Subscribe(SubscribeRequest) returns (stream PushEvent);    // pub/sub + keyspace notifications
+  rpc Monitor(MonitorRequest) returns (stream CommandEvent);     // MONITOR equivalent
 }
-message CommandRequest { string command = 1; repeated bytes args = 2; uint64 db = 3; }
+// Exactly one field set (protobuf oneof); dispatch is a tag switch — no strings.
+message Command {
+  oneof cmd {
+    SetCommand   set     = 1;   // { bytes key; bytes value; int64 ttl_ms; bool nx; bool xx; bool get; }
+    GetCommand   get     = 2;   // { bytes key; }
+    IncrCommand  incr    = 3;   // { bytes key; int64 delta; }
+    ZaddCommand  zadd    = 4;   // { bytes key; double score; bytes member; }
+    // … one message per hot command …
+    CommandRequest generic = 100; // escape hatch: { string command; repeated bytes args; }
+  }
+  uint64 db  = 101;
+  uint64 seq = 102;  // client correlation id for pipelined ordering
+}
 ```
 
-- Every gRPC command maps 1:1 onto the same internal command executor as RESP —
-  the RESP layer is only a *parse/serialize* shim over the executor. This is the
-  key architectural invariant: **one command engine, three front-ends**.
+- Every gRPC command — typed or generic — maps onto the same internal command
+  executor as RESP; the typed front-end skips the parse stage entirely and
+  calls the executor's typed entry points, while RESP and the generic
+  envelope field go through the parser. This is the key architectural
+  invariant: **one command engine, three front-ends**, with the parse shim
+  optional for binary clients.
 - Value representation in protobuf mirrors RESP3 types (null, int, double,
   blob-string, array, map, error) so gRPC clients get RESP3-grade fidelity.
+- Unary per-command RPCs (ExecSet, ExecGet, …) may be generated for tooling
+  convenience, but the stream is the high-throughput path.
 
 ### 6.3 WebSocket (binary protobuf) on the HTTP/WS port
 
 - `gorilla/websocket` (as in exsms) at `/ws/v1` (chi route).
-- Frames carry the same protobuf `CommandRequest`/`CommandResponse` messages as
-  gRPC — a browser-friendly binary channel with no RESP parsing. Text JSON frames
-  optionally supported for debugging.
+- Frames carry the same protobuf `Command`/`CommandResponse` envelope as the
+  gRPC stream (§6.2) — typed hot commands plus the generic escape hatch, one
+  frame per command, replies correlated by `seq`. A browser-friendly binary
+  channel with no RESP parsing and no server-side text conversion; the parse
+  savings measured in §6.2 apply here proportionally more, since a WS frame
+  is cheaper than an HTTP/2 RPC. Text JSON frames optionally supported for
+  debugging.
 - The web UI itself uses this endpoint for live dashboards (plus REST for CRUD).
+
+### 6.4 Operator CLIs
+
+Each binary access protocol gets its own operator CLI binary (§12.1):
+`ultima-cli` (RESP, the redis-cli analogue), `ultima-ws-cli` (WebSocket with
+binary protobuf frames), and `ultima-grpc-cli` (gRPC). All three are thin
+shells over the same command surface — one command engine, three front-ends,
+three matching CLIs.
 
 ---
 
@@ -304,14 +357,14 @@ Coverage is tracked in a machine-readable manifest
 (`lib/commands/manifest.json` — name, group, status, since-version, notes),
 generated docs page, and enforced by tests. Phased:
 
-| Phase | Groups | Representative commands |
-|---|---|---|
-| **P0 — core KV** | connection, server (subset), string, keyspace, generic | PING, HELLO, AUTH, SELECT, SET/GET/DEL/EXISTS/EXPIRE/TTL/TYPE/SCAN/INCR/APPEND/GETSET/MGET/MSET, INFO, DBSIZE, FLUSHDB, CONFIG GET/SET (subset), CLIENT (subset) |
-| **P1 — collections** | hash, list, set, sorted-set | H*, L*, S*, Z* (needs pluto gap #1) |
-| **P2 — transactions & pub/sub** | MULTI/EXEC/WATCH, SUBSCRIBE/PUBLISH/PSUBSCRIBE/SSUBSCRIBE, keyspace notifications | |
-| **P3 — streams, scripting-lite, persistence cmds** | X*, SAVE/BGSAVE/BGREWRITEAOF/LASTSAVE, EVAL via a Go-embedded Lua (gopher-lua) or defer | |
-| **P4 — parity tail** | BITOP/BITFIELD, GEO*, PF*, OBJECT, MEMORY, DEBUG (subset), hash-field TTLs (HEXPIRE…), ACL (subset), SORT | |
-| **P5 — superset** | see §10 | |
+| Phase                                              | Groups                                                                                                    | Representative commands                                                                                                                                          |
+|----------------------------------------------------|-----------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **P0 — core KV**                                   | connection, server (subset), string, keyspace, generic                                                    | PING, HELLO, AUTH, SELECT, SET/GET/DEL/EXISTS/EXPIRE/TTL/TYPE/SCAN/INCR/APPEND/GETSET/MGET/MSET, INFO, DBSIZE, FLUSHDB, CONFIG GET/SET (subset), CLIENT (subset) |
+| **P1 — collections**                               | hash, list, set, sorted-set                                                                               | H*, L*, S*, Z* (pluto gap #1 implemented)                                                                                                                        |
+| **P2 — transactions & pub/sub**                    | MULTI/EXEC/WATCH, SUBSCRIBE/PUBLISH/PSUBSCRIBE/SSUBSCRIBE, keyspace notifications                         |                                                                                                                                                                  |
+| **P3 — streams, scripting-lite, persistence cmds** | X* (pluto stream structure, §5.3 #2), SAVE/BGSAVE/BGREWRITEAOF/LASTSAVE, EVAL via `gopher-lua` (decided, §14) |                                                                                                                                                                  |
+| **P4 — parity tail**                               | BITOP/BITFIELD, GEO*, PF*, OBJECT, MEMORY, DEBUG (subset), hash-field TTLs (HEXPIRE…), ACL (subset), SORT |                                                                                                                                                                  |
+| **P5 — superset**                                  | see §10                                                                                                   |                                                                                                                                                                  |
 
 Full per-command semantics (error strings, arity, edge cases like
 `INCR` overflow, `SET` option combinations) are validated against real Redis via
@@ -366,10 +419,9 @@ Following exsms conventions:
 
 - `api/openapi.yaml` is the contract source of truth; embedded and served at
   `/api/openapi.yaml`; Swagger UI served from embedded assets
-  (`lib/httpapi`). Routes hand-registered on chi in
-  `lib/handler.RegisterRoutes` (exsms generates `chi-server` bindings but
-  doesn't wire them; we either wire oapi-codegen properly or hand-register from
-  day one — decide at M0; hand-registration is the lower-friction default).
+  (`lib/httpapi`). Routes use oapi-codegen's generated `chi-server` bindings,
+  wired properly (decided, §14 — unlike exsms, which generates the bindings but
+  hand-registers).
 - Request DTOs validated with `go-playground/validator/v10`, decoded through a
   `JsonBody` helper that reuses the config `SetDefaults` `default:`-tag
   mechanism (exsms `lib/utils/jsonbody.go` pattern).
@@ -435,11 +487,13 @@ Planned after P4, each behind config flags:
 
 ### 11.2 Eviction
 
-- `maxmemory` with policies `noeviction`, `allkeys-lru` (pluto `lru` per shard),
-  `volatile-lru`, `volatile-ttl` (expiry heap order), `allkeys-random`,
-  `volatile-random`; LFU policies deferred until pluto gap #5 lands.
-- Approximate LRU sampling (Redis-style) vs exact LRU (pluto `lru`) — benchmark
-  both; exact per-shard LRU is cheap enough under owner-goroutine model.
+- `maxmemory` with policies `noeviction`, `allkeys-lru` (pluto thread-safe LRU,
+  §5.3 #6), `volatile-lru`, `volatile-ttl` (expiry heap order), `allkeys-random`,
+  `volatile-random`; LFU policies (`allkeys-lfu`, `volatile-lfu`) use the pluto
+  LFU counter structure (§5.3 #5, implemented).
+- **Decided (§14): exact LRU via pluto's LRU** rather than Redis-style sampled
+  LRU — under the owner-goroutine model per-shard exact LRU is cheap enough; the
+  M5 benchmark is now a confirmation rather than a selection gate.
 
 ### 11.3 Databases
 
@@ -457,7 +511,9 @@ ultima/
 ├── cmd/
 │   ├── ultima-server/        # main binary (main.go, version.go, startup.go, router.go)
 │   ├── ultima-bench/         # benchmark driver
-│   └── ultima-cli/           # operator CLI (later)
+│   ├── ultima-cli/           # operator CLI over RESP (later)
+│   ├── ultima-ws-cli/        # operator CLI over the WebSocket/protobuf endpoint (later)
+│   └── ultima-grpc-cli/      # operator CLI over the gRPC endpoint (later)
 ├── lib/
 │   ├── config/               # FromFile/SetDefaults/$ENV$ (exsms pattern)
 │   ├── resp/                 # vendored+modified redcon (RESP2→RESP3)
@@ -473,7 +529,7 @@ ultima/
 │   ├── handler/              # HTTP API (chi), embedded openapi.yaml
 │   ├── metrics/              # Prometheus
 │   └── reqlog/ utils/        # middleware, JsonBody helpers
-├── api/openapi.yaml          # HTTP contract (+ oapi-codegen.yaml if used)
+├── api/openapi.yaml          # HTTP contract (+ oapi-codegen.yaml config)
 ├── proto/ultima/v1/          # protobuf IDL
 ├── gen/go, gen/ts            # generated protobuf code
 ├── web/                      # React + bun + vite management UI
@@ -493,7 +549,7 @@ Key dependencies: `go-chi/chi/v5`, `go-playground/validator/v10`,
 ### 12.2 Build tooling (Makefile, mirroring exsms)
 
 - `make gen_proto` (bin/gen.sh → protoc Go+TS, copy into web/src)
-- `make generate` (oapi-codegen, if adopted) / `make sync-openapi` (embed copy +
+- `make generate` (oapi-codegen chi-server bindings) / `make sync-openapi` (embed copy +
   drift check, prerequisite of server builds)
 - `make build` (build stamp + all binaries), `make run` (dev config in tests/),
   `make test` (`go test ./...`, integration in `tests/`), `make lint`
@@ -518,42 +574,53 @@ Key dependencies: `go-chi/chi/v5`, `go-playground/validator/v10`,
 
 ### 12.4 Milestones
 
-| MS | Deliverable | Exit criteria |
-|---|---|---|
-| **M0** | Skeleton: config, logging, three listeners (stub), Makefile, lint, CI-local | `make build test lint` green; PING on all three surfaces |
-| **M1** | Shard engine + RESP front-end + P0 commands; redcon fork w/ RESP3 | redis-cli fully works for P0; differential harness green on P0; first benchmark report vs Redis |
-| **M2** | P1 collections (needs pluto gap #1 for full zset) | differential green on H/L/S/Z |
-| **M3** | P2 transactions + pub/sub + blocking ops | MULTI/EXEC + WATCH stress green; redis-benchmark pub/sub |
-| **M4** | gRPC + WS front-ends; proto IDL stable | go + ts clients round-trip; parity with RESP replies |
-| **M5** | Expiry hardening, eviction, persistence (snapshot + AOF) | crash-recovery tests; maxmemory soak |
-| **M6** | HTTP API + web UI v1 | dashboard live; key browser works end-to-end |
-| **M7** | P3/P4 parity tail (streams, Lua-lite, bitfield, geo, PF*) | differential green on covered tail |
-| **M8** | Superset features (§10) + performance campaign | ≥4× Redis on target workload; final report |
+| MS     | Deliverable                                                                 | Exit criteria                                                                                   |
+|--------|-----------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
+| **M0** | Skeleton: config, logging, three listeners (stub), Makefile, lint, CI-local | `make build test lint` green; PING on all three surfaces                                        |
+| **M1** | Shard engine + RESP front-end + P0 commands; redcon fork w/ RESP3           | redis-cli fully works for P0; differential harness green on P0; first benchmark report vs Redis |
+| **M2** | P1 collections (pluto zset range/rank ops available, §5.3 #1)             | differential green on H/L/S/Z                                                                   |
+| **M3** | P2 transactions + pub/sub + blocking ops                                    | MULTI/EXEC + WATCH stress green; redis-benchmark pub/sub                                        |
+| **M4** | gRPC + WS front-ends; proto IDL stable                                      | go + ts clients round-trip; parity with RESP replies                                            |
+| **M5** | Expiry hardening, eviction, persistence (snapshot + AOF)                    | crash-recovery tests; maxmemory soak                                                            |
+| **M6** | HTTP API + web UI v1                                                        | dashboard live; key browser works end-to-end                                                    |
+| **M7** | P3/P4 parity tail (streams, Lua-lite, bitfield, geo, PF*)                   | differential green on covered tail                                                              |
+| **M8** | Superset features (§10) + performance campaign                              | ≥4× Redis on target workload; final report                                                      |
 
 ---
 
 ## 13. Key Decisions (summary)
 
-| # | Decision | Rationale |
-|---|---|---|
-| D1 | Goroutine-per-connection + sharded keyspace with owner goroutines (no hot-path locks) | Directly replaces ae.c/single-thread with N-way parallelism; per-key serialization preserved |
-| D2 | Vendor & extend `tidwall/redcon` as `lib/resp`, add RESP3 | Proven RESP2 server faster than Redis in benchmarks; small codebase; MIT |
-| D3 | One command engine, three front-ends (RESP/gRPC/WS) | No logic duplication; parity bugs fixed once |
-| D4 | pluto `_ts` structures inside owner-goroutine shards (locks mostly uncontended) | Reuse tested generics; `Lock`/`Nl*` available for compound ops |
-| D5 | Heap-based exact expiry per shard instead of sampled active expiry | Simpler + exact; `heap_ts` exists today |
-| D6 | Config = JSON + `default:` tags + `$ENV$` (exsms pattern) | Consistency with existing tooling; reflection machinery proven |
-| D7 | HTTP API contract-first (`api/openapi.yaml`, chi, validator) | exsms pattern; doc-drift tests |
-| D8 | No Redis Cluster/Sentinel in v1; single-node, many cores | Focus throughput goal; scale-out later |
-| D9 | Own snapshot/AOF format first, RDB-compat later | Ship persistence early without format reverse-engineering |
-| D10 | Memory footprint parity explicitly traded for throughput | Go encodings cost more RAM; documented |
+| #   | Decision                                                                              | Rationale                                                                                    |
+|-----|---------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------|
+| D1  | Goroutine-per-connection + sharded keyspace with owner goroutines (no hot-path locks) | Directly replaces ae.c/single-thread with N-way parallelism; per-key serialization preserved |
+| D2  | Vendor & extend `tidwall/redcon` as `lib/resp`, add RESP3                             | Proven RESP2 server faster than Redis in benchmarks; small codebase; MIT                     |
+| D3  | One command engine, three front-ends (RESP/gRPC/WS)                                   | No logic duplication; parity bugs fixed once                                                 |
+| D4  | pluto `_ts` structures inside owner-goroutine shards (locks mostly uncontended)       | Reuse tested generics; `Lock`/`Nl*` available for compound ops                               |
+| D5  | Heap-based exact expiry per shard instead of sampled active expiry                    | Simpler + exact; `heap_ts` exists today                                                      |
+| D6  | Config = JSON + `default:` tags + `$ENV$` (exsms pattern)                             | Consistency with existing tooling; reflection machinery proven                               |
+| D7  | HTTP API contract-first (`api/openapi.yaml`, chi, validator)                          | exsms pattern; doc-drift tests                                                               |
+| D8  | No Redis Cluster/Sentinel in v1; single-node, many cores                              | Focus throughput goal; scale-out later                                                       |
+| D9  | Own snapshot/AOF format first, RDB-compat later                                       | Ship persistence early without format reverse-engineering                                    |
+| D10 | Memory footprint parity explicitly traded for throughput                              | Go encodings cost more RAM; documented                                                       |
+| D11 | Wire oapi-codegen `chi-server` bindings properly (not exsms-style hand-registration)  | Resolved open question #1                                                                    |
+| D12 | `gopher-lua` for EVAL scripting (pure Go, no CGo)                                     | Resolved open question #3                                                                    |
+| D13 | Keyspace on pluto's native sharded hash table (not N independent `cuckoo_ts`)         | Resolved open questions #2/#5; unified SCAN cursor, internal striping                        |
+| D14 | Exact LRU eviction via pluto's thread-safe LRU                                        | Resolved open question #4                                                                    |
+| D15 | Typed command `oneof` envelope over bidi stream for gRPC/WS, generic escape hatch     | Benchmarked (`note/grpc-vs-text-benchmark`): kills all text parse, float-exact, 3× fewer allocs; throughput lever is stream amortization |
 
-## 14. Open Questions
+## 14. Open Questions — Resolved
+
+All five open questions from v0.1 are resolved (answers from `p0.md`):
 
 1. oapi-codegen: wire generated chi-server bindings properly, or hand-register
-   routes as exsms does? (decide at M0)
-2. Strict vs fast cross-shard multi-key semantics as default? (current plan:
-   fast default, strict config flag)
-3. Lua engine for EVAL: `gopher-lua` (pure Go, slower) vs defer scripting?
-4. Exact-LRU vs sampled-LRU eviction — benchmark in M5.
-5. Native sharded table from pluto (gap #3) vs N independent `cuckoo_ts` — M1
-   benchmark decides.
+   routes as exsms does? → **Wire chi-server bindings properly.** (§9.1)
+2. Strict vs fast cross-shard multi-key semantics as default? → **Pluto now
+   implements a sharded hash table** (§5.3 #3); the keyspace builds on it. The
+   fast-default/strict-flag behavior of §4.2 stands for cross-shard fan-out
+   commands.
+3. Lua engine for EVAL: `gopher-lua` vs defer scripting? → **`gopher-lua`.**
+   (§7 P3)
+4. Exact-LRU vs sampled-LRU eviction? → **Pluto now implements an LRU for this
+   project** (§5.3 #6); exact LRU it is. (§11.2)
+5. Native sharded table from pluto vs N independent `cuckoo_ts`? → **Pluto now
+   implements a sharded hash table** (§5.3 #3); use it. (§5.1)

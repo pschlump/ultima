@@ -6,12 +6,13 @@
 ZREMRANGEBYRANK, ZLEXRANGE-style queries, GEO* (via geohash scores)
 
 ## Context
-
-Ultima (see `docs/ULTIMA-DESIGN.md`) is a high-throughput Redis superset clone in
-Go. Its sorted-set type is planned as a skiplist + hash-table pair (the same
-shape as Redis's large zset encoding: `note/redis/src/t_zset.c`). Pluto's
-`skip_list` currently supports Insert/Search/Delete/FindMin/FindMax/Truncate and
-full iterators (`All`/`Backward`), but has **no** positional or bounded-range
+Ultima (see `~/go/src/github.com/pschlump/ultima/docs/ULTIMA-DESIGN.md`)
+is a high-throughput Redis superset clone in Go. Its sorted-set
+type is planned as a skiplist + hash-table pair (the same shape as
+Redis's large zset encoding: `note/redis/src/t_zset.c`). Pluto's
+`skip_list` currently supports
+Insert/Search/Delete/FindMin/FindMax/Truncate and full iterators
+(`All`/`Backward`), but has **no** positional or bounded-range
 operations — everything below O(n) scans.
 
 Pluto conventions to follow:
@@ -63,12 +64,12 @@ func (s *SkipList[T]) DeleteByRank(start, stop int) int
 
 ### 3. Complexity requirements
 
-| Operation | Required complexity |
-|---|---|
-| Rank, AtIndex, Ceil, Floor | O(log n) expected |
-| CountRange | O(log n) expected |
-| Range / RangeBackward | O(log n + m), m = returned elements |
-| DeleteRange / DeleteByRank | O(log n + m) |
+| Operation                           | Required complexity                                 |
+|-------------------------------------|-----------------------------------------------------|
+| Rank, AtIndex, Ceil, Floor          | O(log n) expected                                   |
+| CountRange                          | O(log n) expected                                   |
+| Range / RangeBackward               | O(log n + m), m = returned elements                 |
+| DeleteRange / DeleteByRank          | O(log n + m)                                        |
 | Insert / Search / Delete (existing) | must not regress more than 5% vs current benchmarks |
 
 ### 4. Concurrency
