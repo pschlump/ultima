@@ -578,34 +578,34 @@ Key dependencies: `go-chi/chi/v5`, `go-playground/validator/v10`,
 |--------|-----------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
 | **M0** | Skeleton: config, logging, three listeners (stub), Makefile, lint, CI-local | `make build test lint` green; PING on all three surfaces                                        |
 | **M1** | Shard engine + RESP front-end + P0 commands; redcon fork w/ RESP3           | redis-cli fully works for P0; differential harness green on P0; first benchmark report vs Redis |
-| **M2** | P1 collections (pluto zset range/rank ops available, §5.3 #1)             | differential green on H/L/S/Z                                                                   |
+| **M2** | P1 collections (pluto zset range/rank ops available, §5.3 #1)               | differential green on H/L/S/Z                                                                   |
 | **M3** | P2 transactions + pub/sub + blocking ops                                    | MULTI/EXEC + WATCH stress green; redis-benchmark pub/sub                                        |
 | **M4** | gRPC + WS front-ends; proto IDL stable                                      | go + ts clients round-trip; parity with RESP replies                                            |
 | **M5** | Expiry hardening, eviction, persistence (snapshot + AOF)                    | crash-recovery tests; maxmemory soak                                                            |
 | **M6** | HTTP API + web UI v1                                                        | dashboard live; key browser works end-to-end                                                    |
-| **M7** | P3/P4 parity tail (streams, Lua-lite, bitfield, geo, PF*)                   | differential green on covered tail                                                              |
+| **M7** | P3/P4 parity tail (streams, Lua-lite, bitfield, geo, PF\*)                  | differential green on covered tail                                                              |
 | **M8** | Superset features (§10) + performance campaign                              | ≥4× Redis on target workload; final report                                                      |
 
 ---
 
 ## 13. Key Decisions (summary)
 
-| #   | Decision                                                                              | Rationale                                                                                    |
-|-----|---------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------|
-| D1  | Goroutine-per-connection + sharded keyspace with owner goroutines (no hot-path locks) | Directly replaces ae.c/single-thread with N-way parallelism; per-key serialization preserved |
-| D2  | Vendor & extend `tidwall/redcon` as `lib/resp`, add RESP3                             | Proven RESP2 server faster than Redis in benchmarks; small codebase; MIT                     |
-| D3  | One command engine, three front-ends (RESP/gRPC/WS)                                   | No logic duplication; parity bugs fixed once                                                 |
-| D4  | pluto `_ts` structures inside owner-goroutine shards (locks mostly uncontended)       | Reuse tested generics; `Lock`/`Nl*` available for compound ops                               |
-| D5  | Heap-based exact expiry per shard instead of sampled active expiry                    | Simpler + exact; `heap_ts` exists today                                                      |
-| D6  | Config = JSON + `default:` tags + `$ENV$` (exsms pattern)                             | Consistency with existing tooling; reflection machinery proven                               |
-| D7  | HTTP API contract-first (`api/openapi.yaml`, chi, validator)                          | exsms pattern; doc-drift tests                                                               |
-| D8  | No Redis Cluster/Sentinel in v1; single-node, many cores                              | Focus throughput goal; scale-out later                                                       |
-| D9  | Own snapshot/AOF format first, RDB-compat later                                       | Ship persistence early without format reverse-engineering                                    |
-| D10 | Memory footprint parity explicitly traded for throughput                              | Go encodings cost more RAM; documented                                                       |
-| D11 | Wire oapi-codegen `chi-server` bindings properly (not exsms-style hand-registration)  | Resolved open question #1                                                                    |
-| D12 | `gopher-lua` for EVAL scripting (pure Go, no CGo)                                     | Resolved open question #3                                                                    |
-| D13 | Keyspace on pluto's native sharded hash table (not N independent `cuckoo_ts`)         | Resolved open questions #2/#5; unified SCAN cursor, internal striping                        |
-| D14 | Exact LRU eviction via pluto's thread-safe LRU                                        | Resolved open question #4                                                                    |
+| #   | Decision                                                                              | Rationale                                                                                                                                |
+|-----|---------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
+| D1  | Goroutine-per-connection + sharded keyspace with owner goroutines (no hot-path locks) | Directly replaces ae.c/single-thread with N-way parallelism; per-key serialization preserved                                             |
+| D2  | Vendor & extend `tidwall/redcon` as `lib/resp`, add RESP3                             | Proven RESP2 server faster than Redis in benchmarks; small codebase; MIT                                                                 |
+| D3  | One command engine, three front-ends (RESP/gRPC/WS)                                   | No logic duplication; parity bugs fixed once                                                                                             |
+| D4  | pluto `_ts` structures inside owner-goroutine shards (locks mostly uncontended)       | Reuse tested generics; `Lock`/`Nl*` available for compound ops                                                                           |
+| D5  | Heap-based exact expiry per shard instead of sampled active expiry                    | Simpler + exact; `heap_ts` exists today                                                                                                  |
+| D6  | Config = JSON + `default:` tags + `$ENV$` (exsms pattern)                             | Consistency with existing tooling; reflection machinery proven                                                                           |
+| D7  | HTTP API contract-first (`api/openapi.yaml`, chi, validator)                          | exsms pattern; doc-drift tests                                                                                                           |
+| D8  | No Redis Cluster/Sentinel in v1; single-node, many cores                              | Focus throughput goal; scale-out later                                                                                                   |
+| D9  | Own snapshot/AOF format first, RDB-compat later                                       | Ship persistence early without format reverse-engineering                                                                                |
+| D10 | Memory footprint parity explicitly traded for throughput                              | Go encodings cost more RAM; documented                                                                                                   |
+| D11 | Wire oapi-codegen `chi-server` bindings properly (not exsms-style hand-registration)  | Resolved open question #1                                                                                                                |
+| D12 | `gopher-lua` for EVAL scripting (pure Go, no CGo)                                     | Resolved open question #3                                                                                                                |
+| D13 | Keyspace on pluto's native sharded hash table (not N independent `cuckoo_ts`)         | Resolved open questions #2/#5; unified SCAN cursor, internal striping                                                                    |
+| D14 | Exact LRU eviction via pluto's thread-safe LRU                                        | Resolved open question #4                                                                                                                |
 | D15 | Typed command `oneof` envelope over bidi stream for gRPC/WS, generic escape hatch     | Benchmarked (`note/grpc-vs-text-benchmark`): kills all text parse, float-exact, 3× fewer allocs; throughput lever is stream amortization |
 
 ## 14. Open Questions — Resolved
