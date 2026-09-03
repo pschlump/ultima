@@ -17,9 +17,10 @@ The authoritative reference is the design document `docs/ULTIMA-DESIGN.md`
 Follow it — it records settled decisions (§15, D1–D19) that must not be
 silently reversed. Milestones M0–M9 are defined in §14.4.
 
-**Current status**: M0 (skeleton, three listeners) and M1 (shard engine,
-RESP front-end, P0 commands) are implemented and committed. Later milestones
-from the design layout (§14.1: `lib/types`, `lib/persist`, `clients/`,
+**Current status**: M0 (skeleton, three listeners), M1 (shard engine,
+RESP front-end, P0 commands) and M2 (P1 collections: hash/list/set/zset,
+differential-green on H/L/S/Z) are implemented and committed. Later
+milestones from the design layout (§14.1: `lib/persist`, `clients/`,
 `web/`, `api/`, extra CLIs under `cmd/`) do **not** exist yet.
 
 ## Technology Stack
@@ -68,13 +69,23 @@ Request flow: each front-end parses its wire format, calls
 - Graceful shutdown: SIGINT/SIGTERM → drain gRPC, close HTTP and RESP,
   stop shard goroutines (10 s cap).
 
-**Commands implemented so far (M1/P0)**: connection (PING, ECHO, HELLO,
+**Commands implemented so far**: M1/P0 — connection (PING, ECHO, HELLO,
 AUTH, SELECT, QUIT), strings (SET/GET family, INCR/DECR family, APPEND,
 STRLEN, MGET/MSET/MSETNX), keyspace (DEL, EXISTS, EXPIRE/PEXPIRE, TTL/PTTL,
 PERSIST, TYPE, SCAN), server (INFO, DBSIZE, FLUSHDB/FLUSHALL, CONFIG,
-CLIENT, COMMAND). Only the **string** value type exists; hashes/lists/sets/
-zsets/streams arrive in M2+. Ultima reports Redis compatibility version
-7.2.7 (`commands.CompatVersion`).
+CLIENT, COMMAND). M2/P1 — hashes (HSET/HGET/HMSET/HMGET/HGETALL/HDEL/
+HEXISTS/HLEN/HKEYS/HVALS/HINCRBY/HINCRBYFLOAT/HSETNX/HSTRLEN/HRANDFIELD/
+HSCAN), lists (LPUSH/RPUSH/LPUSHX/RPUSHX/LPOP/RPOP/LLEN/LRANGE/LINDEX/
+LSET/LINSERT/LREM/LTRIM/RPOPLPUSH/LPOS/LMOVE), sets (SADD/SREM/SMEMBERS/
+SISMEMBER/SMISMEMBER/SCARD/SPOP/SRANDMEMBER/SMOVE/SINTER/SUNION/SDIFF/
+SINTERSTORE/SUNIONSTORE/SDIFFSTORE/SINTERCARD/SSCAN) and sorted sets
+(ZADD/ZSCORE/ZMSCORE/ZINCRBY/ZRANK/ZREVRANK/ZRANGE/ZRANGEBYSCORE/
+ZRANGEBYLEX/ZREVRANGE/ZREVRANGEBYSCORE/ZREMRANGEBYRANK/ZREMRANGEBYSCORE/
+ZREMRANGEBYLEX/ZCARD/ZCOUNT/ZLEXCOUNT/ZREM/ZPOPMIN/ZPOPMAX/ZRANDMEMBER/
+ZDIFF/ZINTER/ZUNION/ZINTERSTORE/ZUNIONSTORE/ZSCAN). Value types: strings
+plus the four collections (`lib/types`); blocking variants (BLPOP…) are
+M3. Ultima reports Redis compatibility version 7.2.7
+(`commands.CompatVersion`).
 
 ## Code Organization
 
@@ -84,8 +95,15 @@ lib/config/          JSON config: `default:"..."` struct tags via reflection + `
 lib/resp/            vendored + extended fork of tidwall/redcon v1.6.4 (D2); adds RESP3 emitters,
                      per-connection protocol versioning; kept close to upstream — excluded from lint
 lib/shard/           sharded keyspace engine, owner goroutines, routing, expiry heap
+lib/types/           collection value types in Entry.Obj (M2): Hash (insertion-ordered
+                     slice → slice+map past hash-max-listpack-*), List (pluto
+                     quicklist_ts, §5.3 #10), Set (sorted int64 slice intset → map past
+                     set-max-intset-entries), ZSet (skip_list_ts + member→score map,
+                     §5.3 #1). Promotion is one-way, like Redis.
 lib/commands/        front-end-agnostic command engine; table.go is the command registry
-                     (def(name, arity, flags, first, last, step, group, handler))
+                     (def(name, arity, flags, first, last, step, group, handler));
+                     hash.go/list.go/set.go/zset.go hold the P1 handlers, coll.go the
+                     shared parsing helpers (string2d-exact floats, range bounds)
 lib/grpcsrv/         gRPC front-end (M0: Ping only)
 lib/handler/         HTTP/WS routes (/health, /ready, /api/v1/ping, /ws/v1 stub)
 proto/ultima/v1/     protobuf IDL

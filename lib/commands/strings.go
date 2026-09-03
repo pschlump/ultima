@@ -155,6 +155,10 @@ func cmdGet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	var reply resp.Value
 	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
 		if ent, ok := s.Lookup(cs.DB, key); ok {
+			if ent.Type != shard.TypeString {
+				reply = errWrongType
+				return
+			}
 			reply = resp.BlobString(ent.Str)
 		} else {
 			reply = resp.Null()
@@ -168,6 +172,10 @@ func cmdGetSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	var reply resp.Value
 	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
 		old, found := s.Lookup(cs.DB, key)
+		if found && old.Type != shard.TypeString {
+			reply = errWrongType
+			return
+		}
 		s.Store(cs.DB, key, &shard.Entry{Type: shard.TypeString, Str: dupBytes(args[2])})
 		if found {
 			reply = resp.BlobString(old.Str)
@@ -183,6 +191,10 @@ func cmdGetDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	var reply resp.Value
 	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
 		if ent, ok := s.Lookup(cs.DB, key); ok {
+			if ent.Type != shard.TypeString {
+				reply = errWrongType
+				return
+			}
 			s.Delete(cs.DB, key)
 			reply = resp.BlobString(ent.Str)
 		} else {
@@ -225,6 +237,10 @@ func cmdGetEx(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		ent, found := s.Lookup(cs.DB, key)
 		if !found {
 			reply = resp.Null()
+			return
+		}
+		if ent.Type != shard.TypeString {
+			reply = errWrongType
 			return
 		}
 		reply = resp.BlobString(ent.Str)
@@ -308,6 +324,10 @@ func incrBy(e *Engine, cs *ConnState, keyB []byte, delta int64) resp.Value {
 		var cur int64
 		ent, found := s.Lookup(cs.DB, key)
 		if found {
+			if ent.Type != shard.TypeString {
+				reply = errWrongType
+				return
+			}
 			v, ok := parseIntStrict(ent.Str)
 			if !ok {
 				reply = errNotInt
@@ -341,6 +361,10 @@ func cmdAppend(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
 		ent, found := s.Lookup(cs.DB, key)
 		if found {
+			if ent.Type != shard.TypeString {
+				reply = errWrongType
+				return
+			}
 			ent.Str = append(ent.Str, args[2]...)
 			reply = resp.Int(int64(len(ent.Str)))
 			return
@@ -359,6 +383,10 @@ func cmdStrLen(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	var reply resp.Value
 	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
 		if ent, found := s.Lookup(cs.DB, key); found {
+			if ent.Type != shard.TypeString {
+				reply = errWrongType
+				return
+			}
 			reply = resp.Int(int64(len(ent.Str)))
 		} else {
 			reply = resp.Int(0)
@@ -377,7 +405,7 @@ func cmdMGet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
-			if ent, ok := s.Lookup(cs.DB, string(keys[i])); ok {
+			if ent, ok := s.Lookup(cs.DB, string(keys[i])); ok && ent.Type == shard.TypeString {
 				vals[i] = resp.BlobString(ent.Str)
 			}
 		}

@@ -1,7 +1,6 @@
 package resp
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -23,7 +22,7 @@ func TestAppendValueRESP3(t *testing.T) {
 		{"int", Int(42), ":42\r\n"},
 		{"null3", Null(), "_\r\n"},
 		{"blob", BlobString([]byte("hi")), "$2\r\nhi\r\n"},
-		{"double", Double(3.14), ",3.1400000000000001\r\n"},
+		{"double", Double(3.14), ",3.14\r\n"},
 		{"double-int", Double(3), ",3\r\n"},
 		{"bool-t", Bool(true), "#t\r\n"},
 		{"bool-f", Bool(false), "#f\r\n"},
@@ -75,11 +74,28 @@ func TestAppendValueRESP2Downgrade(t *testing.T) {
 }
 
 func TestDoubleFormatMatchesRedis(t *testing.T) {
-	// Redis addReplyDouble uses %.17g with inf/-inf/nan spelled out.
+	// Redis d2string (7.2): shortest round-trip %g, integer fast path,
+	// minimal-width exponent; inf/-inf/nan spelled out.
+	cases := map[float64]string{
+		1.5:    "1.5",
+		0.1:    "0.1",
+		3:      "3",
+		0:      "0",
+		1e17:   "100000000000000000",
+		1e21:   "1e+21",
+		1e-5:   "0.00001",
+		1e-7:   "1e-7",
+		100000: "100000",
+	}
+	for f, want := range cases {
+		if got := FormatDouble(f); got != want {
+			t.Errorf("FormatDouble(%v) = %q, want %q", f, got, want)
+		}
+	}
 	if got := render(t, 3, Double(1.5)); got != ",1.5\r\n" {
 		t.Errorf("1.5 = %q", got)
 	}
-	if got := render(t, 3, Double(0.1)); !strings.HasPrefix(got, ",0.1") {
+	if got := render(t, 3, Double(0.1)); got != ",0.1\r\n" {
 		t.Errorf("0.1 = %q", got)
 	}
 }

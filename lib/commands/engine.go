@@ -142,17 +142,13 @@ func errArity(fullname string) resp.Value {
 }
 
 var (
-	errSyntax  = resp.Err("ERR syntax error")
-	errNotInt  = resp.Err("ERR value is not an integer or out of range")
-	errIncrOvf = resp.Err("ERR increment or decrement would overflow")
-	errDecrOvf = resp.Err("ERR decrement would overflow")
-	// errWrongType is unreachable in M1 (only the string type exists);
-	// it is defined now because P1 collections must emit it byte-exact.
+	errSyntax    = resp.Err("ERR syntax error")
+	errNotInt    = resp.Err("ERR value is not an integer or out of range")
+	errIncrOvf   = resp.Err("ERR increment or decrement would overflow")
+	errDecrOvf   = resp.Err("ERR decrement would overflow")
 	errWrongType = resp.Err("WRONGTYPE Operation against a key holding the wrong kind of value")
 	replyOK      = resp.Simple("OK")
 )
-
-var _ = errWrongType
 
 // errUnknownCommand matches Redis: name as given (≤128 bytes), up to 19
 // leading args each quoted and truncated to 128 bytes, trailing space.

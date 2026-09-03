@@ -201,13 +201,29 @@ func cmdType(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
 	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
-		if _, found := s.Lookup(cs.DB, key); found {
-			reply = resp.Simple("string")
+		if ent, found := s.Lookup(cs.DB, key); found {
+			reply = resp.Simple(typeName(ent.Type))
 		} else {
 			reply = resp.Simple("none")
 		}
 	})
 	return reply
+}
+
+// typeName is TYPE's reply for each entry type.
+func typeName(t shard.Type) string {
+	switch t {
+	case shard.TypeHash:
+		return "hash"
+	case shard.TypeList:
+		return "list"
+	case shard.TypeSet:
+		return "set"
+	case shard.TypeZSet:
+		return "zset"
+	default:
+		return "string"
+	}
 }
 
 func cmdScan(e *Engine, cs *ConnState, args [][]byte) resp.Value {

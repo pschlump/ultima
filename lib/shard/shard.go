@@ -30,20 +30,27 @@ import (
 	"github.com/pschlump/pluto/sharded_hash_ts"
 )
 
-// Type tags a keyspace entry's value kind. M1 implements strings only;
-// later milestones add hash/list/set/zset/stream.
+// Type tags a keyspace entry's value kind. M1 implements strings; M2 adds
+// the hash/list/set/zset collections (design doc §5.1).
 type Type byte
 
 // Entry types.
 const (
 	TypeString Type = 's'
+	TypeHash   Type = 'h'
+	TypeList   Type = 'l'
+	TypeSet    Type = 'S'
+	TypeZSet   Type = 'z'
 )
 
 // Entry is one keyspace value: type tag, value, expiry, and the version
 // counter (WATCH in M3; ExpGen invalidates stale expiry-heap entries).
+// Strings live in Str; collections live in Obj as one of *types.Hash,
+// *types.List, *types.Set, *types.ZSet (shard goroutine–owned, no locks).
 type Entry struct {
 	Type       Type
 	Str        []byte
+	Obj        any
 	ExpireAtMs int64 // absolute expiry in ms; 0 = no expiry
 	ExpGen     uint64
 	Version    uint64

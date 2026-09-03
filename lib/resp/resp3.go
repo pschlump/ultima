@@ -1,6 +1,10 @@
 package resp
 
-import "strconv"
+import (
+	"math"
+	"strconv"
+	"strings"
+)
 
 // RESP3 appenders and Writer methods — the fork's addition over upstream
 // redcon, which is RESP2-only (design doc §6.1 modification #1).
@@ -56,17 +60,84 @@ func AppendVerbatim(b []byte, format, data string) []byte {
 }
 
 // appendDouble renders f the way Redis does for RESP3 doubles and their
-// RESP2 bulk-string downgrade: %.17g, with inf/-inf/nan spelled out.
+// RESP2 bulk-string downgrade (Redis d2string): shortest round-trip %g
+// with a minimal-width exponent and inf/-inf/nan spelled out.
 func appendDouble(f float64) []byte {
-	s := strconv.FormatFloat(f, 'g', 17, 64)
-	if s == "+Inf" {
-		s = "inf"
-	} else if s == "-Inf" {
-		s = "-inf"
-	} else if s == "NaN" {
-		s = "nan"
+	return append([]byte(FormatDouble(f)), '\r', '\n')
+}
+
+// FormatDouble formats f exactly like Redis's d2string (7.2), used for
+// every score/double reply in both protocols: "0" for both zeros, inf/
+// -inf/nan spelled out, integral int64-fitting values printed as
+// integers, everything else via the same rules as fpconv_dtoa (shortest
+// round-trip digits, fixed notation when the exponent is small, else
+// scientific with a minimal-width signed exponent like "1e-7").
+func FormatDouble(f float64) string {
+	switch {
+	case f == 0:
+		return "0"
+	case math.IsInf(f, 1):
+		return "inf"
+	case math.IsInf(f, -1):
+		return "-inf"
+	case math.IsNaN(f):
+		return "nan"
 	}
-	return append([]byte(s), '\r', '\n')
+	if f >= -9e18 && f <= 9e18 && f == math.Trunc(f) {
+		if v := int64(f); float64(v) == f {
+			return strconv.FormatInt(v, 10)
+		}
+	}
+	// Shortest round-trip digits via %e: "-d.ddddde±X".
+	s := strconv.FormatFloat(f, 'e', -1, 64)
+	neg := false
+	if s[0] == '-' {
+		neg = true
+		s = s[1:]
+	}
+	ei := strings.IndexByte(s, 'e')
+	mant := s[:ei]
+	exp, _ := strconv.Atoi(s[ei+1:]) // X: value = 0.digits * 10^(X+1)
+	digits := mant
+	if di := strings.IndexByte(mant, '.'); di >= 0 {
+		digits = mant[:di] + mant[di+1:] // strip the dot
+	}
+	K := exp - len(digits) + 1 // value = digits * 10^K
+	absExp := exp
+	if absExp < 0 {
+		absExp = -absExp
+	}
+	var out string
+	switch {
+	case K >= 0 && absExp < len(digits)+7:
+		// plain integer
+		out = digits + strings.Repeat("0", K)
+	case K < 0 && (K > -7 || absExp < 4):
+		// fixed notation
+		offset := len(digits) + K
+		if offset <= 0 {
+			out = "0." + strings.Repeat("0", -offset) + digits
+		} else {
+			out = digits[:offset] + "." + digits[offset:]
+		}
+	default:
+		// scientific: d[.ddd]e±exp, exponent with minimal digits
+		out = digits[:1]
+		if len(digits) > 1 {
+			out += "." + digits[1:]
+		}
+		out += "e"
+		if exp < 0 {
+			out += "-"
+		} else {
+			out += "+"
+		}
+		out += strconv.Itoa(absExp)
+	}
+	if neg {
+		return "-" + out
+	}
+	return out
 }
 
 // WriteMap writes a RESP3 map header; write 2*count more values after it.

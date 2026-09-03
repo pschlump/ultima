@@ -3,6 +3,7 @@ package differential
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -68,16 +69,19 @@ func startUltima(t *testing.T, requirepass string) string {
 type matcher int
 
 const (
-	mEq          matcher = iota // decoded values must be identical (errors: strings)
-	mTTL                        // both ints, > 0, differ by at most 1
-	mInfo                       // both bulk; compare the set of "# Section" headers
-	mHello                      // both maps/flat-arrays; compare server/mode/role keys
-	mAnyInt                     // both ints (values may differ, e.g. CLIENT ID)
-	mConfigPairs                // both maps/flat arrays; compare as unordered key sets + values per key
-	mScanAll                    // SCAN full-iteration: [cursor, keys] where key SETS are compared
-	mCount                      // COMMAND COUNT: both ints, both > 0
-	mCommandInfo                // COMMAND INFO: names/nullness per slot (7.2 returns 10-element entries; we return the classic 6)
-	mAnyArr                     // both non-empty arrays (bare COMMAND full table)
+	mEq           matcher = iota // decoded values must be identical (errors: strings)
+	mTTL                         // both ints, > 0, differ by at most 1
+	mInfo                        // both bulk; compare the set of "# Section" headers
+	mHello                       // both maps/flat-arrays; compare server/mode/role keys
+	mAnyInt                      // both ints (values may differ, e.g. CLIENT ID)
+	mConfigPairs                 // both maps/flat arrays; compare as unordered key sets + values per key
+	mScanAll                     // SCAN full-iteration: [cursor, keys] where key SETS are compared
+	mCount                       // COMMAND COUNT: both ints, both > 0
+	mCommandInfo                 // COMMAND INFO: names/nullness per slot (7.2 returns 10-element entries; we return the classic 6)
+	mAnyArr                      // both non-empty arrays (bare COMMAND full table)
+	mSetCmp                      // aggregate (array/set) compared as an unordered set of elements
+	mPairCmp                     // flat or nested field/value pairs compared as an unordered map
+	mScanAllPairs                // HSCAN/ZSCAN full-iteration: [cursor, pairs] with pair SETS compared
 )
 
 type step struct {
@@ -138,6 +142,14 @@ func runScripts(t *testing.T, scripts []script, requirepass string) {
 					if err := scanLoopCompare(u, r); err != nil {
 						failed++
 						t.Errorf("step %d SCANLOOP: %v", i, err)
+					}
+					continue
+				case "HSCANLOOP", "SSCANLOOP", "ZSCANLOOP": // full incremental collection scan
+					total++
+					cmdName := st.args[0][:len(st.args[0])-len("LOOP")]
+					if err := collScanCompare(u, r, cmdName, st.args[1:]); err != nil {
+						failed++
+						t.Errorf("step %d %s: %v", i, st.args[0], err)
 					}
 					continue
 				}
@@ -236,6 +248,50 @@ func compare(m matcher, u, r Value) error {
 		if u.Kind != '*' || r.Kind != '*' || len(u.Vals) == 0 || len(r.Vals) == 0 {
 			return fmt.Errorf("want both non-empty arrays, got %c[%d] and %c[%d]",
 				u.Kind, len(u.Vals), r.Kind, len(r.Vals))
+		}
+		return nil
+	case mSetCmp:
+		us, rs := elemMultiset(u), elemMultiset(r)
+		return cmpStringSets(us, rs, "SMEMBERS-like")
+	case mPairCmp:
+		up, err1 := canonPairs(u)
+		rp, err2 := canonPairs(r)
+		if err1 != nil || err2 != nil {
+			return fmt.Errorf("pair decode: %v / %v", err1, err2)
+		}
+		if len(up) != len(rp) {
+			return fmt.Errorf("pair counts differ: %v vs %v", sortedKeys(up), sortedKeys(rp))
+		}
+		for k, uv := range up {
+			rv, ok := rp[k]
+			if !ok {
+				return fmt.Errorf("pair %q missing on redis side", k)
+			}
+			if uv != rv {
+				return fmt.Errorf("pair %q: %q vs %q", k, uv, rv)
+			}
+		}
+		return nil
+	case mScanAllPairs:
+		// [cursor, flatpairs]: cursor must be "0" on both; pairs unordered
+		if len(u.Vals) != 2 || len(r.Vals) != 2 {
+			return fmt.Errorf("malformed *SCAN replies")
+		}
+		if u.Vals[0].Str != "0" || r.Vals[0].Str != "0" {
+			return fmt.Errorf("SCAN cursors %q vs %q", u.Vals[0].Str, r.Vals[0].Str)
+		}
+		up, err1 := canonPairs(u.Vals[1])
+		rp, err2 := canonPairs(r.Vals[1])
+		if err1 != nil || err2 != nil {
+			return fmt.Errorf("pair decode: %v / %v", err1, err2)
+		}
+		if len(up) != len(rp) {
+			return fmt.Errorf("pair counts differ: %v vs %v", sortedKeys(up), sortedKeys(rp))
+		}
+		for k, uv := range up {
+			if rv, ok := rp[k]; !ok || rv != uv {
+				return fmt.Errorf("pair %q: %q vs %q", k, uv, rp[k])
+			}
 		}
 		return nil
 	case mCommandInfo:
@@ -390,4 +446,121 @@ func keySet(v Value) map[string]bool {
 		m[e.Str] = true
 	}
 	return m
+}
+
+// canon renders a scalar (or nested) Value canonically for unordered
+// comparison.
+func canon(v Value) string {
+	switch {
+	case v.Null:
+		return "_"
+	case v.Kind == ',':
+		return "dbl:" + v.Dbl
+	case v.Kind == ':':
+		return strconv.FormatInt(v.Int, 10)
+	case v.Kind == '*' || v.Kind == '%' || v.Kind == '~' || v.Kind == '>':
+		parts := make([]string, len(v.Vals))
+		for i, e := range v.Vals {
+			parts[i] = canon(e)
+		}
+		return "[" + strings.Join(parts, ",") + "]"
+	default:
+		return fmt.Sprintf("%c:%q", v.Kind, v.Str)
+	}
+}
+
+// elemMultiset renders each element of an aggregate reply canonically
+// into a multiset.
+func elemMultiset(v Value) map[string]int {
+	m := map[string]int{}
+	for _, e := range v.Vals {
+		m[canon(e)]++
+	}
+	return m
+}
+
+func cmpStringSets(u, r map[string]int, what string) error {
+	if len(u) != len(r) {
+		return fmt.Errorf("%s: size %d vs %d", what, len(u), len(r))
+	}
+	for k, n := range r {
+		if u[k] != n {
+			return fmt.Errorf("%s: element %s count %d vs %d", what, k, u[k], n)
+		}
+	}
+	return nil
+}
+
+// canonPairs normalizes a pairs reply into an unordered map: RESP3 maps
+// and flat RESP2 arrays pair consecutive elements; an array whose
+// elements are all 2-element arrays is pairs-of-pairs (RESP3 WITHVALUES/
+// WITHSCORES forms).
+func canonPairs(v Value) (map[string]string, error) {
+	if v.Kind != '%' && v.Kind != '*' && v.Kind != '~' {
+		return nil, fmt.Errorf("not an aggregate: %c", v.Kind)
+	}
+	m := map[string]string{}
+	nested := len(v.Vals) > 0
+	for _, e := range v.Vals {
+		if e.Kind != '*' || len(e.Vals) != 2 {
+			nested = false
+			break
+		}
+	}
+	if nested {
+		for _, e := range v.Vals {
+			m[canon(e.Vals[0])] = canon(e.Vals[1])
+		}
+		return m, nil
+	}
+	if len(v.Vals)%2 != 0 {
+		return nil, fmt.Errorf("odd element count %d", len(v.Vals))
+	}
+	for i := 0; i+1 < len(v.Vals); i += 2 {
+		m[canon(v.Vals[i])] = canon(v.Vals[i+1])
+	}
+	return m, nil
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// collScanCompare fully iterates HSCAN/SSCAN/ZSCAN on both servers with
+// COUNT 10 and compares the accumulated element (or pair) sets.
+func collScanCompare(u, r *rconn, cmdName string, args []string) error {
+	walk := func(c *rconn) (map[string]int, error) {
+		got := map[string]int{}
+		cursor := "0"
+		for range 10000 {
+			call := append([]string{cmdName}, args...)
+			call = append(call, cursor, "COUNT", "10")
+			v := c.do(call...)
+			if len(v.Vals) != 2 {
+				return nil, fmt.Errorf("malformed %s reply: %v", cmdName, v)
+			}
+			for _, e := range v.Vals[1].Vals {
+				got[canon(e)]++
+			}
+			cursor = v.Vals[0].Str
+			if cursor == "0" {
+				return got, nil
+			}
+		}
+		return nil, fmt.Errorf("%s did not terminate", cmdName)
+	}
+	us, err := walk(u)
+	if err != nil {
+		return err
+	}
+	rs, err := walk(r)
+	if err != nil {
+		return err
+	}
+	return cmpStringSets(us, rs, cmdName)
 }
