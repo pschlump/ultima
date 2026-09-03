@@ -2,7 +2,7 @@
 
 LDFLAGS := $(shell sh bin/gen-build-stamp.sh)
 
-.PHONY: gen_proto build test lint tidy clean run
+.PHONY: gen_proto build test lint tidy clean run bench
 
 gen_proto:
 	sh bin/gen.sh
@@ -24,3 +24,6 @@ clean:
 
 run: build
 	./ultima-server --cfg ultima.cfg.json
+
+bench:
+	sh bin/bench.sh

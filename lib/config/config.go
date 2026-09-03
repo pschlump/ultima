@@ -23,12 +23,14 @@ type Config struct {
 	Debug  DebugConfig  `json:"debug"`
 }
 
-// ServerConfig holds the three listener addresses and M0 server knobs.
+// ServerConfig holds the three listener addresses and server knobs.
 type ServerConfig struct {
 	RespAddr    string `json:"resp_addr" default:":6379"`
 	GrpcAddr    string `json:"grpc_addr" default:":6380"`
 	HTTPAddr    string `json:"http_addr" default:":6381"`
-	ShardCount  int    `json:"shard_count" default:"0"` // 0 = runtime.NumCPU()
+	ShardCount  int    `json:"shard_count" default:"0"`   // 0 = 4×GOMAXPROCS, power of two
+	MaxDBs      int    `json:"max_dbs" default:"16"`      // logical DBs for SELECT (§13.3)
+	MaxMemoryMB int    `json:"max_memory_mb" default:"0"` // 0 = unlimited (CONFIG maxmemory)
 	LogLevel    string `json:"log_level" default:"info"`
 	RequirePass string `json:"requirepass" default:""`
 	RespTLS     bool   `json:"resp_tls_enabled" default:"false"`

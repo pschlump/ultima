@@ -1,0 +1,45 @@
+{
+  "comment": "Ultima command coverage manifest (design doc §7). status: implemented | partial | planned. since: milestone. Enforced by TestManifestMatchesTable.",
+  "milestone": "M1",
+  "commands": [
+    { "name": "ping", "group": "connection", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "echo", "group": "connection", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "hello", "group": "connection", "status": "implemented", "since": "M1", "notes": "RESP2/RESP3 negotiation, AUTH and SETNAME clauses" },
+    { "name": "auth", "group": "connection", "status": "implemented", "since": "M1", "notes": "requirepass only; ACL users are a later milestone" },
+    { "name": "select", "group": "connection", "status": "implemented", "since": "M1", "notes": "0..max_dbs-1, default 16 DBs" },
+    { "name": "quit", "group": "connection", "status": "implemented", "since": "M1", "notes": "ignores arguments, like Redis" },
+
+    { "name": "set", "group": "string", "status": "implemented", "since": "M1", "notes": "NX/XX/GET/EX/PX/EXAT/PXAT/KEEPTTL" },
+    { "name": "get", "group": "string", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "getset", "group": "string", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "getdel", "group": "string", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "getex", "group": "string", "status": "implemented", "since": "M1", "notes": "EX/PX/EXAT/PXAT/PERSIST" },
+    { "name": "incr", "group": "string", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "decr", "group": "string", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "incrby", "group": "string", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "decrby", "group": "string", "status": "implemented", "since": "M1", "notes": "LLONG_MIN operand -> 'ERR decrement would overflow'" },
+    { "name": "append", "group": "string", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "strlen", "group": "string", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "mget", "group": "string", "status": "implemented", "since": "M1", "notes": "cross-shard fan-out, §4.2 fast path" },
+    { "name": "mset", "group": "string", "status": "implemented", "since": "M1", "notes": "cross-shard fan-out, per-shard atomicity" },
+    { "name": "msetnx", "group": "string", "status": "implemented", "since": "M1", "notes": "two-phase check-then-set fan-out" },
+
+    { "name": "del", "group": "keyspace", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "exists", "group": "keyspace", "status": "implemented", "since": "M1", "notes": "duplicates counted, as Redis >= 3.0.3" },
+    { "name": "expire", "group": "keyspace", "status": "implemented", "since": "M1", "notes": "NX/XX/GT/LT conditions" },
+    { "name": "pexpire", "group": "keyspace", "status": "implemented", "since": "M1", "notes": "NX/XX/GT/LT conditions" },
+    { "name": "ttl", "group": "keyspace", "status": "implemented", "since": "M1", "notes": "rounds to nearest second like Redis" },
+    { "name": "pttl", "group": "keyspace", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "persist", "group": "keyspace", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "type", "group": "keyspace", "status": "implemented", "since": "M1", "notes": "string/none only in M1" },
+    { "name": "scan", "group": "keyspace", "status": "implemented", "since": "M1", "notes": "pluto rehash-safe cursor; MATCH glob; COUNT hint" },
+
+    { "name": "info", "group": "server", "status": "implemented", "since": "M1", "notes": "server/clients/memory/stats/keyspace sections" },
+    { "name": "dbsize", "group": "server", "status": "implemented", "since": "M1", "notes": "per-shard sweep + stripe sums" },
+    { "name": "flushdb", "group": "server", "status": "implemented", "since": "M1", "notes": "SYNC/ASYNC accepted; always synchronous in M1" },
+    { "name": "flushall", "group": "server", "status": "implemented", "since": "M1", "notes": "" },
+    { "name": "config", "group": "server", "status": "partial", "since": "M1", "notes": "GET/SET subset: appendonly, databases, maxmemory, requirepass, save" },
+    { "name": "client", "group": "server", "status": "partial", "since": "M1", "notes": "SETNAME/GETNAME/ID/SETINFO subset" },
+    { "name": "command", "group": "server", "status": "partial", "since": "M1", "notes": "COUNT and INFO (classic 6-element form) only" }
+  ]
+}

@@ -1,5 +1,6 @@
-// Package tests holds the M0 integration test: it boots all three listener
-// surfaces on ephemeral ports and verifies PING on each.
+// Package tests holds the integration test: it boots all three listener
+// surfaces on ephemeral ports and verifies PING on each, plus a P0
+// command round-trip over the RESP surface (M1).
 //
 // Port approach: addresses come from the config (server.resp_addr /
 // grpc_addr / http_addr), so tests set them to "127.0.0.1:0" and read the
@@ -17,6 +18,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,10 +30,12 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	ultimav1 "github.com/pschlump/ultima/gen/go/ultima/v1"
+	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/config"
 	"github.com/pschlump/ultima/lib/grpcsrv"
 	"github.com/pschlump/ultima/lib/handler"
-	"github.com/pschlump/ultima/lib/respsrv"
+	"github.com/pschlump/ultima/lib/resp"
+	"github.com/pschlump/ultima/lib/shard"
 )
 
 func testLogger() *slog.Logger {
@@ -65,9 +70,33 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 	cfg := testConfig(t)
 	logger := testLogger()
 
-	// --- RESP surface ---
+	// --- RESP surface: shard engine + command engine + resp fork ---
 	respLis := listen(t, cfg.Server.RespAddr)
-	respSrv := respsrv.New(logger)
+	shards := shard.NewEngine(cfg.Server.ShardCount, cfg.Server.MaxDBs)
+	t.Cleanup(shards.Close)
+	eng := commands.NewEngine(shards, "test", 0)
+	respSrv := resp.NewServer(cfg.Server.RespAddr,
+		func(conn resp.Conn, cmd resp.Command) {
+			if len(cmd.Args) == 0 {
+				return
+			}
+			cs, _ := conn.Context().(*commands.ConnState)
+			if cs == nil {
+				cs = eng.NewConnState(conn.RemoteAddr())
+				conn.SetContext(cs)
+			}
+			v := eng.Execute(cs, cmd.Args)
+			if cs.Proto != conn.ProtocolVersion() {
+				conn.SetProtocolVersion(cs.Proto)
+			}
+			conn.WriteValue(v)
+			if cs.Quit {
+				_ = conn.Close()
+			}
+		},
+		func(resp.Conn) bool { return true },
+		nil,
+	)
 	go func() { _ = respSrv.Serve(respLis) }()
 	t.Cleanup(func() { _ = respSrv.Close() })
 
@@ -76,15 +105,70 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, err := io.WriteString(conn, "*1\r\n$4\r\nPING\r\n"); err != nil {
-		t.Fatal(err)
+	rdr := bufio.NewReader(conn)
+
+	// readReply consumes exactly one RESP2/RESP3 reply and returns its
+	// first line (for prefix assertions).
+	readReply := func() string {
+		t.Helper()
+		var readVal func() string
+		readVal = func() string {
+			line, err := rdr.ReadString('\n')
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch line[0] {
+			case '$', '=': // bulk / verbatim: payload follows
+				n, err := strconv.Atoi(strings.TrimRight(line[1:], "\r\n"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if n >= 0 {
+					if _, err := rdr.Discard(n + 2); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case '*', '%', '~', '>': // aggregate: count elements follow
+				n, err := strconv.Atoi(strings.TrimRight(line[1:], "\r\n"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if line[0] == '%' {
+					n *= 2
+				}
+				for i := 0; i < n; i++ {
+					readVal()
+				}
+			}
+			return line
+		}
+		return readVal()
 	}
-	reply, err := bufio.NewReader(conn).ReadString('\n')
-	if err != nil {
-		t.Fatal(err)
+
+	sendRecv := func(req, wantPrefix string) string {
+		t.Helper()
+		if _, err := io.WriteString(conn, req); err != nil {
+			t.Fatal(err)
+		}
+		reply := readReply()
+		if !strings.HasPrefix(reply, wantPrefix) {
+			t.Errorf("req %q reply = %q, want prefix %q", req, reply, wantPrefix)
+		}
+		return reply
 	}
-	if reply != "+PONG\r\n" {
-		t.Errorf("RESP PING reply = %q, want +PONG\\r\\n", reply)
+
+	// multibulk PING (what redis-cli sends) and inline/telnet PING
+	sendRecv("*1\r\n$4\r\nPING\r\n", "+PONG\r\n")
+	sendRecv("PING\r\n", "+PONG\r\n")
+	// P0 round-trip: SET with PX, GET, INCR, TYPE
+	sendRecv("*5\r\n$3\r\nSET\r\n$2\r\nit\r\n$2\r\n42\r\n$2\r\nPX\r\n$5\r\n60000\r\n", "+OK\r\n")
+	sendRecv("*2\r\n$4\r\nINCR\r\n$2\r\nit\r\n", ":43\r\n")
+	sendRecv("*2\r\n$3\r\nGET\r\n$2\r\nit\r\n", "$2\r\n")
+	sendRecv("*2\r\n$4\r\nPTTL\r\n$2\r\nit\r\n", ":")
+	sendRecv("*2\r\n$4\r\nTYPE\r\n$2\r\nit\r\n", "+string\r\n")
+	// RESP3 negotiation
+	if reply := sendRecv("*2\r\n$5\r\nHELLO\r\n$1\r\n3\r\n", "%"); !strings.Contains(reply, "7") {
+		t.Errorf("HELLO 3 map header = %q", reply)
 	}
 
 	// --- gRPC surface ---
