@@ -1,0 +1,11 @@
+{
+  "server": {
+    "resp_addr": ":6379",
+    "grpc_addr": ":6380",
+    "http_addr": ":6381",
+    "shard_count": 0,
+    "log_level": "info",
+    "requirepass": "$ENV$ultima_password"
+  },
+  "debug": { "enabled": { "dump.commands": false } }
+}
