@@ -129,10 +129,16 @@ a power of two; configurable). Each shard owns:
 - its own expiry min-heap (`pluto/heap_ts`),
 - its own stats counters.
 
-Routing: `shard = crc64(key) & (N-1)` (pluto `crc` package). All commands that
-touch a single key execute **inside the owning shard's goroutine**, which
-serializes per-key access with **zero locks on the hot path** — the same safety
-Redis gets from its single thread, but N-way parallel.
+Routing: `shard = (crc64(key) * 0x9E3779B97F4A7C15) >> (64 - log2 N)` —
+Fibonacci hashing over the pluto `crc` package's CRC-64, identical to
+sharded_hash_ts's internal stripe routing, so table stripe i is exactly
+shard i. The multiply is required: the raw low bits of the MSB-first CRC
+are content-independent for short keys, and the raw high bits cluster for
+structured keys ("key-0001"…), both of which would collapse the keyspace
+onto a few shards (fixed in M3; probe in `note/crc-probe`). All commands
+that touch a single key execute **inside the owning shard's goroutine**,
+which serializes per-key access with **zero locks on the hot path** — the
+same safety Redis gets from its single thread, but N-way parallel.
 
 ```
 conn goroutine ──parse──► route by key ──► shard queue ──► shard goroutine ──► reply
@@ -388,7 +394,7 @@ generated docs page, and enforced by tests. Phased:
 |----------------------------------------------------|-----------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **P0 — core KV**                                   | connection, server (subset), string, keyspace, generic                                                    | PING, HELLO, AUTH, SELECT, SET/GET/DEL/EXISTS/EXPIRE/TTL/TYPE/SCAN/INCR/APPEND/GETSET/MGET/MSET, INFO, DBSIZE, FLUSHDB, CONFIG GET/SET (subset), CLIENT (subset) |
 | **P1 — collections**                               | hash, list, set, sorted-set                                                                               | H*, L*, S*, Z* (pluto zset range/rank + quicklist, §5.3 #1/#10)                                                                                                  |
-| **P2 — transactions & pub/sub**                    | MULTI/EXEC/WATCH, SUBSCRIBE/PUBLISH/PSUBSCRIBE/SSUBSCRIBE, keyspace notifications                         |                                                                                                                                                                  |
+| **P2 — transactions & pub/sub**                    | MULTI/EXEC/DISCARD/WATCH/UNWATCH/RESET, SUBSCRIBE/UNSUBSCRIBE/PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH/PUBSUB, blocking list/zset ops (BLPOP/BRPOP/BLMPOP/BLMOVE/BRPOPLPUSH, BZPOPMIN/BZPOPMAX/BZMPOP). SSUBSCRIBE/SPUBLISH (sharded pub/sub) deferred to M8 — it exists for cluster slot routing and v1 is single-node (§15 D8); keyspace notifications (notify-keyspace-events) deferred to M5, where the expiry/eviction event sources land |                                       |
 | **P3 — streams, scripting-lite, persistence cmds** | X* (pluto stream structure, §5.3 #2), SAVE/BGSAVE/BGREWRITEAOF/LASTSAVE, EVAL via `gopher-lua` (decided, §16) |                                                                                                                                                              |
 | **P4 — parity tail**                               | BITOP/BITFIELD, GEO*, PF*, OBJECT, MEMORY, DEBUG (subset), hash-field TTLs (HEXPIRE…), ACL (subset), SORT |                                                                                                                                                                  |
 | **P5 — superset**                                  | see §12                                                                                                   |                                                                                                                                                                  |
@@ -831,12 +837,12 @@ Key dependencies: `go-chi/chi/v5`, `go-playground/validator/v10`,
 | **M0** | Skeleton: config, logging, three listeners (stub), Makefile, lint, CI-local                     | `make build test lint` green; PING on all three surfaces                                            |
 | **M1** | Shard engine + RESP front-end + P0 commands; redcon fork w/ RESP3                               | redis-cli fully works for P0; differential harness green on P0; first benchmark report vs Redis     |
 | **M2** | P1 collections (pluto zset range/rank + quicklist, §5.3 #1/#10)                                 | differential green on H/L/S/Z                                                                       |
-| **M3** | P2 transactions + pub/sub + blocking ops                                                        | MULTI/EXEC + WATCH stress green; redis-benchmark pub/sub                                            |
+| **M3** | P2 transactions + classic pub/sub + blocking list/zset ops (SSUBSCRIBE → M8; keyspace notifications → M5)   | MULTI/EXEC + WATCH stress green; redis-benchmark pub/sub                                            |
 | **M4** | gRPC + WS front-ends; proto IDL stable                                                          | go + ts clients round-trip; parity with RESP replies                                                |
-| **M5** | Expiry hardening, eviction, persistence (snapshot + AOF)                                        | crash-recovery tests; maxmemory soak                                                                |
+| **M5** | Expiry hardening, eviction, persistence (snapshot + AOF), keyspace notifications (notify-keyspace-events; deferred from P2) | crash-recovery tests; maxmemory soak                                                |
 | **M6** | Auth system (§9) + HTTP API + web UI v1                                                         | login/refresh/TOTP green; multi-admin accounts; WS recovery tests pass; dashboard + console live    |
 | **M7** | Client libraries (§11) + example applications                                                   | Go + TS + JS packages build; CLIs run on the Go client; leaderboard + chat examples run end-to-end  |
-| **M8** | P3/P4 parity tail (streams, Lua-lite, bitfield, geo, PF\*)                                      | differential green on covered tail                                                                  |
+| **M8** | P3/P4 parity tail (streams, Lua-lite, bitfield, geo, PF\*), sharded pub/sub SSUBSCRIBE/SPUBLISH (deferred from P2) | differential green on covered tail                                                                 |
 | **M9** | Superset features (§12) + performance campaign                                                  | ≥4× Redis on target workload; final report                                                          |
 
 ---

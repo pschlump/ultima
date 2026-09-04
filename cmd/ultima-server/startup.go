@@ -16,6 +16,7 @@ import (
 	"github.com/pschlump/ultima/lib/config"
 	"github.com/pschlump/ultima/lib/grpcsrv"
 	"github.com/pschlump/ultima/lib/resp"
+	"github.com/pschlump/ultima/lib/respserver"
 	"github.com/pschlump/ultima/lib/shard"
 )
 
@@ -30,39 +31,6 @@ type servers struct {
 	httpSrv *http.Server
 	httpLis net.Listener
 	shards  *shard.Engine
-}
-
-// newRESPServer wires the vendored redcon fork (lib/resp) to the command
-// engine: one handler per command, one ConnState per connection.
-func newRESPServer(cfg *config.Config, eng *commands.Engine) *resp.Server {
-	handler := func(conn resp.Conn, cmd resp.Command) {
-		if len(cmd.Args) == 0 {
-			return
-		}
-		cs, _ := conn.Context().(*commands.ConnState)
-		if cs == nil {
-			cs = eng.NewConnState(conn.RemoteAddr())
-			conn.SetContext(cs)
-		}
-		v := eng.Execute(cs, cmd.Args)
-		if cs.Proto != conn.ProtocolVersion() {
-			conn.SetProtocolVersion(cs.Proto)
-		}
-		conn.WriteValue(v)
-		if cs.Quit {
-			_ = conn.Close()
-		}
-	}
-	accept := func(conn resp.Conn) bool {
-		conn.SetContext(eng.NewConnState(conn.RemoteAddr()))
-		return true
-	}
-	closed := func(conn resp.Conn, _ error) {
-		if cs, ok := conn.Context().(*commands.ConnState); ok {
-			eng.CloseConn(cs)
-		}
-	}
-	return resp.NewServer(cfg.Server.RespAddr, handler, accept, closed)
 }
 
 func respPortOf(lis net.Listener) int {
@@ -96,7 +64,7 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 	eng.SetRequirePass(cfg.Server.RequirePass)
 	eng.SetMaxMemory(int64(cfg.Server.MaxMemoryMB) << 20)
 
-	s.respSrv = newRESPServer(cfg, eng)
+	s.respSrv = respserver.New(cfg.Server.RespAddr, eng)
 	go func() {
 		if err := s.respSrv.Serve(s.respLis); err != nil {
 			logger.Error("resp listener died", "err", err)

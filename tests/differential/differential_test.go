@@ -25,6 +25,16 @@ func TestDifferentialP1(t *testing.T) {
 	runScripts(t, p1Scripts, "")
 }
 
+// TestDifferentialM3 runs the M3 script table (transactions; pub/sub and
+// blocking land in later parts) against Ultima and a real redis-server and
+// diffs every reply, including error strings.
+func TestDifferentialM3(t *testing.T) {
+	if testing.Short() || os.Getenv("DIFFERENTIAL") == "0" {
+		t.Skip("differential harness disabled (-short or DIFFERENTIAL=0)")
+	}
+	runScripts(t, m3Scripts, "")
+}
+
 // TestDifferentialAuth runs the requirepass script table against a
 // password-protected pair of servers.
 func TestDifferentialAuth(t *testing.T) {

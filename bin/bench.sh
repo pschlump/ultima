@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # bench.sh — M1 benchmark sweep: Ultima vs local redis-server, same
 # machine (design doc §14.2 make bench, §14.3 #5). Writes the report to
-# docs/benchmarks/M1-<date>.md.
+# docs/benchmarks/M1-<date>.md, then chains into bin/bench-pubsub.sh for
+# the M3 pub/sub benchmark (skip with BENCH_PUBSUB=0).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -116,3 +117,13 @@ mkdir -p docs/benchmarks
 
 echo "wrote $REPORT"
 cat "$REPORT"
+
+# M3 pub/sub section (design doc §14.4 "redis-benchmark pub/sub"). Skip
+# with BENCH_PUBSUB=0. Servers from the M1 sweep are torn down first so
+# the pub/sub run gets an idle machine and the same ports.
+if [[ "${BENCH_PUBSUB:-1}" != "0" ]]; then
+	cleanup
+	trap - EXIT
+	echo "--- M3 pub/sub section ---"
+	sh bin/bench-pubsub.sh
+fi

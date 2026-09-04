@@ -41,6 +41,14 @@ func init() {
 	def("auth", -2, []string{"fast"}, 0, 0, 0, "connection", cmdAuth)
 	def("select", 2, []string{"fast"}, 0, 0, 0, "connection", cmdSelect)
 	def("quit", -1, []string{"fast"}, 0, 0, 0, "connection", cmdQuit)
+	def("reset", 1, []string{"fast"}, 0, 0, 0, "connection", cmdReset)
+
+	// transaction
+	def("multi", 1, []string{"fast"}, 0, 0, 0, "transaction", cmdMulti)
+	def("exec", 1, []string{"write"}, 0, 0, 0, "transaction", cmdExec)
+	def("discard", 1, []string{"fast"}, 0, 0, 0, "transaction", cmdDiscard)
+	def("unwatch", 1, []string{"fast"}, 0, 0, 0, "transaction", cmdUnwatch)
+	def("watch", -2, []string{"fast"}, 1, -1, 1, "transaction", cmdWatch)
 
 	// string
 	def("set", -3, []string{"write", "denyoom"}, 1, 1, 1, "string", cmdSet)
@@ -104,6 +112,11 @@ func init() {
 	def("rpoplpush", 3, []string{"write", "denyoom"}, 1, 2, 1, "list", cmdRPopLPush)
 	def("lpos", -3, []string{"readonly"}, 1, 1, 1, "list", cmdLPos)
 	def("lmove", 5, []string{"write", "denyoom"}, 1, 2, 1, "list", cmdLMove)
+	def("blpop", -3, []string{"write", "blocking"}, 1, -2, 1, "list", cmdBLPop)
+	def("brpop", -3, []string{"write", "blocking"}, 1, -2, 1, "list", cmdBRPop)
+	def("blmove", 6, []string{"write", "denyoom", "blocking"}, 1, 2, 1, "list", cmdBLMove)
+	def("blmpop", -5, []string{"write", "blocking"}, 0, 0, 0, "list", cmdBLMPop)
+	def("brpoplpush", 4, []string{"write", "denyoom", "blocking"}, 1, 2, 1, "list", cmdBRPopLPush)
 
 	// set
 	def("sadd", -3, []string{"write", "denyoom", "fast"}, 1, 1, 1, "set", cmdSAdd)
@@ -145,6 +158,9 @@ func init() {
 	def("zrem", -3, []string{"write", "fast"}, 1, 1, 1, "sorted_set", cmdZRem)
 	def("zpopmin", -2, []string{"write", "fast"}, 1, 1, 1, "sorted_set", cmdZPopMin)
 	def("zpopmax", -2, []string{"write", "fast"}, 1, 1, 1, "sorted_set", cmdZPopMax)
+	def("bzpopmin", -3, []string{"write", "blocking"}, 1, -2, 1, "sorted_set", cmdBZPopMin)
+	def("bzpopmax", -3, []string{"write", "blocking"}, 1, -2, 1, "sorted_set", cmdBZPopMax)
+	def("bzmpop", -5, []string{"write", "blocking"}, 0, 0, 0, "sorted_set", cmdBZMPop)
 	def("zrandmember", -2, []string{"readonly", "random"}, 1, 1, 1, "sorted_set", cmdZRandMember)
 	def("zdiff", -3, []string{"readonly"}, 0, 0, 0, "sorted_set", cmdZDiff)
 	def("zinter", -3, []string{"readonly"}, 0, 0, 0, "sorted_set", cmdZInter)
@@ -152,6 +168,14 @@ func init() {
 	def("zinterstore", -4, []string{"write", "denyoom"}, 0, 0, 0, "sorted_set", cmdZInterStore)
 	def("zunionstore", -4, []string{"write", "denyoom"}, 0, 0, 0, "sorted_set", cmdZUnionStore)
 	def("zscan", -3, []string{"readonly"}, 0, 0, 0, "sorted_set", cmdZScan)
+
+	// pubsub
+	def("subscribe", -2, []string{"fast"}, 0, 0, 0, "pubsub", cmdSubscribe)
+	def("psubscribe", -2, []string{"fast"}, 0, 0, 0, "pubsub", cmdPSubscribe)
+	def("unsubscribe", -1, []string{"fast"}, 0, 0, 0, "pubsub", cmdUnsubscribe)
+	def("punsubscribe", -1, []string{"fast"}, 0, 0, 0, "pubsub", cmdPUnsubscribe)
+	def("publish", 3, []string{"fast"}, 0, 0, 0, "pubsub", cmdPublish)
+	def("pubsub", -2, []string{"random"}, 0, 0, 0, "pubsub", cmdPubSub)
 
 	// server
 	def("info", -1, []string{"readonly"}, 0, 0, 0, "server", cmdInfo)

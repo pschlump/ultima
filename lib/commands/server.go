@@ -13,9 +13,19 @@ import (
 
 // --- connection ---------------------------------------------------------------
 
-func cmdPing(_ *Engine, _ *ConnState, args [][]byte) resp.Value {
+func cmdPing(_ *Engine, cs *ConnState, args [][]byte) resp.Value {
 	if len(args) > 2 {
 		return errArity("ping")
+	}
+	// A RESP2 connection in subscribe mode gets ["pong", msg|""] instead
+	// of +PONG/$msg (Redis pingCommand; RESP3 connections are never in
+	// subscribe mode and reply normally).
+	if cs.Proto == 2 && cs.subCount() > 0 {
+		msg := ""
+		if len(args) == 2 {
+			msg = string(args[1])
+		}
+		return resp.Arr(resp.BlobStr("pong"), resp.BlobStr(msg))
 	}
 	if len(args) == 2 {
 		return resp.BlobString(args[1])
@@ -30,6 +40,24 @@ func cmdEcho(_ *Engine, _ *ConnState, args [][]byte) resp.Value {
 func cmdQuit(_ *Engine, cs *ConnState, _ [][]byte) resp.Value {
 	cs.Quit = true
 	return replyOK
+}
+
+// cmdReset resets the connection to its freshly-connected state (Redis
+// RESET, verified against 7.2.7): any transaction (queue, queue errors,
+// watches) is discarded, all pub/sub channel and pattern subscriptions
+// are dropped, the connection drops back to DB 0, loses its client name
+// and its authentication, and reverts to RESP2. Inside MULTI RESET is
+// executed immediately, discarding the transaction (it is part of the
+// queue-gate exclusion set).
+func cmdReset(e *Engine, cs *ConnState, _ [][]byte) resp.Value {
+	e.PubSub.UnsubscribeAll(cs.ID)
+	cs.subs, cs.psubs = nil, nil
+	cs.clearTx()
+	cs.DB = 0
+	cs.Name = ""
+	cs.Authed = false
+	cs.Proto = 2
+	return resp.Simple("RESET")
 }
 
 // authAttempt validates user/password against requirepass. With no
@@ -170,7 +198,7 @@ func cmdInfo(e *Engine, _ *ConnState, args [][]byte) resp.Value {
 	})
 	writeSection("clients", func() {
 		fmt.Fprintf(&sb, "connected_clients:%d\r\n", e.conns.Load())
-		sb.WriteString("blocked_clients:0\r\n")
+		fmt.Fprintf(&sb, "blocked_clients:%d\r\n", e.blockedClients.Load())
 	})
 	writeSection("memory", func() {
 		var ms runtime.MemStats
@@ -186,6 +214,8 @@ func cmdInfo(e *Engine, _ *ConnState, args [][]byte) resp.Value {
 		fmt.Fprintf(&sb, "total_connections_received:%d\r\n", e.totalConns.Load())
 		fmt.Fprintf(&sb, "total_commands_processed:%d\r\n", e.totalCmds.Load())
 		fmt.Fprintf(&sb, "expired_keys:%d\r\n", e.Shards.ExpiredKeys.Load())
+		fmt.Fprintf(&sb, "pubsub_channels:%d\r\n", e.PubSub.NumChannels())
+		fmt.Fprintf(&sb, "pubsub_patterns:%d\r\n", e.PubSub.NumPat())
 	})
 	writeSection("replication", func() {
 		sb.WriteString("role:master\r\n")

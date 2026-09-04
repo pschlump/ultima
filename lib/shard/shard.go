@@ -3,13 +3,16 @@
 //
 // The keyspace of every logical DB lives in one pluto
 // sharded_hash_ts.ShardedHash whose stripe count equals the shard count.
-// The element hash is arranged (via the multiplicative inverse of the
-// table's Fibonacci routing multiplier) so that stripe i holds exactly the
-// keys with crc64(key) & (N-1) == i — i.e. stripe i is shard i, so
-// per-shard views (StripeLen for DBSIZE, the stripe cursor inside Scan)
-// derive directly from the striping, and each shard goroutine is the only
-// writer touching its stripe (the table's internal stripe locks are
-// uncontended on the hot path).
+// The element hash is the bare crc64(key): the table routes an element to
+// stripe (hash*fibMult) >> (64-k) (Fibonacci hashing), which is exactly
+// Engine.ShardIndex — so stripe i holds exactly shard i's keys, per-shard
+// views (StripeLen for DBSIZE, the stripe cursor inside Scan) derive
+// directly from the striping, and each shard goroutine is the only writer
+// touching its stripe (the table's internal stripe locks are uncontended
+// on the hot path). The multiply is load-bearing: the raw low bits of the
+// MSB-first CRC are content-independent for short keys and the raw high
+// bits cluster for structured keys ("key-0001"…), while the Fibonacci
+// product's high bits avalanche both (probed in note/crc-probe).
 //
 // Every command that touches data runs inside the owning shard's owner
 // goroutine via Engine.Do / Engine.DoMulti: per-key serialization with no
@@ -90,26 +93,35 @@ func cmpExpItem(a, b expItem) int {
 	}
 }
 
-// fibMult is sharded_hash_ts's stripe-routing multiplier; fibInv is its
-// multiplicative inverse mod 2^64 (fibMult is odd, so the inverse exists).
-// sharded_hash_ts routes an element to stripe (hash*fibMult) >> (64-k);
-// feeding hash = fibInv * rotl64(crc, k) makes the stripe equal the low k
-// bits of the CRC — exactly shard routing (crc & (N-1)).
+// fibMult is sharded_hash_ts's stripe-routing multiplier (Fibonacci
+// hashing constant). Feeding the table hash = crc64(key) makes its stripe
+// routing (hash*fibMult) >> (64-k) identical to Engine.ShardIndex, so
+// stripe i IS shard i by construction.
 const fibMult = uint64(0x9E3779B97F4A7C15)
-
-var fibInv = modInverse64(fibMult)
-
-func modInverse64(a uint64) uint64 {
-	x := a
-	for range 6 {
-		x *= 2 - a*x
-	}
-	return x
-}
 
 // keyspace is one logical DB's table; FLUSHDB swaps the pointer.
 type keyspace struct {
 	tab *sharded_hash_ts.ShardedHash[item]
+}
+
+// tombKey identifies one deleted key's tombstone slot (WATCH dirty
+// tracking, §4.2). The (db, key) pair also indexes the blocking-command
+// waiter registry.
+type tombKey struct {
+	db  int
+	key string
+}
+
+// Waiter is one parked blocking command (BLPOP…BZMPOP, §4.2): the
+// connection goroutine parks selecting on Ch, and a push into the key
+// signals it. Ch has capacity 1 and WakeWaiter sends non-blocking, so a
+// waiter is signaled at most once per wake and stale signals are
+// harmless (waiters always recheck the keyspace after a wake). ID is the
+// client/connection ID, for debugging; FIFO slice order in the registry
+// is arrival order.
+type Waiter struct {
+	Ch chan struct{}
+	ID uint64
 }
 
 // db is one logical DB (SELECT 0..maxDBs-1, §13.3).
@@ -125,11 +137,22 @@ type Engine struct {
 	shard []*Shard
 	dbs   []*db
 
+	// txMu serializes PauseAll (one EXEC pauses the engine at a time);
+	// txTokCounter issues the pause tokens that let the pauser's tasks
+	// run while everyone else is stashed (§4.2 strict cross-shard path).
+	txMu         sync.Mutex
+	txTokCounter atomic.Uint64
+
 	// NowMs returns the current time in ms; replaceable in tests.
 	NowMs func() int64
 
 	// ExpiredKeys counts keys removed by expiry (passive or sweep).
 	ExpiredKeys atomic.Int64
+
+	// closing is closed at the start of Close, before the shard
+	// goroutines stop: parked blocking-command waiters select on it and
+	// reply null on shutdown instead of hanging (§4.2).
+	closing chan struct{}
 }
 
 // NewEngine builds an engine with shardCount shards (rounded up to a
@@ -141,10 +164,11 @@ func NewEngine(shardCount, maxDBs int) *Engine {
 		maxDBs = 16
 	}
 	e := &Engine{
-		n:     n,
-		k:     uint(bits.Len(uint(n)) - 1),
-		tab:   crc.MakeTable64(crc.ISO), // any stable CRC-64 is fine for routing
-		NowMs: func() int64 { return time.Now().UnixMilli() },
+		n:       n,
+		k:       uint(bits.Len(uint(n)) - 1),
+		tab:     crc.MakeTable64(crc.ISO), // any stable CRC-64 is fine for routing
+		NowMs:   func() int64 { return time.Now().UnixMilli() },
+		closing: make(chan struct{}),
 	}
 	e.dbs = make([]*db, maxDBs)
 	for i := range e.dbs {
@@ -181,20 +205,20 @@ func (e *Engine) ShardCount() int { return e.n }
 // MaxDBs returns the number of logical DBs.
 func (e *Engine) MaxDBs() int { return len(e.dbs) }
 
-// ShardIndex routes a key to its shard: crc64(key) & (N-1).
+// ShardIndex routes a key to its shard: (crc64(key)*fibMult) >> (64-k) —
+// the same Fibonacci-hash routing sharded_hash_ts applies internally, so
+// a key's table stripe always equals its shard (see the package doc).
 func (e *Engine) ShardIndex(key []byte) int {
-	return int(crc.Checksum64(key, e.tab) & uint64(e.n-1))
+	return int((crc.Checksum64(key, e.tab) * fibMult) >> (64 - e.k))
 }
 
 func (e *Engine) newKeyspace() *keyspace {
-	k := e.k
 	tab := e.tab
 	return &keyspace{
 		tab: sharded_hash_ts.NewShardedHashFunc(
 			func(a, b item) bool { return a.Key == b.Key },
 			func(a item) uint64 {
-				c := crc.Checksum64([]byte(a.Key), tab)
-				return fibInv * bits.RotateLeft64(c, int(k))
+				return crc.Checksum64([]byte(a.Key), tab)
 			},
 			e.n, 0, 0.75,
 		),
@@ -202,29 +226,90 @@ func (e *Engine) newKeyspace() *keyspace {
 }
 
 // Close stops every shard goroutine. No tasks may be submitted after Close.
+// closing is closed first so parked blocking-command waiters unblock and
+// reply null instead of waiting out their timeouts.
 func (e *Engine) Close() {
+	close(e.closing)
 	for _, s := range e.shard {
 		s.stop()
 	}
 }
 
-// task is one unit of work for a shard goroutine.
+// Closing returns the channel closed by Close before the shard goroutines
+// stop. Parked blocking waiters (BLPOP…BZMPOP) select on it and reply
+// null on shutdown; on that path they must NOT submit shard tasks (the
+// shards may already be gone), so they skip deregistration.
+func (e *Engine) Closing() <-chan struct{} { return e.closing }
+
+// task is one unit of work for a shard goroutine. tok carries the pause
+// token of the transaction the task belongs to (0 = normal task). A nil
+// fn is a park/unpark control message from PauseAll, not work: a park
+// message (tok != 0, done set) parks the shard after acking done, an
+// unpark message (tok == 0, done nil) releases it.
 type task struct {
 	fn   func(s *Shard)
 	done chan struct{}
+	tok  uint64
+}
+
+// PauseAll parks every shard goroutine so that only tasks carrying the
+// returned token execute, and returns a resume function that releases
+// them. This is §4.2's strict cross-shard path: a transaction's commands
+// run (via DoTok/DoMultiTok) with exclusive access to the whole keyspace
+// — the multi-shard equivalent of shard locks taken in shard-id order,
+// which is why the park messages go out in ascending shard-id order.
+//
+// A parked shard keeps serving tasks whose tok matches, and stashes all
+// others in a FIFO slice: their done channels are neither closed nor
+// dropped, their submitters simply block until resume. resume replays
+// each shard's stash in submission order (the shard drains it before
+// accepting new queue work), then releases the serialization mutex, so
+// resume is the point at which another PauseAll may begin. resume is
+// idempotent (safe to defer exactly once; further calls are no-ops).
+//
+// Deadlock safety rests on two invariants: shard tasks never submit work
+// to other shards (only connection goroutines call Do/DoMulti/DoTok), and
+// concurrent pauses serialize on txMu. PauseAll itself must therefore
+// never be called from inside a shard goroutine, and the pause holder
+// must submit its own work only via DoTok/DoMultiTok with tok.
+func (e *Engine) PauseAll() (tok uint64, resume func()) {
+	e.txMu.Lock()
+	tok = e.txTokCounter.Add(1)
+	for i := range e.shard {
+		ack := make(chan struct{})
+		e.shard[i].queue <- task{done: ack, tok: tok} // fn == nil: park
+		<-ack                                         // acked after all tasks queued ahead of the park have run
+	}
+	var once sync.Once
+	resume = func() {
+		once.Do(func() {
+			for i := range e.shard {
+				e.shard[i].queue <- task{} // fn == nil, tok == 0: unpark
+			}
+			e.txMu.Unlock()
+		})
+	}
+	return tok, resume
 }
 
 // Do runs fn inside the goroutine of the shard owning key, synchronously.
 // Callers may not submit on a closed engine.
 func (e *Engine) Do(_ int, key []byte, fn func(s *Shard)) {
-	e.DoShard(e.ShardIndex(key), fn)
+	e.DoTok(0, e.ShardIndex(key), fn)
 }
 
 // DoShard runs fn inside shard i's goroutine, synchronously.
 func (e *Engine) DoShard(i int, fn func(s *Shard)) {
+	e.DoTok(0, i, fn)
+}
+
+// DoTok is DoShard with an explicit pause token: tok == 0 is exactly
+// DoShard, while a token from PauseAll lets the task run inside a parked
+// shard. Callers with a nonzero tok must hold that pause.
+func (e *Engine) DoTok(tok uint64, i int, fn func(s *Shard)) {
 	s := e.shard[i]
 	done := make(chan struct{})
-	s.queue <- task{fn: fn, done: done}
+	s.queue <- task{fn: fn, done: done, tok: tok}
 	<-done
 }
 
@@ -232,7 +317,20 @@ func (e *Engine) DoShard(i int, fn func(s *Shard)) {
 // path): same-shard keys execute as one task; cross-shard runs as joined
 // per-shard tasks (per-shard atomicity only). idxs are the positions of
 // the shard's keys within the original keys slice.
+//
+// Concurrency: with keys on multiple shards, fn runs CONCURRENTLY on
+// several shard goroutines. Any shared local written by fn must be
+// synchronized (sync/atomic, mutex) — or slot-indexed by original key
+// position: every position appears in exactly one group's idxs exactly
+// once (duplicate keys hash to the same shard), so out[i] writes never
+// alias across goroutines.
 func (e *Engine) DoMulti(_ int, keys [][]byte, fn func(s *Shard, idxs []int)) {
+	e.DoMultiTok(0, keys, fn)
+}
+
+// DoMultiTok is DoMulti with an explicit pause token (see DoTok). The
+// concurrency caveat on DoMulti applies.
+func (e *Engine) DoMultiTok(tok uint64, keys [][]byte, fn func(s *Shard, idxs []int)) {
 	groups := make(map[int][]int, 4)
 	for i, k := range keys {
 		si := e.ShardIndex(k)
@@ -240,7 +338,7 @@ func (e *Engine) DoMulti(_ int, keys [][]byte, fn func(s *Shard, idxs []int)) {
 	}
 	if len(groups) == 1 {
 		for si, idxs := range groups {
-			e.DoShard(si, func(s *Shard) { fn(s, idxs) })
+			e.DoTok(tok, si, func(s *Shard) { fn(s, idxs) })
 		}
 		return
 	}
@@ -249,7 +347,7 @@ func (e *Engine) DoMulti(_ int, keys [][]byte, fn func(s *Shard, idxs []int)) {
 		wg.Add(1)
 		go func(si int, idxs []int) {
 			defer wg.Done()
-			e.DoShard(si, func(s *Shard) { fn(s, idxs) })
+			e.DoTok(tok, si, func(s *Shard) { fn(s, idxs) })
 		}(si, idxs)
 	}
 	wg.Wait()
@@ -257,8 +355,14 @@ func (e *Engine) DoMulti(_ int, keys [][]byte, fn func(s *Shard, idxs []int)) {
 
 // FlushDB drops every key in one logical DB by swapping in a fresh
 // keyspace (§13.3); in-flight sweeps discard their now-stale heap items.
+// After the swap every shard is synchronously notified to drop db's
+// tombstones and bump db's epoch, dirtying all watchers on db. Callers
+// must not be inside a shard goroutine (the fan-out submits shard tasks).
 func (e *Engine) FlushDB(db int) {
 	e.dbs[db].ks.Store(e.newKeyspace())
+	for i := range e.shard {
+		e.DoShard(i, func(s *Shard) { s.flushDB(db) })
+	}
 }
 
 // FlushAll drops every key in every logical DB.
@@ -339,10 +443,33 @@ type Shard struct {
 
 	exp *heap_ts.Heap[expItem]
 
+	// tomb remembers the version a deleted key had at delete time, +1, so
+	// a WATCH that sampled the key before its deletion sees a version
+	// mismatch (§4.2 WATCH dirty tracking). Store prunes a key's
+	// tombstone on recreate. Bounded by TombCap: on overflow the whole
+	// map is dropped and every DB's epoch bumps (conservative
+	// invalidation — false-positive aborts only, which WATCH clients
+	// must already tolerate).
+	tomb map[tombKey]uint64
+
+	// epoch holds one invalidation counter per logical DB; a bump
+	// dirties every watcher on this shard+DB (FLUSHDB/FLUSHALL,
+	// tombstone overflow).
+	epoch []uint64
+
+	// waiters holds, per (db, key), the FIFO of blocking commands parked
+	// on that key (§4.2: the wait never occupies a shard goroutine — the
+	// command registers interest and parks its connection goroutine;
+	// pushes into the key signal the first waiter). Shard-goroutine only.
+	waiters map[tombKey][]*Waiter
+
 	// SweepInterval is the active-expiry period; SweepMax bounds pops per
 	// periodic sweep (time-boxed active expiry, §5.2).
 	SweepInterval time.Duration
 	SweepMax      int
+
+	// TombCap bounds the tombstone map; shrunk by tests.
+	TombCap int
 }
 
 func newShard(eng *Engine, id int) *Shard {
@@ -353,8 +480,12 @@ func newShard(eng *Engine, id int) *Shard {
 		quit:          make(chan struct{}),
 		done:          make(chan struct{}),
 		exp:           heap_ts.NewHeapFunc(cmpExpItem),
+		tomb:          make(map[tombKey]uint64),
+		epoch:         make([]uint64, eng.MaxDBs()),
+		waiters:       make(map[tombKey][]*Waiter),
 		SweepInterval: 100 * time.Millisecond,
 		SweepMax:      1000,
+		TombCap:       65536,
 	}
 }
 
@@ -374,11 +505,55 @@ func (s *Shard) run() {
 	for {
 		select {
 		case t := <-s.queue:
-			t.fn(s)
-			close(t.done)
+			if t.fn == nil {
+				// Park control message (PauseAll, §4.2): ack, then
+				// serve only the pauser's tasks until unparked.
+				close(t.done)
+				s.park(t.tok)
+			} else {
+				t.fn(s)
+				close(t.done)
+			}
 		case <-tick.C:
 			s.sweep(s.eng.NowMs(), s.SweepMax)
 		case <-s.quit:
+			return
+		}
+	}
+}
+
+// park is the shard's paused inner loop (§4.2 strict cross-shard path):
+// tasks carrying tok execute immediately; every other task is stashed in
+// a FIFO slice with its done channel left open — its submitter blocks,
+// the work is neither dropped nor reordered. Expiry sweeps are skipped
+// for the duration. An unpark message (fn == nil, tok == 0) replays the
+// stash in submission order before the normal loop resumes, so no new
+// queue work can overtake stashed tasks. Shutdown during a pause drains
+// the stash the same way so blocked callers never hang. Call only from
+// run.
+func (s *Shard) park(tok uint64) {
+	var stash []task
+	drain := func() {
+		for _, st := range stash {
+			st.fn(s)
+			close(st.done)
+		}
+	}
+	for {
+		select {
+		case t := <-s.queue:
+			if t.fn == nil { // unpark
+				drain()
+				return
+			}
+			if t.tok == tok {
+				t.fn(s)
+				close(t.done)
+			} else {
+				stash = append(stash, t)
+			}
+		case <-s.quit:
+			drain()
 			return
 		}
 	}
@@ -391,7 +566,8 @@ func (s *Shard) tab(db int) *sharded_hash_ts.ShardedHash[item] {
 }
 
 // Lookup fetches the entry for key, applying passive expiry: a live
-// expired entry is deleted and reported missing (§5.2).
+// expired entry is deleted (and tombstoned for WATCH) and reported
+// missing (§5.2).
 func (s *Shard) Lookup(db int, key string) (*Entry, bool) {
 	it, found := s.tab(db).Search(item{Key: key})
 	if !found {
@@ -399,6 +575,7 @@ func (s *Shard) Lookup(db int, key string) (*Entry, bool) {
 	}
 	e := it.E
 	if e.ExpireAtMs > 0 && e.ExpireAtMs <= s.eng.NowMs() {
+		s.tombstone(db, key, e.Version)
 		s.tab(db).Delete(item{Key: key})
 		s.eng.ExpiredKeys.Add(1)
 		return nil, false
@@ -407,19 +584,139 @@ func (s *Shard) Lookup(db int, key string) (*Entry, bool) {
 }
 
 // Store inserts or replaces key with e. The caller builds e (including any
-// expiry) and calls PushExpire after Store when e has an expiry.
+// expiry) and calls PushExpire after Store when e has an expiry. The
+// version bump makes the write visible to WATCH; recreating a deleted key
+// prunes its tombstone. The new version must exceed anything a watcher
+// could have sampled for this key — a plain e.Version++ would resurrect a
+// replaced or delete-recreated key at a version a watcher may still hold,
+// hiding the write — so the bump is relative to the greater of the
+// previous entry's version and the tombstone's.
 func (s *Shard) Store(db int, key string, e *Entry) {
-	e.Version++
+	base := s.tomb[tombKey{db, key}]
+	if old, found := s.tab(db).Search(item{Key: key}); found && old.E.Version > base {
+		base = old.E.Version
+	}
+	e.Version = base + 1
+	delete(s.tomb, tombKey{db, key})
 	s.tab(db).Insert(item{Key: key, E: e})
 }
 
 // Delete removes key, returning whether it existed (passively expired
-// keys count as missing).
+// keys count as missing). A real removal leaves a tombstone so WATCH
+// sees the delete.
 func (s *Shard) Delete(db int, key string) bool {
-	if _, ok := s.Lookup(db, key); !ok {
+	e, ok := s.Lookup(db, key)
+	if !ok {
 		return false
 	}
+	s.tombstone(db, key, e.Version)
 	return s.tab(db).Delete(item{Key: key})
+}
+
+// Touch bumps e's version after an in-place mutation of a live entry
+// (INCR, HSET, list pushes, ZADD… do not go through Store, but §4.2
+// WATCH must still observe the write). Call only from inside the shard
+// goroutine.
+func (s *Shard) Touch(e *Entry) {
+	e.Version++
+}
+
+// tombstone records key's deletion for WATCH dirty tracking: the version
+// the key had at delete time, +1. Over TombCap the map is cleared and
+// every DB's epoch bumps (conservative: all watchers on this shard go
+// dirty). Call only from inside the shard goroutine.
+func (s *Shard) tombstone(db int, key string, ver uint64) {
+	if len(s.tomb) >= s.TombCap {
+		clear(s.tomb)
+		for i := range s.epoch {
+			s.epoch[i]++
+		}
+	}
+	s.tomb[tombKey{db, key}] = ver + 1
+}
+
+// flushDB drops db's tombstones and bumps db's epoch, dirtying every
+// watcher on db (the keyspace swap in Engine.FlushDB has already
+// happened). Call only from inside the shard goroutine.
+func (s *Shard) flushDB(db int) {
+	for k := range s.tomb {
+		if k.db == db {
+			delete(s.tomb, k)
+		}
+	}
+	s.epoch[db]++
+}
+
+// WatchVersion samples key's WATCH state (§4.2): the shard's current
+// epoch for db and the key's version — the live entry's Version, else
+// its tombstone version, else 0. Applies passive expiry via Lookup.
+// Call only from inside the shard goroutine.
+func (s *Shard) WatchVersion(db int, key string) (epoch, ver uint64) {
+	ent, ok := s.Lookup(db, key)
+	epoch = s.epoch[db]
+	if ok {
+		return epoch, ent.Version
+	}
+	return epoch, s.tomb[tombKey{db, key}]
+}
+
+// WatchDirty reports whether key changed since WatchVersion sampled
+// (epoch, ver): an epoch bump (flush, tombstone overflow) dirties every
+// watcher on the shard+DB; otherwise a live entry's version or a deleted
+// key's tombstone must still equal ver. Call only from inside the shard
+// goroutine.
+func (s *Shard) WatchDirty(db int, key string, epoch, ver uint64) bool {
+	if epoch != s.epoch[db] {
+		return true
+	}
+	if ent, ok := s.Lookup(db, key); ok {
+		return ent.Version != ver
+	}
+	return s.tomb[tombKey{db, key}] != ver
+}
+
+// --- blocking-command waiter registry: call only from inside the shard ---
+// --- goroutine -----------------------------------------------------------
+
+// AddWaiter appends w to key's waiter FIFO. Callers register one Waiter
+// at most once per key per blocking command (duplicate key arguments are
+// deduplicated by the caller).
+func (s *Shard) AddWaiter(db int, key string, w *Waiter) {
+	k := tombKey{db, key}
+	s.waiters[k] = append(s.waiters[k], w)
+}
+
+// RemoveWaiter drops every occurrence of w from key's waiter FIFO,
+// deleting the slot when it empties.
+func (s *Shard) RemoveWaiter(db int, key string, w *Waiter) {
+	k := tombKey{db, key}
+	ws := s.waiters[k]
+	out := ws[:0]
+	for _, x := range ws {
+		if x != w {
+			out = append(out, x)
+		}
+	}
+	if len(out) == 0 {
+		delete(s.waiters, k)
+		return
+	}
+	s.waiters[k] = out
+}
+
+// WakeWaiter signals the first waiter parked on key (non-blocking; the
+// waiter's channel caps at one pending signal). Spurious wakes are fine:
+// waiters always recheck the keyspace, and a woken waiter that loses the
+// race re-registers.
+func (s *Shard) WakeWaiter(db int, key string) {
+	ws := s.waiters[tombKey{db, key}]
+	if len(ws) == 0 {
+		return
+	}
+	select {
+	case ws[0].Ch <- struct{}{}:
+	default:
+	}
 }
 
 // PushExpire schedules e's expiry in the shard heap, bumping ExpGen so
@@ -446,6 +743,7 @@ func (s *Shard) sweep(now int64, limit int) int {
 		}
 		e := it.E
 		if e.ExpireAtMs == top.At && e.ExpGen == top.Gen {
+			s.tombstone(top.DB, top.Key, e.Version)
 			s.tab(top.DB).Delete(item{Key: top.Key})
 			s.eng.ExpiredKeys.Add(1)
 		}

@@ -86,20 +86,45 @@ func (v Value) String() string {
 	}
 }
 
+// do is the strictly synchronous request/reply form: send + recv.
 func (c *rconn) do(args ...string) Value {
+	if err := c.send(args...); err != nil {
+		return Value{Kind: '!', Str: "write: " + err.Error()}
+	}
+	return c.recv()
+}
+
+// send writes one RESP command array without reading the reply. Used for
+// pipelined / parked-command scripts (e.g. a blocking command whose reply
+// arrives only after another connection mutates a key).
+func (c *rconn) send(args ...string) error {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "*%d\r\n", len(args))
 	for _, a := range args {
 		fmt.Fprintf(&sb, "$%d\r\n%s\r\n", len(a), a)
 	}
-	if _, err := c.conn.Write([]byte(sb.String())); err != nil {
-		return Value{Kind: '!', Str: "write: " + err.Error()}
-	}
+	_, err := c.conn.Write([]byte(sb.String()))
+	return err
+}
+
+// recv reads exactly one reply frame.
+func (c *rconn) recv() Value {
 	v, err := c.read()
 	if err != nil {
 		return Value{Kind: '!', Str: "read: " + err.Error()}
 	}
 	return v
+}
+
+// recvTimeout reads one frame but fails after d instead of hanging, so a
+// never-arriving reply or push fails the test rather than blocking CI.
+func (c *rconn) recvTimeout(d time.Duration) (Value, error) {
+	if err := c.conn.SetReadDeadline(time.Now().Add(d)); err != nil {
+		return Value{}, err
+	}
+	v, err := c.read()
+	_ = c.conn.SetReadDeadline(time.Time{})
+	return v, err
 }
 
 func (c *rconn) readLine() (string, error) {

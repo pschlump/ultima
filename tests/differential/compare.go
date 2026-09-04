@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/pschlump/ultima/lib/commands"
-	"github.com/pschlump/ultima/lib/resp"
+	"github.com/pschlump/ultima/lib/respserver"
 	"github.com/pschlump/ultima/lib/shard"
 )
 
@@ -24,28 +24,7 @@ func startUltima(t *testing.T, requirepass string) string {
 	if requirepass != "" {
 		eng.SetRequirePass(requirepass)
 	}
-	srv := resp.NewServer(lisAddr,
-		func(conn resp.Conn, cmd resp.Command) {
-			if len(cmd.Args) == 0 {
-				return
-			}
-			cs, _ := conn.Context().(*commands.ConnState)
-			if cs == nil {
-				cs = eng.NewConnState(conn.RemoteAddr())
-				conn.SetContext(cs)
-			}
-			v := eng.Execute(cs, cmd.Args)
-			if cs.Proto != conn.ProtocolVersion() {
-				conn.SetProtocolVersion(cs.Proto)
-			}
-			conn.WriteValue(v)
-			if cs.Quit {
-				_ = conn.Close()
-			}
-		},
-		func(resp.Conn) bool { return true },
-		nil,
-	)
+	srv := respserver.New(lisAddr, eng)
 	ready := make(chan error, 1)
 	go func() {
 		ln, err := net.Listen("tcp", lisAddr)
@@ -64,7 +43,27 @@ func startUltima(t *testing.T, requirepass string) string {
 }
 
 // --- scripted comparison ----------------------------------------------------------
-
+//
+// Step constructors (each step runs identically against Ultima and Redis):
+//
+//	cmd(args...)            — full request/reply on connection 0
+//	cmdM(m, args...)        — same, with matcher m
+//	cmdOn(conn, args...)    — full request/reply on connection `conn`
+//	cmdOnM(m, conn, args...)— same, with matcher m
+//	sendOn(conn, args...)   — send on connection `conn`, read nothing
+//	recvOn(conn, m)         — read one reply frame on connection `conn`
+//	                          (e.g. a parked BLPOP's late reply after sendOn)
+//	expectPush(conn, m)     — read one async push frame on connection `conn`
+//	                          (a pub/sub message that is not a command reply)
+//
+// Connection 0 is the default per-script connection (today's behavior).
+// Higher connection indexes are dialed lazily on BOTH servers when first
+// referenced and AUTHed when the suite runs with a password. RECONNECT
+// closes and re-dials every open connection on both sides. recvOn and
+// expectPush read with a 5s deadline so a missing frame fails the step
+// instead of hanging. Push frames (`>`) compare like arrays: eqValue folds
+// RESP3 push/map/set kinds to '*'.
+//
 // matcher selects how a step's two replies are compared.
 type matcher int
 
@@ -84,14 +83,56 @@ const (
 	mScanAllPairs                // HSCAN/ZSCAN full-iteration: [cursor, pairs] with pair SETS compared
 )
 
+// stepOp selects what a step does on its connection.
+type stepOp int
+
+const (
+	opDo   stepOp = iota // send args, read one reply, compare
+	opSend               // send args, read nothing
+	opRecv               // read one reply frame (after opSend), compare
+	opPush               // read one async push frame, compare
+)
+
 type step struct {
 	args []string
 	m    matcher
+	on   int
+	op   stepOp
 }
 
 func cmd(args ...string) step { return step{args: args, m: mEq} }
 func cmdM(m matcher, args ...string) step {
 	return step{args: args, m: m}
+}
+
+// The conn/op constructors below are the scripting API for the M3
+// pub/sub and blocking differential scripts.
+func cmdOn(conn int, args ...string) step { return step{args: args, m: mEq, on: conn} }
+
+func cmdOnM(m matcher, conn int, args ...string) step {
+	return step{args: args, m: m, on: conn}
+}
+
+func sendOn(conn int, args ...string) step { return step{args: args, on: conn, op: opSend} }
+
+func recvOn(conn int, m matcher) step { return step{m: m, on: conn, op: opRecv} }
+
+func expectPush(conn int, m matcher) step { return step{m: m, on: conn, op: opPush} }
+
+// label renders the step for mismatch reports.
+func (st step) label() string {
+	switch st.op {
+	case opSend:
+		return fmt.Sprintf("sendOn(%d) %s", st.on, strings.Join(st.args, " "))
+	case opRecv:
+		return fmt.Sprintf("recvOn(%d)", st.on)
+	case opPush:
+		return fmt.Sprintf("expectPush(%d)", st.on)
+	}
+	if st.on != 0 {
+		return fmt.Sprintf("conn%d %s", st.on, strings.Join(st.args, " "))
+	}
+	return strings.Join(st.args, " ")
 }
 
 // script is a named sequence; both servers are FLUSHALLed first, and the
@@ -109,57 +150,109 @@ func runScripts(t *testing.T, scripts []script, requirepass string) {
 	for _, sc := range scripts {
 		sc := sc
 		t.Run(sc.name, func(t *testing.T) {
-			u := dial(t, uAddr)
-			r := dial(t, rAddr)
+			uConns := map[int]*rconn{0: dial(t, uAddr)}
+			rConns := map[int]*rconn{0: dial(t, rAddr)}
+			// conn lazily dials connection n on one side; new connections
+			// are AUTHed when the suite runs with a password.
+			conn := func(conns map[int]*rconn, addr string, n int) *rconn {
+				c, ok := conns[n]
+				if !ok {
+					c = dial(t, addr)
+					if requirepass != "" {
+						if v := c.do("AUTH", "default", requirepass); v.Kind != '+' {
+							t.Fatalf("conn %d AUTH failed: %v", n, v)
+						}
+					}
+					conns[n] = c
+				}
+				return c
+			}
+			both := func(n int) (*rconn, *rconn) {
+				return conn(uConns, uAddr, n), conn(rConns, rAddr, n)
+			}
 			if requirepass != "" {
-				auth := step{args: []string{"AUTH", "default", requirepass}, m: mEq}
-				for _, c := range []*rconn{u, r} {
-					if v := c.do(auth.args...); v.Kind != '+' {
+				for _, c := range []*rconn{uConns[0], rConns[0]} {
+					if v := c.do("AUTH", "default", requirepass); v.Kind != '+' {
 						t.Fatalf("AUTH failed: %v", v)
 					}
 				}
 			}
-			flush := step{args: []string{"FLUSHALL"}, m: mEq}
-			for _, c := range []*rconn{u, r} {
-				if v := c.do(flush.args...); v.Kind != '+' {
+			for _, c := range []*rconn{uConns[0], rConns[0]} {
+				if v := c.do("FLUSHALL"); v.Kind != '+' {
 					t.Fatalf("FLUSHALL failed: %v", v)
 				}
 			}
 			for i, st := range sc.steps {
-				switch st.args[0] {
-				case "SLEEP": // harness pseudo-command
-					ms, _ := strconv.Atoi(st.args[1])
-					time.Sleep(time.Duration(ms) * time.Millisecond)
-					continue
-				case "RECONNECT": // fresh connections on both sides
-					_ = u.conn.Close()
-					_ = r.conn.Close()
-					u = dial(t, uAddr)
-					r = dial(t, rAddr)
-					continue
-				case "SCANLOOP": // full incremental SCAN on both; compare key sets
-					total++
-					if err := scanLoopCompare(u, r); err != nil {
-						failed++
-						t.Errorf("step %d SCANLOOP: %v", i, err)
+				u, r := uConns[0], rConns[0]
+				if st.op == opDo && st.on == 0 {
+					switch st.args[0] {
+					case "SLEEP": // harness pseudo-command
+						ms, _ := strconv.Atoi(st.args[1])
+						time.Sleep(time.Duration(ms) * time.Millisecond)
+						continue
+					case "RECONNECT": // fresh connections on both sides (no re-AUTH)
+						for _, c := range uConns {
+							_ = c.conn.Close()
+						}
+						for _, c := range rConns {
+							_ = c.conn.Close()
+						}
+						uConns = map[int]*rconn{0: dial(t, uAddr)}
+						rConns = map[int]*rconn{0: dial(t, rAddr)}
+						continue
+					case "SCANLOOP": // full incremental SCAN on both; compare key sets
+						total++
+						if err := scanLoopCompare(u, r); err != nil {
+							failed++
+							t.Errorf("step %d SCANLOOP: %v", i, err)
+						}
+						continue
+					case "HSCANLOOP", "SSCANLOOP", "ZSCANLOOP": // full incremental collection scan
+						total++
+						cmdName := st.args[0][:len(st.args[0])-len("LOOP")]
+						if err := collScanCompare(u, r, cmdName, st.args[1:]); err != nil {
+							failed++
+							t.Errorf("step %d %s: %v", i, st.args[0], err)
+						}
+						continue
+					}
+				}
+				switch st.op {
+				case opSend:
+					uc, rc := both(st.on)
+					if err := uc.send(st.args...); err != nil {
+						t.Fatalf("step %d %s: ultima send: %v", i, st.label(), err)
+					}
+					if err := rc.send(st.args...); err != nil {
+						t.Fatalf("step %d %s: redis send: %v", i, st.label(), err)
 					}
 					continue
-				case "HSCANLOOP", "SSCANLOOP", "ZSCANLOOP": // full incremental collection scan
+				case opRecv, opPush:
+					uc, rc := both(st.on)
+					uv, uerr := uc.recvTimeout(5 * time.Second)
+					rv, rerr := rc.recvTimeout(5 * time.Second)
 					total++
-					cmdName := st.args[0][:len(st.args[0])-len("LOOP")]
-					if err := collScanCompare(u, r, cmdName, st.args[1:]); err != nil {
+					if uerr != nil || rerr != nil {
 						failed++
-						t.Errorf("step %d %s: %v", i, st.args[0], err)
+						t.Errorf("step %d %s: read timeout/error (ultima: %v, redis: %v)",
+							i, st.label(), uerr, rerr)
+						continue
+					}
+					if err := compare(st.m, uv, rv); err != nil {
+						failed++
+						t.Errorf("step %d %s: %v\n  ultima: %s\n  redis:  %s",
+							i, st.label(), err, uv, rv)
 					}
 					continue
 				}
-				uv := u.do(st.args...)
-				rv := r.do(st.args...)
+				uc, rc := both(st.on)
+				uv := uc.do(st.args...)
+				rv := rc.do(st.args...)
 				total++
 				if err := compare(st.m, uv, rv); err != nil {
 					failed++
 					t.Errorf("step %d %s: %v\n  ultima: %s\n  redis:  %s",
-						i, strings.Join(st.args, " "), err, uv, rv)
+						i, st.label(), err, uv, rv)
 				}
 			}
 		})

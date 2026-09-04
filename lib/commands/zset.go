@@ -80,7 +80,7 @@ pairs:
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		if wt {
 			reply = errWrongType
@@ -124,6 +124,14 @@ pairs:
 			processed = true
 			incrScore = score
 		}
+		if ent != nil && (added > 0 || changed > 0) {
+			s.Touch(ent)
+		}
+		if added > 0 || (incr && processed) {
+			// The key holds members now; a parked BZPOPMIN/BZMPOP waiter
+			// (registered while the key was missing) can proceed.
+			s.WakeWaiter(cs.DB, key)
+		}
 		if incr {
 			if !processed {
 				reply = resp.Null()
@@ -154,7 +162,7 @@ func cmdZIncrBy(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key, member := string(args[1]), string(args[3])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		if wt {
 			reply = errWrongType
@@ -178,7 +186,10 @@ func cmdZIncrBy(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		z.Add(member, score)
 		if ent == nil {
 			storeColl(s, cs.DB, key, shard.TypeZSet, z)
+		} else {
+			s.Touch(ent)
 		}
+		s.WakeWaiter(cs.DB, key) // serve parked BZPOPMIN/BZMPOP waiters
 		reply = resp.Double(score)
 	})
 	return reply
@@ -187,7 +198,7 @@ func cmdZIncrBy(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdZScore(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key, member := string(args[1]), string(args[2])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		switch {
 		case wt:
@@ -209,7 +220,7 @@ func cmdZMScore(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	out := make([]resp.Value, len(args)-2)
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		if wt {
 			reply = errWrongType
@@ -237,7 +248,7 @@ func cmdZMScore(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdZCard(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		switch {
 		case wt:
@@ -254,7 +265,7 @@ func cmdZCard(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdZRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		switch {
 		case wt:
@@ -268,6 +279,9 @@ func cmdZRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				if z.Remove(string(m)) {
 					n++
 				}
+			}
+			if n > 0 {
+				s.Touch(ent)
 			}
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)
@@ -290,7 +304,7 @@ func zRankCmd(e *Engine, cs *ConnState, args [][]byte, rev bool) resp.Value {
 	}
 	key, member := string(args[1]), string(args[2])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		switch {
 		case wt:
@@ -529,7 +543,7 @@ func cmdZRange(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		if wt {
 			reply = errWrongType
@@ -584,7 +598,7 @@ func zrangeByCmd(e *Engine, cs *ConnState, args [][]byte, mode zrangeMode, rev b
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		if wt {
 			reply = errWrongType
@@ -630,7 +644,7 @@ func cmdZRevRange(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		if wt {
 			reply = errWrongType
@@ -678,7 +692,7 @@ func cmdZRemRangeByRank(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		switch {
 		case wt:
@@ -690,6 +704,9 @@ func cmdZRemRangeByRank(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			req := zrangeReq{mode: byIndex, start: start, stop: stop}
 			lo, hi := req.window(z)
 			n := z.RemoveRankRange(lo, hi-1)
+			if n > 0 {
+				s.Touch(ent)
+			}
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)
 			}
@@ -727,7 +744,7 @@ func cmdZRemRangeByLex(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func zRemRange(e *Engine, cs *ConnState, keyB []byte, loc func(*types.ZSet) (int, int)) resp.Value {
 	key := string(keyB)
 	var reply resp.Value
-	e.Shards.Do(cs.DB, keyB, func(s *shard.Shard) {
+	e.do(cs, keyB, func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		switch {
 		case wt:
@@ -741,6 +758,9 @@ func zRemRange(e *Engine, cs *ConnState, keyB []byte, loc func(*types.ZSet) (int
 				lo, hi = 0, 0
 			}
 			n := z.RemoveRankRange(lo, hi-1)
+			if n > 0 {
+				s.Touch(ent)
+			}
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)
 			}
@@ -760,7 +780,7 @@ func cmdZCount(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		switch {
 		case wt:
@@ -785,7 +805,7 @@ func cmdZLexCount(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	hk, hv := lexKind(maxB)
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		switch {
 		case wt:
@@ -825,7 +845,7 @@ func zPopCmd(e *Engine, cs *ConnState, args [][]byte, fromMin bool) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		if wt {
 			reply = errWrongType
@@ -847,6 +867,7 @@ func zPopCmd(e *Engine, cs *ConnState, args [][]byte, fromMin bool) resp.Value {
 			popped = append(popped, el)
 			z.Remove(el.Member)
 		}
+		s.Touch(ent)
 		if z.Len() == 0 {
 			s.Delete(cs.DB, key)
 		}
@@ -898,7 +919,7 @@ func cmdZRandMember(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		if wt {
 			reply = errWrongType
@@ -977,8 +998,8 @@ type zSnapshot struct {
 // live type is WRONGTYPE.
 func snapshotZSets(e *Engine, cs *ConnState, keys [][]byte) ([]zSnapshot, resp.Value, bool) {
 	snaps := make([]zSnapshot, len(keys))
-	var errV resp.Value
-	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
+	wt := make([]bool, len(keys)) // slot-indexed: the fan-out runs concurrently
+	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			ent, ok := s.Lookup(cs.DB, string(keys[i]))
 			if !ok {
@@ -1004,12 +1025,14 @@ func snapshotZSets(e *Engine, cs *ConnState, keys [][]byte) ([]zSnapshot, resp.V
 				}
 				snaps[i] = sn
 			default:
-				errV = errWrongType
+				wt[i] = true
 			}
 		}
 	})
-	if errV.Kind == resp.KindError {
-		return nil, errV, true
+	for _, w := range wt {
+		if w {
+			return nil, errWrongType, true
+		}
 	}
 	return snaps, resp.Value{}, false
 }
@@ -1234,7 +1257,7 @@ func zStoreCmd(e *Engine, cs *ConnState, args [][]byte, cmd string, intersect bo
 	acc := zAggregate(snaps, intersect, weights, aggregate)
 	dest := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		if len(acc) == 0 {
 			s.Delete(cs.DB, dest)
 			reply = resp.Int(0)
@@ -1269,7 +1292,7 @@ func cmdZScan(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		if wt {
 			reply = errWrongType

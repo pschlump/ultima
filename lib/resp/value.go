@@ -71,6 +71,10 @@ func Map(pairs ...Value) Value { return Value{Kind: KindMap, Arr: pairs} }
 // Set is a ~ reply (RESP3) downgraded to an array under RESP2.
 func Set(elems ...Value) Value { return Value{Kind: KindSet, Arr: elems} }
 
+// Push is a > reply (RESP3 push, e.g. a pub/sub message or subscribe ack)
+// downgraded to an array under RESP2.
+func Push(elems ...Value) Value { return Value{Kind: KindPush, Arr: elems} }
+
 // WriteValue renders v onto the writer for the given protocol version
 // (2 or 3), applying the RESP2 downgrades.
 func (w *Writer) WriteValue(proto int, v Value) {

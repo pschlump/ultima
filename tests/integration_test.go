@@ -5,9 +5,10 @@
 // Port approach: addresses come from the config (server.resp_addr /
 // grpc_addr / http_addr), so tests set them to "127.0.0.1:0" and read the
 // bound address back off the net.Listener. cmd/ultima-server is not
-// importable, so this test wires the same lib packages (respsrv, grpcsrv,
-// handler on a chi mux) exactly as cmd/ultima-server/{startup,router}.go
-// do; the real binary is additionally smoke-tested by hand each milestone.
+// importable, so this test wires the same lib packages (respserver,
+// grpcsrv, handler on a chi mux) exactly as cmd/ultima-server/
+// {startup,router}.go do; the real binary is additionally smoke-tested
+// by hand each milestone.
 package tests
 
 import (
@@ -34,7 +35,7 @@ import (
 	"github.com/pschlump/ultima/lib/config"
 	"github.com/pschlump/ultima/lib/grpcsrv"
 	"github.com/pschlump/ultima/lib/handler"
-	"github.com/pschlump/ultima/lib/resp"
+	"github.com/pschlump/ultima/lib/respserver"
 	"github.com/pschlump/ultima/lib/shard"
 )
 
@@ -75,28 +76,7 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 	shards := shard.NewEngine(cfg.Server.ShardCount, cfg.Server.MaxDBs)
 	t.Cleanup(shards.Close)
 	eng := commands.NewEngine(shards, "test", 0)
-	respSrv := resp.NewServer(cfg.Server.RespAddr,
-		func(conn resp.Conn, cmd resp.Command) {
-			if len(cmd.Args) == 0 {
-				return
-			}
-			cs, _ := conn.Context().(*commands.ConnState)
-			if cs == nil {
-				cs = eng.NewConnState(conn.RemoteAddr())
-				conn.SetContext(cs)
-			}
-			v := eng.Execute(cs, cmd.Args)
-			if cs.Proto != conn.ProtocolVersion() {
-				conn.SetProtocolVersion(cs.Proto)
-			}
-			conn.WriteValue(v)
-			if cs.Quit {
-				_ = conn.Close()
-			}
-		},
-		func(resp.Conn) bool { return true },
-		nil,
-	)
+	respSrv := respserver.New(cfg.Server.RespAddr, eng)
 	go func() { _ = respSrv.Serve(respLis) }()
 	t.Cleanup(func() { _ = respSrv.Close() })
 

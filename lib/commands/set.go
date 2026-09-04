@@ -14,7 +14,7 @@ import (
 func cmdSAdd(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeSet)
 		if wt {
 			reply = errWrongType
@@ -33,6 +33,9 @@ func cmdSAdd(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				n++
 			}
 		}
+		if ent != nil && n > 0 {
+			s.Touch(ent)
+		}
 		reply = resp.Int(n)
 	})
 	return reply
@@ -41,7 +44,7 @@ func cmdSAdd(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdSRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeSet)
 		switch {
 		case wt:
@@ -56,6 +59,9 @@ func cmdSRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 					n++
 				}
 			}
+			if n > 0 {
+				s.Touch(ent)
+			}
 			if st.Len() == 0 {
 				s.Delete(cs.DB, key)
 			}
@@ -68,7 +74,7 @@ func cmdSRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdSMembers(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeSet)
 		if wt {
 			reply = errWrongType
@@ -88,7 +94,7 @@ func cmdSMembers(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdSIsMember(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key, member := string(args[1]), string(args[2])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeSet)
 		switch {
 		case wt:
@@ -106,7 +112,7 @@ func cmdSMIsMember(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	out := make([]resp.Value, len(args)-2)
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeSet)
 		if wt {
 			reply = errWrongType
@@ -129,7 +135,7 @@ func cmdSMIsMember(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdSCard(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeSet)
 		switch {
 		case wt:
@@ -158,7 +164,7 @@ func cmdSPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeSet)
 		if wt {
 			reply = errWrongType
@@ -176,6 +182,7 @@ func cmdSPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		if !hasCount {
 			m := st.Members()[rand.IntN(st.Len())]
 			st.Remove(m)
+			s.Touch(ent)
 			if st.Len() == 0 {
 				s.Delete(cs.DB, key)
 			}
@@ -198,6 +205,7 @@ func cmdSPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 					st.Remove(m)
 					out = append(out, resp.BlobStr(m))
 				}
+				s.Touch(ent)
 			}
 		}
 		reply = resp.Set(out...)
@@ -220,7 +228,7 @@ func cmdSRandMember(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeSet)
 		if wt {
 			reply = errWrongType
@@ -270,7 +278,7 @@ func cmdSMove(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	src, dst, member := string(args[1]), string(args[2]), string(args[3])
 	if src == dst {
 		var reply resp.Value
-		e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+		e.do(cs, args[1], func(s *shard.Shard) {
 			ent, wt := getColl(s, cs.DB, src, shard.TypeSet)
 			switch {
 			case wt:
@@ -287,10 +295,12 @@ func cmdSMove(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	// then remove from src and add to dst in a second fan-out. Redis
 	// ordering: src WRONGTYPE first, then a missing src (or absent
 	// member) answers 0 without consulting dst, then dst WRONGTYPE.
+	// As in lmoveCmd, a concurrent fan-out puts src (i==0) and dst
+	// (i==1) in different groups, so the writes below are disjoint.
 	keys := [][]byte{args[1], args[2]}
 	var srcWT, dstWT bool
 	found := false
-	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
+	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			if i == 0 {
 				ent, wt := getColl(s, cs.DB, src, shard.TypeSet)
@@ -317,7 +327,7 @@ func cmdSMove(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	if dstWT {
 		return errWrongType
 	}
-	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
+	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			if i == 0 {
 				ent, ok := s.Lookup(cs.DB, src)
@@ -326,6 +336,7 @@ func cmdSMove(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				}
 				st := ent.Obj.(*types.Set)
 				st.Remove(member)
+				s.Touch(ent)
 				if st.Len() == 0 {
 					s.Delete(cs.DB, src)
 				}
@@ -339,6 +350,9 @@ func cmdSMove(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 					st = ent.Obj.(*types.Set)
 				}
 				st.Add(member)
+				if ent != nil {
+					s.Touch(ent)
+				}
 			}
 		}
 	})
@@ -357,12 +371,12 @@ type setSnapshot struct {
 // WRONGTYPE error value when any live key is not a set.
 func snapshotSets(e *Engine, cs *ConnState, keys [][]byte) ([]setSnapshot, resp.Value, bool) {
 	snaps := make([]setSnapshot, len(keys))
-	var errV resp.Value
-	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
+	wt := make([]bool, len(keys)) // slot-indexed: the fan-out runs concurrently
+	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
-			ent, wt := getColl(s, cs.DB, string(keys[i]), shard.TypeSet)
-			if wt {
-				errV = errWrongType
+			ent, w := getColl(s, cs.DB, string(keys[i]), shard.TypeSet)
+			if w {
+				wt[i] = true
 				continue
 			}
 			if ent != nil {
@@ -373,8 +387,10 @@ func snapshotSets(e *Engine, cs *ConnState, keys [][]byte) ([]setSnapshot, resp.
 			}
 		}
 	})
-	if errV.Kind == resp.KindError {
-		return nil, errV, true
+	for _, w := range wt {
+		if w {
+			return nil, errWrongType, true
+		}
 	}
 	return snaps, resp.Value{}, false
 }
@@ -489,7 +505,7 @@ func cmdSDiff(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 // (dropping any prior value and TTL).
 func storeSetResult(e *Engine, cs *ConnState, dest []byte, members []string) resp.Value {
 	var n int64
-	e.Shards.Do(cs.DB, dest, func(s *shard.Shard) {
+	e.do(cs, dest, func(s *shard.Shard) {
 		if len(members) == 0 {
 			s.Delete(cs.DB, string(dest))
 			n = 0
@@ -569,7 +585,7 @@ func cmdSScan(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeSet)
 		if wt {
 			reply = errWrongType

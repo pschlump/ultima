@@ -18,10 +18,12 @@ Follow it — it records settled decisions (§15, D1–D19) that must not be
 silently reversed. Milestones M0–M9 are defined in §14.4.
 
 **Current status**: M0 (skeleton, three listeners), M1 (shard engine,
-RESP front-end, P0 commands) and M2 (P1 collections: hash/list/set/zset,
-differential-green on H/L/S/Z) are implemented and committed. Later
-milestones from the design layout (§14.1: `lib/persist`, `clients/`,
-`web/`, `api/`, extra CLIs under `cmd/`) do **not** exist yet.
+RESP front-end, P0 commands), M2 (P1 collections: hash/list/set/zset,
+differential-green on H/L/S/Z) and M3 (P2: MULTI/EXEC/WATCH transactions,
+classic pub/sub, blocking list/zset ops; differential-green) are
+implemented and committed. Later milestones from the design layout
+(§14.1: `lib/persist`, `clients/`, `web/`, `api/`, extra CLIs under
+`cmd/`) do **not** exist yet.
 
 ## Technology Stack
 
@@ -56,10 +58,15 @@ Request flow: each front-end parses its wire format, calls
 
 - **Sharding** (`lib/shard`): the keyspace of each logical DB lives in one
   pluto `sharded_hash_ts.ShardedHash` whose stripe count equals the shard
-  count; key → shard routing is `crc64(key) & (N-1)`. Each shard has an
-  owner goroutine draining a task queue (`Engine.Do` / `DoMulti` /
+  count; key → shard routing is Fibonacci hashing,
+  `(crc64(key)*0x9E3779B97F4A7C15) >> (64-log2 N)` — identical to the
+  table's internal stripe routing, so stripe i is shard i (raw CRC bits
+  cluster for short/structured keys; do not "simplify" this). Each shard
+  has an owner goroutine draining a task queue (`Engine.Do` / `DoMulti` /
   `DoShard`); all data-mutating work runs inside the owning shard's
-  goroutine — no caller-side locks on the hot path. Shard-count helpers
+  goroutine — no caller-side locks on the hot path. Multi-shard fan-out
+  closures (`DoMulti`) run concurrently — shared writes must be
+  synchronized or slot-indexed. Shard-count helpers
   only run inside the shard goroutine (see the comment block at
   `lib/shard/shard.go:380`).
 - **Expiry**: passive on access plus an exact per-shard min-heap
@@ -82,10 +89,34 @@ SINTERSTORE/SUNIONSTORE/SDIFFSTORE/SINTERCARD/SSCAN) and sorted sets
 (ZADD/ZSCORE/ZMSCORE/ZINCRBY/ZRANK/ZREVRANK/ZRANGE/ZRANGEBYSCORE/
 ZRANGEBYLEX/ZREVRANGE/ZREVRANGEBYSCORE/ZREMRANGEBYRANK/ZREMRANGEBYSCORE/
 ZREMRANGEBYLEX/ZCARD/ZCOUNT/ZLEXCOUNT/ZREM/ZPOPMIN/ZPOPMAX/ZRANDMEMBER/
-ZDIFF/ZINTER/ZUNION/ZINTERSTORE/ZUNIONSTORE/ZSCAN). Value types: strings
-plus the four collections (`lib/types`); blocking variants (BLPOP…) are
-M3. Ultima reports Redis compatibility version 7.2.7
-(`commands.CompatVersion`).
+ZDIFF/ZINTER/ZUNION/ZINTERSTORE/ZUNIONSTORE/ZSCAN). M3/P2 — transactions
+(MULTI/EXEC/DISCARD/WATCH/UNWATCH, RESET), pub/sub (SUBSCRIBE/UNSUBSCRIBE/
+PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH/PUBSUB; SSUBSCRIBE deferred to M8,
+keyspace notifications to M5) and blocking ops (BLPOP/BRPOP/BLMPOP/
+BLMOVE/BRPOPLPUSH, BZPOPMIN/BZPOPMAX/BZMPOP). Value types: strings
+plus the four collections (`lib/types`). Ultima reports Redis compatibility
+version 7.2.7 (`commands.CompatVersion`).
+
+M3 architecture notes:
+
+- **Transactions**: MULTI queues on `ConnState`; EXEC takes
+  `shard.Engine.PauseAll` (parks every shard goroutine in id order;
+  only token-carrying tasks run — §4.2's strict cross-shard path) and
+  runs the queue under the token. WATCH uses per-key `Entry.Version`
+  counters plus per-shard delete tombstones and per-DB epochs
+  (`Shard.WatchVersion`/`WatchDirty`); every in-place mutation path
+  calls `Shard.Touch`.
+- **Pub/sub**: `lib/pubsub` broker (no goroutines; delivery on the
+  publisher's goroutine) → per-connection buffered push queues in
+  `lib/respserver` drained by a writer goroutine via the fork's
+  mutex-guarded `Conn.PushValue`; full queue = slow consumer →
+  connection closed. Subscribe-mode gating (RESP2-only, like Redis) is
+  in `Engine.Execute`.
+- **Blocking**: waiters register in the owning shard's FIFO registry
+  (check-and-register in one shard task, so no missed wakeups); pushes
+  call `Shard.WakeWaiter`; the connection goroutine parks on a channel
+  — never a shard goroutine. `shard.Engine.Closing()` unparks everyone
+  on shutdown.
 
 ## Code Organization
 
@@ -94,23 +125,35 @@ cmd/ultima-server/   main binary: main.go, startup.go (wiring), router.go (chi),
 lib/config/          JSON config: `default:"..."` struct tags via reflection + `$ENV$NAME` env substitution (D6)
 lib/resp/            vendored + extended fork of tidwall/redcon v1.6.4 (D2); adds RESP3 emitters,
                      per-connection protocol versioning; kept close to upstream — excluded from lint
-lib/shard/           sharded keyspace engine, owner goroutines, routing, expiry heap
+lib/respserver/      shared RESP front-end wiring (§6.1, D3): builds the *resp.Server with the
+                     accept/handler/closed closures bridging to commands.Engine; used by
+                     cmd/ultima-server and both test harnesses
+lib/shard/           sharded keyspace engine, owner goroutines, routing, expiry heap,
+                     WATCH dirty tracking (tombstones/epochs), EXEC pause (PauseAll),
+                     blocking-waiter FIFO registry
 lib/types/           collection value types in Entry.Obj (M2): Hash (insertion-ordered
                      slice → slice+map past hash-max-listpack-*), List (pluto
                      quicklist_ts, §5.3 #10), Set (sorted int64 slice intset → map past
                      set-max-intset-entries), ZSet (skip_list_ts + member→score map,
                      §5.3 #1). Promotion is one-way, like Redis.
+lib/pubsub/          classic pub/sub broker (M3): channel/pattern subscription maps,
+                     delivery on the publisher's goroutine into per-conn push queues
 lib/commands/        front-end-agnostic command engine; table.go is the command registry
                      (def(name, arity, flags, first, last, step, group, handler));
                      hash.go/list.go/set.go/zset.go hold the P1 handlers, coll.go the
-                     shared parsing helpers (string2d-exact floats, range bounds)
+                     shared parsing helpers (string2d-exact floats, range bounds);
+                     tx.go (M3 MULTI/EXEC/WATCH), pubsub.go (M3 subscriptions + gate),
+                     block.go (M3 blocking ops, park/wake engine)
 lib/grpcsrv/         gRPC front-end (M0: Ping only)
 lib/handler/         HTTP/WS routes (/health, /ready, /api/v1/ping, /ws/v1 stub)
 proto/ultima/v1/     protobuf IDL
 gen/go/ultima/v1/    generated protobuf Go bindings (do not hand-edit)
-tests/               integration_test.go (boots all three surfaces on ephemeral ports)
-tests/differential/  harness diffs replies against a real redis-server (the parity gate)
-bin/                 gen.sh (protoc), gen-build-stamp.sh (ldflags), bench.sh (benchmark sweep)
+tests/               integration_test.go (three surfaces, ephemeral ports), m3_test.go
+                     (M3 real-socket pub/sub + blocking + WATCH/EXEC stress tests)
+tests/differential/  harness diffs replies against a real redis-server (the parity gate);
+                     multi-connection scripts, push frames and blocking wakeups supported
+bin/                 gen.sh (protoc), gen-build-stamp.sh (ldflags), bench.sh (M1 sweep,
+                     chains into bench-pubsub.sh for the M3 pub/sub benchmark)
 docs/                ULTIMA-DESIGN.md, pluto/ structure specs, benchmarks/ reports
 note/                scratch/reference (Redis checkout, benchmarks); gitignored, lint-excluded
 ```
@@ -133,8 +176,12 @@ All via the Makefile (default goal is `build`):
 - `make gen_proto` — regenerate protobuf bindings from `proto/` into
   `gen/go`; requires `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`.
 - `make bench` — `bin/bench.sh`: Ultima vs local `redis-server` via
-  `redis-benchmark`; writes a report to `docs/benchmarks/M1-<date>.md`.
-  Tunable via `REDIS_BIN`, `BENCH_BIN`, `BENCH_*_PORT`, `BENCH_REQUESTS`.
+  `redis-benchmark`; writes a report to `docs/benchmarks/M1-<date>.md`,
+  then runs `bin/bench-pubsub.sh` (M3 pub/sub sweep, subscribers are the
+  `note/pubsub-bench-sub` Go driver; skip with `BENCH_PUBSUB=0`), which
+  writes `docs/benchmarks/M3-<date>.md`.
+  Tunable via `REDIS_BIN`, `BENCH_BIN`, `BENCH_*_PORT`, `BENCH_REQUESTS`,
+  `BENCH_SUBS`, `BENCH_SINGLE_REQUESTS`.
 - `make tidy`, `make clean`.
 
 Configuration: JSON file (`ultima.cfg.json` by default). Defaults come
@@ -146,19 +193,22 @@ values are expanded from the environment (`lib/config/config.go`).
 1. **Unit tests** colocated with code (`lib/**/*_test.go`); goleak guards
    against goroutine leaks in engine tests.
 2. **Integration tests** (`tests/integration_test.go`): boot all three
-   listener surfaces on `127.0.0.1:0` and exercise them with real clients.
-   `cmd/ultima-server` is not importable, so the test re-wires the same
-   `lib` packages as `startup.go`/`router.go` — keep them in sync when
-   changing wiring.
+   listener surfaces on `127.0.0.1:0` and exercise them with real clients;
+   RESP wiring comes from the shared `lib/respserver` package (D3).
+   `tests/m3_test.go` adds real-socket pub/sub, blocking, and WATCH/EXEC
+   stress tests (M3 exit criterion).
 3. **Differential tests** (`tests/differential/`): scripted command
    sequences run against Ultima (in-process, ephemeral port) and a real
    `redis-server` subprocess; decoded replies **including error strings**
    are diffed — this is the primary parity gate. Requires `redis-server`
    on PATH (or `REDIS_BIN`); skipped under `-short` or `DIFFERENTIAL=0`.
-   Extend `scripts.go` when adding commands.
+   Scripts live in `scripts.go` (P0), `scripts_p1.go` (P1), `scripts_m3.go`
+   (P2: transactions, pub/sub, blocking — uses the multi-connection
+   `cmdOn`/`sendOn`/`recvOn`/`expectPush` step constructors documented in
+   `compare.go`); extend the appropriate file when adding commands.
 
-Running `go test ./...` also compiles `note/grpc-vs-text-benchmark`
-(a scratch benchmark module kept for reference).
+Running `go test ./...` also compiles `note/grpc-vs-text-benchmark` and
+`note/crc-probe` (scratch modules kept for reference).
 
 ## Code Style Guidelines
 

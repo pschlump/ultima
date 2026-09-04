@@ -1,6 +1,6 @@
 {
   "comment": "Ultima command coverage manifest (design doc §7). status: implemented | partial | planned. since: milestone. Enforced by TestManifestMatchesTable.",
-  "milestone": "M2",
+  "milestone": "M3",
   "commands": [
     { "name": "ping", "group": "connection", "status": "implemented", "since": "M1", "notes": "" },
     { "name": "echo", "group": "connection", "status": "implemented", "since": "M1", "notes": "" },
@@ -75,6 +75,11 @@
     { "name": "rpoplpush", "group": "list", "status": "implemented", "since": "M2", "notes": "cross-shard two-phase, §4.2 fast path" },
     { "name": "lpos", "group": "list", "status": "implemented", "since": "M2", "notes": "RANK/COUNT/MAXLEN" },
     { "name": "lmove", "group": "list", "status": "implemented", "since": "M2", "notes": "cross-shard two-phase, §4.2 fast path" },
+    { "name": "blpop", "group": "list", "status": "implemented", "since": "M3", "notes": "shard waiter registry + parked conn goroutine, §4.2" },
+    { "name": "brpop", "group": "list", "status": "implemented", "since": "M3", "notes": "" },
+    { "name": "blmove", "group": "list", "status": "implemented", "since": "M3", "notes": "blocks on source only; dst checked at move time" },
+    { "name": "blmpop", "group": "list", "status": "implemented", "since": "M3", "notes": "numkeys + LEFT/RIGHT + COUNT" },
+    { "name": "brpoplpush", "group": "list", "status": "implemented", "since": "M3", "notes": "deprecated alias of BLMOVE RIGHT LEFT" },
 
     { "name": "sadd", "group": "set", "status": "implemented", "since": "M2", "notes": "" },
     { "name": "srem", "group": "set", "status": "implemented", "since": "M2", "notes": "" },
@@ -114,12 +119,29 @@
     { "name": "zrem", "group": "sorted_set", "status": "implemented", "since": "M2", "notes": "" },
     { "name": "zpopmin", "group": "sorted_set", "status": "implemented", "since": "M2", "notes": "count form; RESP3 double scores" },
     { "name": "zpopmax", "group": "sorted_set", "status": "implemented", "since": "M2", "notes": "count form; RESP3 double scores" },
+    { "name": "bzpopmin", "group": "sorted_set", "status": "implemented", "since": "M3", "notes": "proto-dependent score shape, mirroring ZPOPMIN" },
+    { "name": "bzpopmax", "group": "sorted_set", "status": "implemented", "since": "M3", "notes": "" },
+    { "name": "bzmpop", "group": "sorted_set", "status": "implemented", "since": "M3", "notes": "numkeys + MIN/MAX + COUNT; nested [member,score] pairs" },
     { "name": "zrandmember", "group": "sorted_set", "status": "implemented", "since": "M2", "notes": "count +/- semantics, WITHSCORES" },
     { "name": "zdiff", "group": "sorted_set", "status": "implemented", "since": "M2", "notes": "numkeys form, WITHSCORES" },
     { "name": "zinter", "group": "sorted_set", "status": "implemented", "since": "M2", "notes": "numkeys form, WITHSCORES" },
     { "name": "zunion", "group": "sorted_set", "status": "implemented", "since": "M2", "notes": "numkeys form, WITHSCORES" },
     { "name": "zinterstore", "group": "sorted_set", "status": "implemented", "since": "M2", "notes": "WEIGHTS/AGGREGATE; NaN aggregate folds to 0" },
     { "name": "zunionstore", "group": "sorted_set", "status": "implemented", "since": "M2", "notes": "WEIGHTS/AGGREGATE" },
-    { "name": "zscan", "group": "sorted_set", "status": "implemented", "since": "M2", "notes": "offset cursor; MATCH/COUNT; scores as bulk strings" }
+    { "name": "zscan", "group": "sorted_set", "status": "implemented", "since": "M2", "notes": "offset cursor; MATCH/COUNT; scores as bulk strings" },
+
+    { "name": "multi", "group": "transaction", "status": "implemented", "since": "M3", "notes": "queue-time validation, EXECABORT on queue errors" },
+    { "name": "exec", "group": "transaction", "status": "implemented", "since": "M3", "notes": "PauseAll atomic commit; WATCH dirty -> null array" },
+    { "name": "discard", "group": "transaction", "status": "implemented", "since": "M3", "notes": "" },
+    { "name": "watch", "group": "transaction", "status": "implemented", "since": "M3", "notes": "shard epoch/version dirty tracking" },
+    { "name": "unwatch", "group": "transaction", "status": "implemented", "since": "M3", "notes": "" },
+    { "name": "reset", "group": "connection", "status": "implemented", "since": "M3", "notes": "discards tx, unsubscribes all, DB 0, clears name/auth, reverts to RESP2" },
+
+    { "name": "subscribe", "group": "pubsub", "status": "implemented", "since": "M3", "notes": "per-channel acks; RESP2 subscribe-mode gate in Execute" },
+    { "name": "psubscribe", "group": "pubsub", "status": "implemented", "since": "M3", "notes": "glob patterns via stringmatchlen" },
+    { "name": "unsubscribe", "group": "pubsub", "status": "implemented", "since": "M3", "notes": "no-arg form acks all (sorted; Redis hash order is arbitrary); null-channel ack when none" },
+    { "name": "punsubscribe", "group": "pubsub", "status": "implemented", "since": "M3", "notes": "" },
+    { "name": "publish", "group": "pubsub", "status": "implemented", "since": "M3", "notes": "reply counts deliveries, not unique clients; self-deliveries postponed behind the reply" },
+    { "name": "pubsub", "group": "pubsub", "status": "implemented", "since": "M3", "notes": "CHANNELS/NUMSUB/NUMPAT; HELP not implemented" }
   ]
 }

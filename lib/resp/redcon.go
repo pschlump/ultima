@@ -4,6 +4,13 @@
 // per-connection protocol versioning (resp3.go, value.go) and drops the
 // Tile38 native protocol, the ServeMux, and the PubSub helper (Ultima
 // grows its own broker in M3).
+//
+// Fork edits for M3 pub/sub: conn carries a writeMu guarding all
+// bufio-writer access (Flush and the new Conn.PushValue), so a
+// broker-driven push goroutine can interleave pushes with in-order
+// replies without racing the connection goroutine; the protocol version
+// became an atomic for the same reason (a push may read it while the
+// connection goroutine negotiates HELLO).
 package resp
 
 import (
@@ -14,6 +21,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 )
@@ -127,6 +135,11 @@ type Conn interface {
 	// connection's protocol version (downgraded for RESP2 clients the
 	// way Redis does in networking.c).
 	WriteValue(v Value)
+	// PushValue writes an out-of-band message (a pub/sub push) from a
+	// goroutine other than the connection's: it renders v at the
+	// connection's protocol version and flushes under the connection's
+	// write mutex, so pushes interleave safely with in-order replies.
+	PushValue(v Value) error
 }
 
 // NewServer returns a new Redcon server configured on "tcp" network net.
@@ -436,7 +449,7 @@ func handle(s *Server, c *conn) {
 					// All protocol errors should attempt a response to
 					// the client. Ignore write errors.
 					c.wr.WriteError("ERR " + err.Error())
-					c.wr.Flush()
+					_ = c.Flush()
 				}
 				return err
 			}
@@ -457,7 +470,7 @@ func handle(s *Server, c *conn) {
 			if c.closed {
 				return nil
 			}
-			if err := c.wr.Flush(); err != nil {
+			if err := c.Flush(); err != nil {
 				return err
 			}
 		}
@@ -475,11 +488,12 @@ type conn struct {
 	closed    bool
 	cmds      []Command
 	idleClose time.Duration
-	proto     int // negotiated RESP version: 0/2 = RESP2, 3 = RESP3
+	writeMu   sync.Mutex   // fork: guards wr against the push goroutine (M3)
+	proto     atomic.Int32 // negotiated RESP version: 0/2 = RESP2, 3 = RESP3
 }
 
 func (c *conn) Close() error {
-	c.wr.Flush()
+	c.Flush()
 	c.closed = true
 	return c.conn.Close()
 }
@@ -513,13 +527,29 @@ func (c *conn) WriteBulkFrom(n int64, rb io.Reader) {
 	c.wr.WriteBulkFrom(n, rb)
 }
 func (c *conn) ProtocolVersion() int {
-	if c.proto == 3 {
+	if c.proto.Load() == 3 {
 		return 3
 	}
 	return 2
 }
-func (c *conn) SetProtocolVersion(version int) { c.proto = version }
+func (c *conn) SetProtocolVersion(version int) { c.proto.Store(int32(version)) }
 func (c *conn) WriteValue(v Value)             { c.wr.WriteValue(c.ProtocolVersion(), v) }
+
+// Flush flushes buffered writes under the write mutex (fork: M3), so the
+// connection goroutine and a broker-driven push goroutine can share wr.
+func (c *conn) Flush() error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.wr.Flush()
+}
+
+// PushValue renders and flushes an out-of-band push under the write mutex.
+func (c *conn) PushValue(v Value) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.wr.WriteValue(c.ProtocolVersion(), v)
+	return c.wr.Flush()
+}
 
 // BaseWriter returns the underlying connection writer, if any
 func BaseWriter(c Conn) *Writer {

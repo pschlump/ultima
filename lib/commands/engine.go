@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pschlump/ultima/lib/pubsub"
 	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/shard"
 )
@@ -34,7 +35,59 @@ type ConnState struct {
 	Created time.Time
 	Quit    bool // set by QUIT; the front-end closes the connection
 
-	// Room for M3: MULTI/EXEC state, WATCH versions, pub/sub mode.
+	// Multi-mode transaction state (M3, §4.2): Multi marks the connection
+	// between MULTI and EXEC/DISCARD; Queue holds the queued commands
+	// (deep copies of the client's args); QueueErr records a queue-time
+	// error (unknown command, bad arity) that makes EXEC abort with
+	// EXECABORT; Watch holds the keys sampled by WATCH for EXEC's dirty
+	// check.
+	Multi    bool
+	Queue    [][][]byte
+	QueueErr bool
+	Watch    []WatchRef
+
+	// tok is the pause token this connection's shard tasks carry while it
+	// executes a transaction under EXEC (§4.2); 0 outside EXEC.
+	tok uint64
+
+	// inExec marks the execution phase of EXEC; blocking commands (M3
+	// part 5) consult it to take their non-blocking fast path.
+	inExec bool
+
+	// Pub/sub state (M3): subs and psubs are this connection's channel
+	// and pattern subscription sets; a RESP2 connection with any live
+	// subscription is in subscribe mode (see the gate in Execute).
+	// StartPush is the front-end hook (lib/respserver) that lazily
+	// creates the per-connection push writer on first subscription and
+	// returns its enqueue func, cached in deliver; nil in unit tests,
+	// in which case broker deliveries to this connection are dropped.
+	// outbox holds extra reply frames produced by multi-frame commands
+	// (subscribe acks beyond the first, self-addressed publish pushes
+	// postponed behind the command reply); the front-end drains it with
+	// DrainOutbox after every Execute, after the command reply.
+	subs      map[string]struct{}
+	psubs     map[string]struct{}
+	StartPush func() func(resp.Value)
+	deliver   func(resp.Value)
+	outbox    []resp.Value
+}
+
+// WatchRef is one WATCHed key's dirty-check state: the logical DB, the
+// key, and the (epoch, version) sample taken by Shard.WatchVersion.
+type WatchRef struct {
+	DB         int
+	Key        string
+	Epoch, Ver uint64
+}
+
+// clearTx leaves multi mode: the queue, the queue-error flag, and all
+// watched keys are dropped. EXEC (whatever its outcome) and DISCARD both
+// end here.
+func (cs *ConnState) clearTx() {
+	cs.Multi = false
+	cs.Queue = nil
+	cs.QueueErr = false
+	cs.Watch = nil
 }
 
 // Engine executes commands against the shard engine, holding the
@@ -42,7 +95,8 @@ type ConnState struct {
 // and AUTH touch.
 type Engine struct {
 	Shards   *shard.Engine
-	Version  string // Ultima build version, for INFO
+	PubSub   *pubsub.Broker // classic pub/sub registry (M3); channels are global, not per-DB
+	Version  string         // Ultima build version, for INFO
 	Started  time.Time
 	RunID    string
 	RespPort int
@@ -56,6 +110,10 @@ type Engine struct {
 	conns      atomic.Int64
 	totalConns atomic.Int64
 	totalCmds  atomic.Int64
+
+	// blockedClients counts connections currently parked in a blocking
+	// command (BLPOP…BZMPOP), surfaced as INFO blocked_clients.
+	blockedClients atomic.Int64
 }
 
 // NewEngine wraps sh with the command layer. respPort feeds INFO.
@@ -67,6 +125,9 @@ func NewEngine(sh *shard.Engine, version string, respPort int) *Engine {
 		RunID:    genRunID(),
 		RespPort: respPort,
 	}
+	e.PubSub = pubsub.New(func(pattern, s string) bool {
+		return GlobMatch([]byte(pattern), []byte(s))
+	})
 	e.requirePass.Store("")
 	e.save.Store("3600 1 300 100 60 10000")
 	return e
@@ -101,8 +162,48 @@ func (e *Engine) NewConnState(addr string) *ConnState {
 	return &ConnState{Proto: 2, ID: id, Addr: addr, Created: time.Now()}
 }
 
-// CloseConn deregisters a connection.
-func (e *Engine) CloseConn(_ *ConnState) { e.conns.Add(-1) }
+// CloseConn deregisters a connection: its pub/sub subscriptions are
+// dropped from the broker, transaction/watch state is cleared, and the
+// client counter is decremented.
+func (e *Engine) CloseConn(cs *ConnState) {
+	if cs == nil {
+		return
+	}
+	e.PubSub.UnsubscribeAll(cs.ID)
+	cs.subs, cs.psubs = nil, nil
+	cs.clearTx()
+	e.conns.Add(-1)
+}
+
+// DrainOutbox returns and clears the extra reply frames accumulated by
+// the last Execute (multi-frame subscribe acks, postponed self-addressed
+// publish pushes). The front-end writes them after the command reply.
+func (cs *ConnState) DrainOutbox() []resp.Value {
+	out := cs.outbox
+	cs.outbox = nil
+	return out
+}
+
+// DeliverFunc returns the front-end push enqueue hook, non-nil once push
+// mode has started (first subscription and the front-end set StartPush).
+// The RESP front-end uses it to decide whether command replies must flow
+// through the push queue to preserve ordering against async pushes.
+func (cs *ConnState) DeliverFunc() func(resp.Value) { return cs.deliver }
+
+// do runs fn inside the goroutine of the shard owning key, carrying the
+// connection's transaction pause token (0 outside EXEC, §4.2). All
+// command handlers submit per-key work through do/doMulti so EXEC can
+// run them inside the paused engine.
+func (e *Engine) do(cs *ConnState, key []byte, fn func(s *shard.Shard)) {
+	e.Shards.DoTok(cs.tok, e.Shards.ShardIndex(key), fn)
+}
+
+// doMulti is the multi-key form of do (see shard.Engine.DoMultiTok).
+// fn may run CONCURRENTLY on several shard goroutines: shared writes
+// must be synchronized (atomic/mutex) or slot-indexed by key position.
+func (e *Engine) doMulti(cs *ConnState, keys [][]byte, fn func(s *shard.Shard, idxs []int)) {
+	e.Shards.DoMultiTok(cs.tok, keys, fn)
+}
 
 // Execute runs one command. args[0] is the command name (any case).
 // It never panics on client input; all errors are reply values.
@@ -113,15 +214,30 @@ func (e *Engine) Execute(cs *ConnState, args [][]byte) resp.Value {
 	e.totalCmds.Add(1)
 	name := lowerASCII(args[0])
 	def, ok := table[name]
+
+	// Queue gate (Redis queueMultiCommand, §4.2): inside MULTI every
+	// command except the transaction-control set is queued instead of
+	// executed. A queue-time failure (unknown command, bad arity) dirties
+	// the transaction so EXEC aborts with EXECABORT. An unknown command
+	// dirties even before the NOAUTH gate, as in Redis processCommand.
+	queueable := cs.Multi
+	switch name {
+	case "exec", "discard", "multi", "watch", "quit", "reset":
+		queueable = false
+	}
+	if queueable && !ok {
+		cs.QueueErr = true
+		return errUnknownCommand(string(args[0]), args[1:])
+	}
 	if !ok {
 		return errUnknownCommand(string(args[0]), args[1:])
 	}
 
-	// NOAUTH gate: with requirepass set, only AUTH/HELLO/QUIT run
+	// NOAUTH gate: with requirepass set, only AUTH/HELLO/QUIT/RESET run
 	// unauthenticated (Redis semantics).
 	if pw := e.RequirePass(); pw != "" && !cs.Authed {
 		switch name {
-		case "auth", "hello", "quit":
+		case "auth", "hello", "quit", "reset":
 		default:
 			return resp.Err("NOAUTH Authentication required.")
 		}
@@ -130,9 +246,81 @@ func (e *Engine) Execute(cs *ConnState, args [][]byte) resp.Value {
 	// Arity: positive = exact, negative = at least -arity.
 	if (def.Arity > 0 && len(args) != def.Arity) ||
 		(def.Arity < 0 && len(args) < -def.Arity) {
+		if queueable {
+			cs.QueueErr = true
+		}
 		return errArity(def.FullName())
 	}
+
+	// Subscribe-mode gate (Redis processCommand, verified against
+	// 7.2.7): a RESP2 connection with live subscriptions may run only
+	// the (P)SUBSCRIBE/(P)UNSUBSCRIBE family, PING, QUIT and RESET;
+	// RESP3 connections are not gated at all. Unknown commands and
+	// arity errors (above) fire before this gate, as does a container
+	// command with an unresolvable subcommand — for those the handler's
+	// own "unknown subcommand" error reaches the client (Redis fails
+	// command lookup before the gate). EXEC is special: its rejection
+	// is wrapped in EXECABORT with the reason embedded.
+	if cs.Proto == 2 && len(cs.subs)+len(cs.psubs) > 0 {
+		switch name {
+		case "subscribe", "unsubscribe", "psubscribe", "punsubscribe", "ping", "quit", "reset":
+		default:
+			if fn := gatedFullname(name, args); fn != "" {
+				gateMsg := "Can't execute '" + fn + "': only (P|S)SUBSCRIBE / " +
+					"(P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
+				if name == "exec" {
+					return resp.Err("EXECABORT Transaction discarded because of: " + gateMsg)
+				}
+				return resp.Err("ERR " + gateMsg)
+			}
+		}
+	}
+
+	if queueable {
+		cs.Queue = append(cs.Queue, cloneArgs(args))
+		return replyQueued
+	}
 	return def.Handler(e, cs, args)
+}
+
+// containerSubs maps each container command Ultima implements to its
+// known subcommands, for the subscribe-mode gate's fullname rendering
+// (Redis reports "config|get"-style canonical names there).
+var containerSubs = map[string]map[string]struct{}{
+	"config":  {"get": {}, "set": {}},
+	"client":  {"setname": {}, "getname": {}, "id": {}, "setinfo": {}},
+	"command": {"count": {}, "info": {}},
+	"pubsub":  {"channels": {}, "numsub": {}, "numpat": {}},
+}
+
+// gatedFullname renders the canonical fullname Redis reports in the
+// subscribe-mode gate error: "name|sub" for container commands whose
+// subcommand resolves, the bare name otherwise. It returns "" for a
+// container command whose subcommand does not resolve: Redis fails
+// command lookup before the gate, so the handler's own unknown-
+// subcommand error must reach the client instead of the gate error.
+func gatedFullname(name string, args [][]byte) string {
+	subs, container := containerSubs[name]
+	if !container || len(args) < 2 {
+		return name
+	}
+	sub := lowerASCII(args[1])
+	if _, ok := subs[sub]; ok {
+		return name + "|" + sub
+	}
+	return ""
+}
+
+// cloneArgs deep-copies a command line for the MULTI queue; EXEC must be
+// immune to the client (or front-end) mutating or reusing the buffers.
+func cloneArgs(args [][]byte) [][]byte {
+	out := make([][]byte, len(args))
+	for i, a := range args {
+		b := make([]byte, len(a))
+		copy(b, a)
+		out[i] = b
+	}
+	return out
 }
 
 // --- shared reply helpers -------------------------------------------------

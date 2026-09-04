@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"math"
+	"sync/atomic"
 
 	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/shard"
@@ -12,28 +13,28 @@ import (
 
 func cmdDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	keys := args[1:]
-	var n int64
-	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
+	var n atomic.Int64 // fn runs concurrently on several shard goroutines
+	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			if s.Delete(cs.DB, string(keys[i])) {
-				n++
+				n.Add(1)
 			}
 		}
 	})
-	return resp.Int(n)
+	return resp.Int(n.Load())
 }
 
 func cmdExists(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	keys := args[1:]
-	var n int64
-	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
+	var n atomic.Int64
+	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			if _, ok := s.Lookup(cs.DB, string(keys[i])); ok {
-				n++ // duplicates count, as in Redis >= 3.0.3
+				n.Add(1) // duplicates count, as in Redis >= 3.0.3
 			}
 		}
 	})
-	return resp.Int(n)
+	return resp.Int(n.Load())
 }
 
 // --- EXPIRE family -------------------------------------------------------------
@@ -105,7 +106,7 @@ func expireCommon(e *Engine, cs *ConnState, args [][]byte, ms bool) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, found := s.Lookup(cs.DB, key)
 		if !found {
 			reply = resp.Int(0)
@@ -128,6 +129,7 @@ func expireCommon(e *Engine, cs *ConnState, args [][]byte, ms bool) resp.Value {
 			return
 		}
 		ent.ExpireAtMs = at
+		s.Touch(ent)
 		if at <= now {
 			s.Delete(cs.DB, key) // expiry in the past deletes the key
 		} else {
@@ -149,7 +151,7 @@ func cmdPExpire(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func ttlCommon(e *Engine, cs *ConnState, args [][]byte, ms bool) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, found := s.Lookup(cs.DB, key)
 		if !found {
 			reply = resp.Int(-2)
@@ -183,13 +185,14 @@ func cmdPTTL(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdPersist(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, found := s.Lookup(cs.DB, key)
 		if !found || ent.ExpireAtMs == 0 {
 			reply = resp.Int(0)
 			return
 		}
 		ent.ExpireAtMs = 0
+		s.Touch(ent)
 		reply = resp.Int(1)
 	})
 	return reply
@@ -200,7 +203,7 @@ func cmdPersist(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdType(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		if ent, found := s.Lookup(cs.DB, key); found {
 			reply = resp.Simple(typeName(ent.Type))
 		} else {

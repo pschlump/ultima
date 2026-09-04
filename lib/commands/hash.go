@@ -20,7 +20,7 @@ func cmdHSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
 			reply = errWrongType
@@ -38,6 +38,9 @@ func cmdHSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			if h.Set(string(args[i]), string(args[i+1])) {
 				added++
 			}
+		}
+		if ent != nil {
+			s.Touch(ent) // field set/overwrite mutates the live hash
 		}
 		reply = resp.Int(added)
 	})
@@ -57,7 +60,7 @@ func cmdHMSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdHGet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key, field := string(args[1]), string(args[2])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		switch {
 		case wt:
@@ -79,7 +82,7 @@ func cmdHMGet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	vals := make([]resp.Value, len(args)-2)
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
 			reply = errWrongType
@@ -109,7 +112,7 @@ func cmdHMGet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdHGetAll(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
 			reply = errWrongType
@@ -131,7 +134,7 @@ func cmdHGetAll(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdHDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		switch {
 		case wt:
@@ -146,6 +149,9 @@ func cmdHDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 					n++
 				}
 			}
+			if n > 0 {
+				s.Touch(ent)
+			}
 			if h.Len() == 0 {
 				s.Delete(cs.DB, key)
 			}
@@ -158,7 +164,7 @@ func cmdHDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdHExists(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key, field := string(args[1]), string(args[2])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		switch {
 		case wt:
@@ -176,7 +182,7 @@ func cmdHExists(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdHLen(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		switch {
 		case wt:
@@ -201,7 +207,7 @@ func cmdHVals(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func hKeysVals(e *Engine, cs *ConnState, args [][]byte, vals bool) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
 			reply = errWrongType
@@ -225,7 +231,7 @@ func hKeysVals(e *Engine, cs *ConnState, args [][]byte, vals bool) resp.Value {
 func cmdHStrLen(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key, field := string(args[1]), string(args[2])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		switch {
 		case wt:
@@ -246,7 +252,7 @@ func cmdHStrLen(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdHSetNX(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key, field, val := string(args[1]), string(args[2]), string(args[3])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
 			reply = errWrongType
@@ -265,6 +271,8 @@ func cmdHSetNX(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		h.Set(field, val)
 		if ent == nil {
 			storeColl(s, cs.DB, key, shard.TypeHash, h)
+		} else {
+			s.Touch(ent)
 		}
 		reply = resp.Int(1)
 	})
@@ -278,7 +286,7 @@ func cmdHIncrBy(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key, field := string(args[1]), string(args[2])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
 			reply = errWrongType
@@ -307,6 +315,8 @@ func cmdHIncrBy(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		h.Set(field, intToStr(cur))
 		if ent == nil {
 			storeColl(s, cs.DB, key, shard.TypeHash, h)
+		} else {
+			s.Touch(ent)
 		}
 		reply = resp.Int(cur)
 	})
@@ -323,7 +333,7 @@ func cmdHIncrByFloat(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key, field := string(args[1]), string(args[2])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
 			reply = errWrongType
@@ -353,6 +363,8 @@ func cmdHIncrByFloat(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		h.Set(field, out)
 		if ent == nil {
 			storeColl(s, cs.DB, key, shard.TypeHash, h)
+		} else {
+			s.Touch(ent)
 		}
 		reply = resp.BlobStr(out)
 	})
@@ -381,7 +393,7 @@ func cmdHRandField(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
 			reply = errWrongType
@@ -452,7 +464,7 @@ func cmdHScan(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
 			reply = errWrongType

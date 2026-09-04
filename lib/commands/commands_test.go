@@ -3,12 +3,20 @@ package commands
 import (
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"math"
 	"testing"
 
 	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/shard"
+	"go.uber.org/goleak"
 )
+
+// Guard against goroutine leaks: parked blocking waiters, broker state
+// and push machinery are exactly what a regression here would leak (M3).
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
 //go:embed manifest.json
 var manifestJSON []byte
@@ -195,5 +203,76 @@ func TestSelectAndNoAuth(t *testing.T) {
 	run(t, e, cs, "SELECT", "3")
 	if v := run(t, e, cs, "GET", "k"); v.Kind != resp.KindNull {
 		t.Fatalf("GET k in db3 after FLUSHALL = %+v", v)
+	}
+}
+
+// TestMultiKeyFanOutConcurrent exercises the doMulti fan-out (DEL,
+// EXISTS, MGET, MSETNX, SINTER, ZINTERSTORE) with keys spread across
+// shards so the per-shard closures really run concurrently, plus
+// duplicate keys for slot aliasing. Asserts Redis duplicate-key
+// semantics; run with -race to catch unsynchronized shared writes.
+func TestMultiKeyFanOutConcurrent(t *testing.T) {
+	e, cs := newTestEngine(t)
+
+	// One key per shard, so the fan-out is genuinely concurrent.
+	byShard := map[int]string{}
+	for i := 0; len(byShard) < 4 && i < 10000; i++ {
+		k := fmt.Sprintf("fk:%d", i)
+		if si := e.Shards.ShardIndex([]byte(k)); byShard[si] == "" {
+			byShard[si] = k
+		}
+	}
+	keys := make([]string, 0, len(byShard))
+	for _, k := range byShard {
+		keys = append(keys, k)
+	}
+	if len(keys) < 2 {
+		t.Fatalf("need keys on >=2 shards, got %d", len(keys))
+	}
+
+	for range 100 {
+		mset := []string{"MSET"}
+		for _, k := range keys {
+			mset = append(mset, k, "v:"+k)
+		}
+		run(t, e, cs, mset...)
+
+		// MGET with a duplicate key repeats the value, as in Redis.
+		v := run(t, e, cs, "MGET", keys[0], keys[1], keys[0])
+		if v.Kind != resp.KindArray || len(v.Arr) != 3 {
+			t.Fatalf("MGET = %+v", v)
+		}
+		for j, want := range []string{"v:" + keys[0], "v:" + keys[1], "v:" + keys[0]} {
+			if string(v.Arr[j].Blob) != want {
+				t.Fatalf("MGET[%d] = %q, want %q", j, v.Arr[j].Blob, want)
+			}
+		}
+
+		// EXISTS counts duplicates (Redis >= 3.0.3).
+		if v := run(t, e, cs, "EXISTS", keys[0], keys[1], keys[0]); v.Int != 3 {
+			t.Fatalf("EXISTS = %+v, want 3", v)
+		}
+
+		// MSETNX across shards fails as a whole when any key exists.
+		if v := run(t, e, cs, "MSETNX", keys[0], "x", "fk:new", "y"); v.Int != 0 {
+			t.Fatalf("MSETNX existing = %+v, want 0", v)
+		}
+		if v := run(t, e, cs, "EXISTS", "fk:new"); v.Int != 0 {
+			t.Fatalf("MSETNX wrote despite existing key: %+v", v)
+		}
+
+		// Cross-shard WRONGTYPE: both closures hit the error path
+		// concurrently (was a shared errV write).
+		if v := run(t, e, cs, "SINTER", keys[0], keys[1]); v.Kind != resp.KindError {
+			t.Fatalf("SINTER on strings = %+v, want WRONGTYPE", v)
+		}
+		if v := run(t, e, cs, "ZINTERSTORE", "fk:zdst", "2", keys[0], keys[1]); v.Kind != resp.KindError {
+			t.Fatalf("ZINTERSTORE on strings = %+v, want WRONGTYPE", v)
+		}
+
+		// DEL with a duplicate key deletes it once.
+		if v := run(t, e, cs, "DEL", keys[0], keys[1], keys[0]); v.Int != 2 {
+			t.Fatalf("DEL = %+v, want 2", v)
+		}
 	}
 }

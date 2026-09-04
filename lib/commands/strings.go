@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"math"
+	"sync/atomic"
 
 	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/shard"
@@ -110,7 +111,7 @@ func cmdSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key, val := string(args[1]), args[2]
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		old, found := s.Lookup(cs.DB, key)
 		blocked := (o.nx && found) || (o.xx && !found)
 		if !blocked {
@@ -153,7 +154,7 @@ func cmdSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdGet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		if ent, ok := s.Lookup(cs.DB, key); ok {
 			if ent.Type != shard.TypeString {
 				reply = errWrongType
@@ -170,7 +171,7 @@ func cmdGet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdGetSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		old, found := s.Lookup(cs.DB, key)
 		if found && old.Type != shard.TypeString {
 			reply = errWrongType
@@ -189,7 +190,7 @@ func cmdGetSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdGetDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		if ent, ok := s.Lookup(cs.DB, key); ok {
 			if ent.Type != shard.TypeString {
 				reply = errWrongType
@@ -233,7 +234,7 @@ func cmdGetEx(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, found := s.Lookup(cs.DB, key)
 		if !found {
 			reply = resp.Null()
@@ -248,6 +249,7 @@ func cmdGetEx(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		switch {
 		case persist:
 			ent.ExpireAtMs = 0
+			s.Touch(ent)
 		case expKind != "":
 			expVal, ok := parseIntStrict(expRaw)
 			if !ok {
@@ -278,6 +280,7 @@ func cmdGetEx(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				at = expVal
 			}
 			ent.ExpireAtMs = at
+			s.Touch(ent)
 			if at <= now {
 				s.Delete(cs.DB, key) // expiry in the past: return value, drop key
 			} else {
@@ -320,7 +323,7 @@ func cmdDecrBy(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func incrBy(e *Engine, cs *ConnState, keyB []byte, delta int64) resp.Value {
 	key := string(keyB)
 	var reply resp.Value
-	e.Shards.Do(cs.DB, keyB, func(s *shard.Shard) {
+	e.do(cs, keyB, func(s *shard.Shard) {
 		var cur int64
 		ent, found := s.Lookup(cs.DB, key)
 		if found {
@@ -342,6 +345,7 @@ func incrBy(e *Engine, cs *ConnState, keyB []byte, delta int64) resp.Value {
 		cur += delta
 		if found {
 			ent.Str = []byte(fmt.Sprintf("%d", cur))
+			s.Touch(ent)
 		} else {
 			s.Store(cs.DB, key, &shard.Entry{
 				Type: shard.TypeString,
@@ -358,7 +362,7 @@ func incrBy(e *Engine, cs *ConnState, keyB []byte, delta int64) resp.Value {
 func cmdAppend(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, found := s.Lookup(cs.DB, key)
 		if found {
 			if ent.Type != shard.TypeString {
@@ -366,6 +370,7 @@ func cmdAppend(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				return
 			}
 			ent.Str = append(ent.Str, args[2]...)
+			s.Touch(ent)
 			reply = resp.Int(int64(len(ent.Str)))
 			return
 		}
@@ -381,7 +386,7 @@ func cmdAppend(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdStrLen(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		if ent, found := s.Lookup(cs.DB, key); found {
 			if ent.Type != shard.TypeString {
 				reply = errWrongType
@@ -403,7 +408,7 @@ func cmdMGet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	for i := range vals {
 		vals[i] = resp.Null()
 	}
-	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
+	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			if ent, ok := s.Lookup(cs.DB, string(keys[i])); ok && ent.Type == shard.TypeString {
 				vals[i] = resp.BlobString(ent.Str)
@@ -418,7 +423,7 @@ func cmdMSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		return errArity("mset")
 	}
 	keys := pairKeys(args[1:])
-	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
+	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			s.Store(cs.DB, string(keys[i]), &shard.Entry{
 				Type: shard.TypeString,
@@ -436,18 +441,18 @@ func cmdMSetNX(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	keys := pairKeys(args[1:])
 	// Fast path per §4.2: existence check phase, then write phase;
 	// per-shard atomicity only (a racing writer between phases wins).
-	exists := false
-	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
+	var exists atomic.Bool // fn runs concurrently on several shard goroutines
+	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			if _, ok := s.Lookup(cs.DB, string(keys[i])); ok {
-				exists = true
+				exists.Store(true)
 			}
 		}
 	})
-	if exists {
+	if exists.Load() {
 		return resp.Int(0)
 	}
-	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
+	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			s.Store(cs.DB, string(keys[i]), &shard.Entry{
 				Type: shard.TypeString,

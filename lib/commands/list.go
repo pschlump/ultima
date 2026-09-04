@@ -32,7 +32,7 @@ func cmdRPushX(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func pushCmd(e *Engine, cs *ConnState, args [][]byte, head, onlyIfExists bool) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		if wt {
 			reply = errWrongType
@@ -56,6 +56,10 @@ func pushCmd(e *Engine, cs *ConnState, args [][]byte, head, onlyIfExists bool) r
 				l.PushTail(dupBytes(v))
 			}
 		}
+		if ent != nil {
+			s.Touch(ent)
+		}
+		s.WakeWaiter(cs.DB, key) // serve parked BLPOP/BLMOVE/BLMPOP waiters
 		reply = resp.Int(int64(l.Len()))
 	})
 	return reply
@@ -84,7 +88,7 @@ func popCmd(e *Engine, cs *ConnState, args [][]byte, head bool) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
 		case wt:
@@ -99,6 +103,7 @@ func popCmd(e *Engine, cs *ConnState, args [][]byte, head bool) resp.Value {
 			l := ent.Obj.(*types.List)
 			if !hasCount {
 				v, _ := popOne(l, head)
+				s.Touch(ent)
 				if l.Len() == 0 {
 					s.Delete(cs.DB, key)
 				}
@@ -115,6 +120,7 @@ func popCmd(e *Engine, cs *ConnState, args [][]byte, head bool) resp.Value {
 				v, _ := popOne(l, head)
 				out = append(out, resp.BlobString(v))
 			}
+			s.Touch(ent)
 			if l.Len() == 0 {
 				s.Delete(cs.DB, key)
 			}
@@ -134,7 +140,7 @@ func popOne(l *types.List, head bool) ([]byte, bool) {
 func cmdLLen(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
 		case wt:
@@ -151,7 +157,7 @@ func cmdLLen(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdLIndex(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
 		case wt:
@@ -182,7 +188,7 @@ func cmdLRange(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		if wt {
 			reply = errWrongType
@@ -202,7 +208,7 @@ func cmdLRange(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdLSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
 		case wt:
@@ -218,6 +224,7 @@ func cmdLSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			if !ent.Obj.(*types.List).Set(int(idx), dupBytes(args[3])) {
 				reply = resp.Err("ERR index out of range")
 			} else {
+				s.Touch(ent)
 				reply = replyOK
 			}
 		}
@@ -237,7 +244,7 @@ func cmdLInsert(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	pivot := args[3]
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
 		case wt:
@@ -262,6 +269,7 @@ func cmdLInsert(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			} else {
 				l.InsertAfter(idx, dupBytes(args[4]))
 			}
+			s.Touch(ent)
 			reply = resp.Int(int64(l.Len()))
 		}
 	})
@@ -276,7 +284,7 @@ func cmdLRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	val := args[3]
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
 		case wt:
@@ -316,6 +324,9 @@ func cmdLRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			for _, i := range idxs {
 				l.Delete(i)
 			}
+			if len(idxs) > 0 {
+				s.Touch(ent)
+			}
 			if l.Len() == 0 {
 				s.Delete(cs.DB, key)
 			}
@@ -333,7 +344,7 @@ func cmdLTrim(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
 		case wt:
@@ -343,6 +354,7 @@ func cmdLTrim(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		default:
 			l := ent.Obj.(*types.List)
 			l.Trim(int(start), int(stop))
+			s.Touch(ent)
 			if l.Len() == 0 {
 				s.Delete(cs.DB, key)
 			}
@@ -384,7 +396,7 @@ func lmoveCmd(e *Engine, cs *ConnState, srcB, dstB []byte, srcHead, dstHead bool
 	keys := [][]byte{srcB, dstB}
 	if src == dst {
 		var reply resp.Value
-		e.Shards.Do(cs.DB, srcB, func(s *shard.Shard) {
+		e.do(cs, srcB, func(s *shard.Shard) {
 			ent, wt := getColl(s, cs.DB, src, shard.TypeList)
 			switch {
 			case wt:
@@ -399,6 +411,8 @@ func lmoveCmd(e *Engine, cs *ConnState, srcB, dstB []byte, srcHead, dstHead bool
 				} else {
 					l.PushTail(v)
 				}
+				s.Touch(ent)
+				s.WakeWaiter(cs.DB, src) // dst == src: parked waiters can proceed
 				reply = resp.BlobString(v)
 			}
 		})
@@ -406,11 +420,13 @@ func lmoveCmd(e *Engine, cs *ConnState, srcB, dstB []byte, srcHead, dstHead bool
 	}
 	// Phase 1: validate and peek. Redis ordering: src WRONGTYPE, then a
 	// missing src answers null without consulting dst, then dst
-	// WRONGTYPE.
+	// WRONGTYPE. When the fan-out is concurrent, src (i==0) and dst
+	// (i==1) are in different shard groups, so the closure writes below
+	// touch disjoint variables and need no synchronization.
 	var val []byte
 	var srcWT, dstWT bool
 	missing := false
-	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
+	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			if i == 0 {
 				ent, wt := getColl(s, cs.DB, src, shard.TypeList)
@@ -445,7 +461,7 @@ func lmoveCmd(e *Engine, cs *ConnState, srcB, dstB []byte, srcHead, dstHead bool
 		return errWrongType
 	}
 	// Phase 2: apply.
-	e.Shards.DoMulti(cs.DB, keys, func(s *shard.Shard, idxs []int) {
+	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			if i == 0 {
 				ent, ok := s.Lookup(cs.DB, src)
@@ -454,8 +470,12 @@ func lmoveCmd(e *Engine, cs *ConnState, srcB, dstB []byte, srcHead, dstHead bool
 				}
 				l := ent.Obj.(*types.List)
 				popOne(l, srcHead)
+				s.Touch(ent)
 				if l.Len() == 0 {
 					s.Delete(cs.DB, src)
+				} else {
+					// Serve the next parked waiter while elements remain.
+					s.WakeWaiter(cs.DB, src)
 				}
 			} else {
 				ent, _ := getColl(s, cs.DB, dst, shard.TypeList)
@@ -471,6 +491,10 @@ func lmoveCmd(e *Engine, cs *ConnState, srcB, dstB []byte, srcHead, dstHead bool
 				} else {
 					l.PushTail(dupBytes(val))
 				}
+				if ent != nil {
+					s.Touch(ent)
+				}
+				s.WakeWaiter(cs.DB, dst) // a BLMOVE/BLPOP on dst can proceed
 			}
 		}
 	})
@@ -525,7 +549,7 @@ func cmdLPos(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	elem := args[2]
 	var reply resp.Value
-	e.Shards.Do(cs.DB, args[1], func(s *shard.Shard) {
+	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
 		case wt:
