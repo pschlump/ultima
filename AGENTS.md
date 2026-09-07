@@ -21,13 +21,16 @@ silently reversed. Milestones M0–M9 are defined in §14.4.
 RESP front-end, P0 commands), M2 (P1 collections: hash/list/set/zset,
 differential-green on H/L/S/Z) and M3 (P2: MULTI/EXEC/WATCH transactions,
 classic pub/sub, blocking list/zset ops; differential-green) are
-implemented and committed. M4 is **mostly done**: the gRPC front-end
-(typed Command envelope, Exec bidi stream, ExecBatch, ExecGeneric) and
-the WebSocket front-end (`lib/wssrv`, binary protobuf frames at `/ws/v1`,
-pub/sub pushes as unsolicited seq-0 frames) both ride the shared
-`lib/envelope` bridge. Still open in M4: the gRPC `Subscribe`/`Monitor`
-push streams (declared in the IDL, currently Unimplemented) and the
-go/ts client round-trip exit criterion (clients land with M7). Later
+implemented and committed. M4 (binary front-ends) is **done**: the gRPC
+front-end (typed Command envelope, Exec bidi stream, ExecBatch,
+ExecGeneric, Subscribe pub/sub push stream, Monitor stream fed by
+`Engine.AddMonitor`) and the WebSocket front-end (`lib/wssrv`, binary
+protobuf frames at `/ws/v1`, pub/sub pushes as unsolicited seq-0 frames)
+both ride the shared `lib/envelope` bridge. Exit criteria met: Go client
+round-trip (tests use the generated gRPC client), TypeScript round-trip
+(`tests/ts-roundtrip`, protobuf-es over `/ws/v1`, strict `tsc` typecheck),
+and a RESP↔gRPC wire-byte parity gate (`tests/m4_parity_test.go`). The
+parity gate also smoked out a P0 gap closed in M4: INCRBYFLOAT. Later
 milestones from the design layout
 (§14.1: `lib/persist`, `clients/`, `web/`, `api/`, extra CLIs under
 `cmd/`) do **not** exist yet.
@@ -84,7 +87,8 @@ Request flow: each front-end parses its wire format, calls
   stop shard goroutines (10 s cap).
 
 **Commands implemented so far**: M1/P0 — connection (PING, ECHO, HELLO,
-AUTH, SELECT, QUIT), strings (SET/GET family, INCR/DECR family, APPEND,
+AUTH, SELECT, QUIT), strings (SET/GET family, INCR/DECR family +
+INCRBYFLOAT (M4), APPEND,
 STRLEN, MGET/MSET/MSETNX), keyspace (DEL, EXISTS, EXPIRE/PEXPIRE, TTL/PTTL,
 PERSIST, TYPE, SCAN), server (INFO, DBSIZE, FLUSHDB/FLUSHALL, CONFIG,
 CLIENT, COMMAND). M2/P1 — hashes (HSET/HGET/HMSET/HMGET/HGETALL/HDEL/
@@ -151,10 +155,11 @@ lib/commands/        front-end-agnostic command engine; table.go is the command 
                      shared parsing helpers (string2d-exact floats, range bounds);
                      tx.go (M3 MULTI/EXEC/WATCH), pubsub.go (M3 subscriptions + gate),
                      block.go (M3 blocking ops, park/wake engine)
-lib/envelope/        shared bridge (M4): protobuf Command → engine argv, resp.Value →
-                     protobuf Value (RESP3 mirror); used by grpcsrv and wssrv (D3/D15)
-lib/grpcsrv/         gRPC front-end (M4: Exec bidi stream, ExecBatch, ExecGeneric, Ping;
-                     Subscribe/Monitor stubbed)
+lib/envelope/        shared bridge (M4): protobuf Command → engine argv, resp.Value ↔
+                     protobuf Value (RESP3 mirror; FromProto is the inverse, used by
+                     the RESP↔gRPC wire-byte parity gate); used by grpcsrv and wssrv (D3/D15)
+lib/grpcsrv/         gRPC front-end (M4: Exec bidi stream, ExecBatch, ExecGeneric, Ping,
+                     Subscribe pub/sub push stream, Monitor stream over Engine.AddMonitor)
 lib/wssrv/           WebSocket front-end (M4, §6.3): binary protobuf Command frames at
                      /ws/v1, one frame per command, seq-correlated replies; pub/sub
                      pushes as unsolicited seq-0 frames over a bounded queue (slow
@@ -162,8 +167,13 @@ lib/wssrv/           WebSocket front-end (M4, §6.3): binary protobuf Command fr
 lib/handler/         HTTP routes (/health, /ready, /api/v1/ping) + RequestLogger
 proto/ultima/v1/     protobuf IDL
 gen/go/ultima/v1/    generated protobuf Go bindings (do not hand-edit)
+gen/ts/ultima/v1/    generated protobuf TypeScript bindings (protobuf-es; do not hand-edit)
 tests/               integration_test.go (three surfaces, ephemeral ports), m3_test.go
-                     (M3 real-socket pub/sub + blocking + WATCH/EXEC stress tests)
+                     (M3 real-socket pub/sub + blocking + WATCH/EXEC stress tests),
+                     m4_grpc_test.go / m4_ws_test.go (M4 front-ends), m4_parity_test.go
+                     (RESP↔gRPC wire-byte diff), m4_ts_test.go (TS round-trip driver)
+tests/ts-roundtrip/  protobuf-es TS client script (bun; `bun install` first) — the M4
+                     go+ts round-trip exit criterion; strict tsc typecheck via tsconfig
 tests/differential/  harness diffs replies against a real redis-server (the parity gate);
                      multi-connection scripts, push frames and blocking wakeups supported
 bin/                 gen.sh (protoc), gen-build-stamp.sh (ldflags), bench.sh (M1 sweep,
@@ -189,6 +199,9 @@ All via the Makefile (default goal is `build`):
 - `make lint` — `golangci-lint run` (v2 config in `.golangci.yml`).
 - `make gen_proto` — regenerate protobuf bindings from `proto/` into
   `gen/go`; requires `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`.
+  Also emits `gen/ts` (protobuf-es) via `bin/gen-ts.sh`, which no-ops with
+  a hint if the TS plugin isn't installed (`bun install` in
+  `tests/ts-roundtrip` provides it).
 - `make bench` — `bin/bench.sh`: Ultima vs local `redis-server` via
   `redis-benchmark`; writes a report to `docs/benchmarks/M1-<date>.md`,
   then runs `bin/bench-pubsub.sh` (M3 pub/sub sweep, subscribers are the

@@ -12,3 +12,7 @@ protoc \
 	--go-grpc_out=gen/go --go-grpc_opt=module=github.com/pschlump/ultima/gen/go \
 	proto/ultima/v1/command.proto \
 	proto/ultima/v1/ping.proto
+
+# TypeScript bindings (protobuf-es) into gen/ts; gen-ts.sh skips gracefully
+# when the protoc-gen-es plugin is not installed.
+bin/gen-ts.sh

@@ -1,10 +1,11 @@
 // Package grpcsrv hosts Ultima's gRPC front-end (design doc §6.2). It
 // serves the typed Command envelope (decision D15): a pipelined bidi
 // stream (Exec), a unary batch (ExecBatch), and a unary generic
-// convenience form (ExecGeneric). Every command — typed or generic — runs
-// through the one shared command engine via lib/envelope; this package is
-// only the transport. The Subscribe and Monitor push streams are declared
-// in the IDL and arrive with the pub/sub bridge later in M4.
+// convenience form (ExecGeneric), plus the two push streams — Subscribe
+// (classic pub/sub) and Monitor (the MONITOR equivalent, fed by
+// Engine.AddMonitor). Every command — typed or generic — runs through the
+// one shared command engine via lib/envelope; this package is only the
+// transport.
 package grpcsrv
 
 import (
@@ -21,6 +22,7 @@ import (
 	ultimav1 "github.com/pschlump/ultima/gen/go/ultima/v1"
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/envelope"
+	"github.com/pschlump/ultima/lib/resp"
 )
 
 // Server implements ultimav1.UltimaServer.
@@ -104,16 +106,162 @@ func (s *Server) ExecGeneric(ctx context.Context, req *ultimav1.CommandRequest) 
 	return rs[0], nil
 }
 
-// Subscribe is declared in the M4 IDL; the pub/sub bridge that delivers
-// broker pushes onto this stream lands with the WS half of M4.
-func (s *Server) Subscribe(_ *ultimav1.SubscribeRequest, _ ultimav1.Ultima_SubscribeServer) error {
-	return status.Error(codes.Unimplemented, "Subscribe arrives with the push bridge later in M4")
+// pushQueueCap bounds a Subscribe stream's outbound queue; beyond it the
+// client is a slow consumer and the stream is torn down — the same rule
+// lib/respserver and lib/wssrv apply.
+const pushQueueCap = 4096
+
+// Subscribe is the pub/sub push stream (§6.2): the request lists channels
+// and patterns, the replies are the subscribe acks followed by one
+// PushEvent per published message until the client goes away. Deliveries
+// arrive on publisher goroutines, so they flow through a bounded queue
+// drained by a single sender goroutine (stream.Send is not safe for
+// concurrent use). Closing the stream drops all of its subscriptions via
+// CloseConn.
+func (s *Server) Subscribe(req *ultimav1.SubscribeRequest, stream ultimav1.Ultima_SubscribeServer) error {
+	if len(req.Channels) == 0 && len(req.Patterns) == 0 {
+		return status.Error(codes.InvalidArgument, "Subscribe needs at least one channel or pattern")
+	}
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+	cs := s.eng.NewConnState(addrOf(ctx))
+	cs.Proto = 3
+	defer s.eng.CloseConn(cs) // drops this stream's subscriptions
+
+	events := make(chan *ultimav1.PushEvent, pushQueueCap)
+	cs.StartPush = func() func(resp.Value) {
+		return func(v resp.Value) {
+			select {
+			case events <- pushEventOf(v):
+			case <-ctx.Done():
+			default:
+				// Slow consumer: cancel the stream, which unsubscribes via
+				// the deferred CloseConn.
+				cancel()
+			}
+		}
+	}
+
+	sendErr := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case ev := <-events:
+				if err := stream.Send(ev); err != nil {
+					sendErr <- err
+					return
+				}
+			case <-ctx.Done():
+				sendErr <- nil
+				return
+			}
+		}
+	}()
+
+	// Run the subscriptions through the engine so the ack frames (and the
+	// subscribe bookkeeping) are identical to RESP's: Execute returns the
+	// first ack and queues the rest on the connection outbox.
+	subscribe := func(name string, targets []string) error {
+		if len(targets) == 0 {
+			return nil
+		}
+		args := [][]byte{[]byte(name)}
+		for _, tgt := range targets {
+			args = append(args, []byte(tgt))
+		}
+		first := s.eng.Execute(cs, args)
+		if first.Kind == resp.KindError {
+			return status.Errorf(codes.InvalidArgument, "%s failed: %s", name, first.Str)
+		}
+		for _, f := range append([]resp.Value{first}, cs.DrainOutbox()...) {
+			events <- pushEventOf(f)
+		}
+		return nil
+	}
+	if err := subscribe("SUBSCRIBE", req.Channels); err != nil {
+		return err
+	}
+	if err := subscribe("PSUBSCRIBE", req.Patterns); err != nil {
+		return err
+	}
+
+	return <-sendErr
 }
 
-// Monitor is declared in the M4 IDL; MONITOR itself is not yet implemented
-// in the command engine.
-func (s *Server) Monitor(_ *ultimav1.MonitorRequest, _ ultimav1.Ultima_MonitorServer) error {
-	return status.Error(codes.Unimplemented, "Monitor is not yet implemented")
+// pushEventOf converts an engine push frame into its PushEvent form. Push
+// frames are RESP3 arrays: [message channel payload],
+// [pmessage pattern channel payload], or [{p}{,un}subscribe name count].
+func pushEventOf(v resp.Value) *ultimav1.PushEvent {
+	ev := &ultimav1.PushEvent{}
+	if len(v.Arr) == 0 {
+		return ev
+	}
+	kind := string(v.Arr[0].Blob)
+	switch kind {
+	case "message":
+		if len(v.Arr) >= 3 {
+			ev.Channel = string(v.Arr[1].Blob)
+			ev.Payload = v.Arr[2].Blob
+		}
+	case "pmessage":
+		if len(v.Arr) >= 4 {
+			ev.Pattern = string(v.Arr[1].Blob)
+			ev.Channel = string(v.Arr[2].Blob)
+			ev.Payload = v.Arr[3].Blob
+		}
+	default: // subscribe/psubscribe/unsubscribe/punsubscribe acks
+		ev.IsAck = true
+		if len(v.Arr) >= 3 {
+			if kind == "psubscribe" || kind == "punsubscribe" {
+				ev.Pattern = string(v.Arr[1].Blob)
+			} else {
+				ev.Channel = string(v.Arr[1].Blob)
+			}
+			ev.Count = v.Arr[2].Int
+		}
+	}
+	return ev
+}
+
+// Monitor is the MONITOR-equivalent stream (§6.2): one CommandEvent per
+// command executed anywhere on the server, until the client goes away.
+// Engine sinks run on the executing connection's goroutine, so events flow
+// through a bounded queue; a slow consumer's stream is cancelled rather
+// than stalling the engine.
+func (s *Server) Monitor(_ *ultimav1.MonitorRequest, stream ultimav1.Ultima_MonitorServer) error {
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+
+	events := make(chan *ultimav1.CommandEvent, pushQueueCap)
+	detach := s.eng.AddMonitor(func(ev commands.MonitorEvent) {
+		ce := &ultimav1.CommandEvent{
+			UnixMs:     ev.When.UnixMilli(),
+			Db:         uint64(ev.DB), //nolint:gosec // DB indexes are small and non-negative
+			ClientAddr: ev.Addr,
+		}
+		if len(ev.Args) > 0 {
+			ce.Command = string(ev.Args[0])
+			ce.Args = ev.Args[1:]
+		}
+		select {
+		case events <- ce:
+		case <-ctx.Done():
+		default:
+			cancel() // slow consumer
+		}
+	})
+	defer detach()
+
+	for {
+		select {
+		case ce := <-events:
+			if err := stream.Send(ce); err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return nil
+		}
+	}
 }
 
 // addrOf reports the peer address for ConnState bookkeeping (CLIENT LIST).

@@ -357,6 +357,53 @@ func incrBy(e *Engine, cs *ConnState, keyB []byte, delta int64) resp.Value {
 	return reply
 }
 
+// cmdIncrByFloat is INCRBYFLOAT: the float twin of incrBy. The stored value
+// and the reply use the Redis ld2string rendering (formatHumanFloat); the
+// reply is a bulk string, not a RESP3 double, matching Redis. Redis does
+// not reject a NaN/Inf delta up front (unlike HINCRBYFLOAT): an infinite
+// increment on a finite value trips the result check.
+func cmdIncrByFloat(e *Engine, cs *ConnState, args [][]byte) resp.Value {
+	delta, ok := parseFloat(args[2])
+	if !ok {
+		return errBadFloat
+	}
+	key := string(args[1])
+	var reply resp.Value
+	e.do(cs, args[1], func(s *shard.Shard) {
+		var cur float64
+		ent, found := s.Lookup(cs.DB, key)
+		if found {
+			if ent.Type != shard.TypeString {
+				reply = errWrongType
+				return
+			}
+			v, ok := parseFloat(ent.Str)
+			if !ok {
+				reply = errBadFloat
+				return
+			}
+			cur = v
+		}
+		cur += delta
+		if math.IsNaN(cur) || math.IsInf(cur, 0) {
+			reply = resp.Err("ERR increment would produce NaN or Infinity")
+			return
+		}
+		out := formatHumanFloat(cur)
+		if found {
+			ent.Str = []byte(out)
+			s.Touch(ent)
+		} else {
+			s.Store(cs.DB, key, &shard.Entry{
+				Type: shard.TypeString,
+				Str:  []byte(out),
+			})
+		}
+		reply = resp.BlobStr(out)
+	})
+	return reply
+}
+
 // --- append / strlen ---------------------------------------------------------
 
 func cmdAppend(e *Engine, cs *ConnState, args [][]byte) resp.Value {

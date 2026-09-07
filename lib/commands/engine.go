@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -114,6 +115,14 @@ type Engine struct {
 	// blockedClients counts connections currently parked in a blocking
 	// command (BLPOP…BZMPOP), surfaced as INFO blocked_clients.
 	blockedClients atomic.Int64
+
+	// Monitors (§6.2 MonitorEvent feed for the gRPC Monitor stream):
+	// monitorN is the hot-path gate (one atomic load per command);
+	// monitorMu guards the sink map for register/deregister/fan-out.
+	monitorN   atomic.Int64
+	monitorSeq atomic.Uint64
+	monitorMu  sync.Mutex
+	monitors   map[uint64]func(MonitorEvent)
 }
 
 // NewEngine wraps sh with the command layer. respPort feeds INFO.
@@ -128,6 +137,7 @@ func NewEngine(sh *shard.Engine, version string, respPort int) *Engine {
 	e.PubSub = pubsub.New(func(pattern, s string) bool {
 		return GlobMatch([]byte(pattern), []byte(s))
 	})
+	e.monitors = map[uint64]func(MonitorEvent){}
 	e.requirePass.Store("")
 	e.save.Store("3600 1 300 100 60 10000")
 	return e
@@ -280,7 +290,73 @@ func (e *Engine) Execute(cs *ConnState, args [][]byte) resp.Value {
 		cs.Queue = append(cs.Queue, cloneArgs(args))
 		return replyQueued
 	}
-	return def.Handler(e, cs, args)
+	v := def.Handler(e, cs, args)
+	e.notifyMonitors(cs, args)
+	return v
+}
+
+// MonitorEvent is one executed command as reported to MONITOR streams
+// (design doc §6.2). Args is a deep copy safe for the sink to retain;
+// credentials never appear in it (AUTH and HELLO-with-AUTH are redacted
+// the way Redis redacts them from MONITOR output).
+type MonitorEvent struct {
+	When time.Time
+	DB   int
+	Addr string
+	Args [][]byte // Args[0] is the command name as the client sent it
+}
+
+// AddMonitor registers fn to receive a MonitorEvent for every command
+// executed (after execution, on the executing connection's goroutine —
+// sinks must be cheap and non-blocking; a full queue should drop or
+// disconnect, not stall the engine). Commands queued inside MULTI are not
+// reported individually: MONITOR sees the EXEC. The returned func
+// deregisters. The hot path costs one atomic load when no monitors are
+// registered.
+func (e *Engine) AddMonitor(fn func(MonitorEvent)) (cancel func()) {
+	id := e.monitorSeq.Add(1)
+	e.monitorMu.Lock()
+	e.monitors[id] = fn
+	e.monitorMu.Unlock()
+	e.monitorN.Add(1)
+	return func() {
+		e.monitorMu.Lock()
+		delete(e.monitors, id)
+		e.monitorMu.Unlock()
+		e.monitorN.Add(-1)
+	}
+}
+
+// notifyMonitors fans one executed command out to the registered monitors.
+func (e *Engine) notifyMonitors(cs *ConnState, args [][]byte) {
+	if e.monitorN.Load() == 0 {
+		return
+	}
+	ev := MonitorEvent{When: time.Now(), DB: cs.DB, Addr: cs.Addr, Args: monitorArgs(args)}
+	e.monitorMu.Lock()
+	defer e.monitorMu.Unlock()
+	for _, fn := range e.monitors {
+		fn(ev)
+	}
+}
+
+// monitorArgs copies args for the monitor feed, redacting credentials:
+// AUTH collapses to just its name and HELLO keeps only its protocol
+// version, matching Redis's MONITOR redaction.
+func monitorArgs(args [][]byte) [][]byte {
+	name := lowerASCII(args[0])
+	switch name {
+	case "auth":
+		return [][]byte{[]byte("auth")}
+	case "hello":
+		out := [][]byte{args[0]}
+		if len(args) > 1 && (string(args[1]) == "2" || string(args[1]) == "3") {
+			out = append(out, args[1])
+		}
+		return out
+	default:
+		return cloneArgs(args)
+	}
 }
 
 // containerSubs maps each container command Ultima implements to its

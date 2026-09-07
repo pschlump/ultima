@@ -1,0 +1,13 @@
+{
+  "name": "ultima-ts-roundtrip",
+  "private": true,
+  "version": "0.0.0",
+  "description": "M4 exit criterion: TypeScript WebSocket round-trip against the Ultima /ws/v1 endpoint",
+  "type": "module",
+  "devDependencies": {
+    "@bufbuild/protobuf": "^2.10.0",
+    "@bufbuild/protoc-gen-es": "^2.10.0",
+    "@types/node": "^26.5.0",
+    "bun-types": "^1.4.2"
+  }
+}

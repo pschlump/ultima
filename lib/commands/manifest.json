@@ -18,6 +18,7 @@
     { "name": "decr", "group": "string", "status": "implemented", "since": "M1", "notes": "" },
     { "name": "incrby", "group": "string", "status": "implemented", "since": "M1", "notes": "" },
     { "name": "decrby", "group": "string", "status": "implemented", "since": "M1", "notes": "LLONG_MIN operand -> 'ERR decrement would overflow'" },
+    { "name": "incrbyfloat", "group": "string", "status": "implemented", "since": "M4", "notes": "ld2string human formatting; inf delta trips the result check, as in string.c" },
     { "name": "append", "group": "string", "status": "implemented", "since": "M1", "notes": "" },
     { "name": "strlen", "group": "string", "status": "implemented", "since": "M1", "notes": "" },
     { "name": "mget", "group": "string", "status": "implemented", "since": "M1", "notes": "cross-shard fan-out, §4.2 fast path" },

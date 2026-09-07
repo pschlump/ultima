@@ -60,6 +60,7 @@ func init() {
 	def("decr", 2, []string{"write", "denyoom", "fast"}, 1, 1, 1, "string", cmdDecr)
 	def("incrby", 3, []string{"write", "denyoom", "fast"}, 1, 1, 1, "string", cmdIncrBy)
 	def("decrby", 3, []string{"write", "denyoom", "fast"}, 1, 1, 1, "string", cmdDecrBy)
+	def("incrbyfloat", 3, []string{"write", "denyoom", "fast"}, 1, 1, 1, "string", cmdIncrByFloat)
 	def("append", 3, []string{"write", "denyoom"}, 1, 1, 1, "string", cmdAppend)
 	def("strlen", 2, []string{"readonly", "fast"}, 1, 1, 1, "string", cmdStrLen)
 	def("mget", -2, []string{"readonly", "fast"}, 1, -1, 1, "string", cmdMGet)

@@ -249,6 +249,53 @@ func toProtoSlice(vs []resp.Value) []*ultimav1.Value {
 	return out
 }
 
+// FromProto is the exact inverse of ToProto: it rebuilds an engine reply
+// value from its protobuf mirror. It exists so tests (and future binary
+// clients) can render a gRPC/WS reply through resp.AppendValue and diff it
+// byte-for-byte against the RESP surface — the M4 parity gate.
+func FromProto(v *ultimav1.Value) resp.Value {
+	switch k := v.GetKind().(type) {
+	case *ultimav1.Value_SimpleString:
+		return resp.Simple(k.SimpleString)
+	case *ultimav1.Value_Error:
+		return resp.Err(k.Error)
+	case *ultimav1.Value_Int:
+		return resp.Int(k.Int)
+	case *ultimav1.Value_Double:
+		return resp.Double(k.Double)
+	case *ultimav1.Value_Bool:
+		return resp.Bool(k.Bool)
+	case *ultimav1.Value_BlobString:
+		return resp.BlobString(k.BlobString)
+	case *ultimav1.Value_BigNumber:
+		return resp.Value{Kind: resp.KindBigNumber, Str: k.BigNumber}
+	case *ultimav1.Value_Verbatim:
+		return resp.Value{Kind: resp.KindVerbatim, Fmt: k.Verbatim.GetFormat(), Blob: k.Verbatim.GetPayload()}
+	case *ultimav1.Value_Array:
+		return resp.Arr(fromProtoSlice(k.Array.GetElems())...)
+	case *ultimav1.Value_Map:
+		var flat []resp.Value
+		for _, p := range k.Map.GetPairs() {
+			flat = append(flat, FromProto(p.GetKey()), FromProto(p.GetValue()))
+		}
+		return resp.Map(flat...)
+	case *ultimav1.Value_Set:
+		return resp.Set(fromProtoSlice(k.Set.GetElems())...)
+	case *ultimav1.Value_Push:
+		return resp.Push(fromProtoSlice(k.Push.GetElems())...)
+	default: // Value_Null and empty
+		return resp.Null()
+	}
+}
+
+func fromProtoSlice(vs []*ultimav1.Value) []resp.Value {
+	out := make([]resp.Value, 0, len(vs))
+	for _, e := range vs {
+		out = append(out, FromProto(e))
+	}
+	return out
+}
+
 func argv(name string, args ...[]byte) [][]byte {
 	return append([][]byte{s2b(name)}, args...)
 }
