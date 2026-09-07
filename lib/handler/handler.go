@@ -1,6 +1,7 @@
-// Package handler holds the HTTP/WebSocket surface (design doc §3, §6.3):
-// health endpoints, the M0 /api/v1/ping stub, and the /ws/v1 WebSocket
-// stub. cmd/ultima-server/router.go mounts these onto the chi mux.
+// Package handler holds the HTTP surface (design doc §3): health endpoints
+// and the M0 /api/v1/ping stub. The /ws/v1 WebSocket command endpoint
+// lives in lib/wssrv (§6.3, M4); cmd/ultima-server/router.go mounts both
+// onto the chi mux.
 package handler
 
 import (
@@ -13,15 +14,13 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/gorilla/websocket"
 )
 
-// Register wires the M0 HTTP and WS routes onto r.
-func Register(r chi.Router, logger *slog.Logger) {
+// Register wires the HTTP routes onto r.
+func Register(r chi.Router) {
 	r.Get("/health", health)
 	r.Get("/ready", health)
 	r.Get("/api/v1/ping", ping)
-	r.Get("/ws/v1", wsStub(logger))
 }
 
 func health(w http.ResponseWriter, _ *http.Request) {
@@ -36,43 +35,6 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
-}
-
-// wsStub accepts a WebSocket upgrade and answers each text frame "PING"
-// with "PONG" (anything else gets an error frame). Binary frames carry the
-// protobuf Command envelope starting with M4 (§6.3).
-func wsStub(logger *slog.Logger) http.HandlerFunc {
-	upgrader := websocket.Upgrader{
-		// M0 stub: no origin policy until the auth milestone (M6) lands.
-		CheckOrigin: func(*http.Request) bool { return true },
-	}
-	return func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			logger.Warn("ws: upgrade failed", "err", err)
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		for {
-			mt, payload, err := conn.ReadMessage()
-			if err != nil {
-				return // client went away or sent a close frame
-			}
-			if mt != websocket.TextMessage {
-				if err := conn.WriteMessage(websocket.TextMessage, []byte("ERR only text frames supported in M0")); err != nil {
-					return
-				}
-				continue
-			}
-			reply := "ERR unknown message"
-			if string(payload) == "PING" {
-				reply = "PONG"
-			}
-			if err := conn.WriteMessage(websocket.TextMessage, []byte(reply)); err != nil {
-				return
-			}
-		}
-	}
 }
 
 // statusRecorder captures the response status for request logging.

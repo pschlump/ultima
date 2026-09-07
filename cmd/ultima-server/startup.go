@@ -80,7 +80,7 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 	}()
 
 	s.httpSrv = &http.Server{
-		Handler:           newRouter(logger),
+		Handler:           newRouter(logger, eng),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

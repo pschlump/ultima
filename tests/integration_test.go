@@ -29,6 +29,7 @@ import (
 	"github.com/gorilla/websocket"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/proto"
 
 	ultimav1 "github.com/pschlump/ultima/gen/go/ultima/v1"
 	"github.com/pschlump/ultima/lib/commands"
@@ -37,6 +38,7 @@ import (
 	"github.com/pschlump/ultima/lib/handler"
 	"github.com/pschlump/ultima/lib/respserver"
 	"github.com/pschlump/ultima/lib/shard"
+	"github.com/pschlump/ultima/lib/wssrv"
 )
 
 func testLogger() *slog.Logger {
@@ -189,7 +191,8 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(handler.RequestLogger(logger))
-	handler.Register(r, logger)
+	handler.Register(r)
+	r.Get("/ws/v1", wssrv.Handler(eng, logger))
 	httpSrv := &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		if err := httpSrv.Serve(httpLis); err != nil && err != http.ErrServerClosed {
@@ -226,21 +229,30 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 		}
 	}
 
-	// --- WS stub on the same port ---
+	// --- WS command endpoint on the same port (binary protobuf, §6.3) ---
 	wsURL := "ws://" + httpLis.Addr().String() + "/ws/v1"
 	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = ws.Close() }()
-	if err := ws.WriteMessage(websocket.TextMessage, []byte("PING")); err != nil {
-		t.Fatal(err)
-	}
-	_, pong, err := ws.ReadMessage()
+	frame, err := proto.Marshal(&ultimav1.Command{Cmd: &ultimav1.Command_Set{
+		Set: &ultimav1.SetCommand{Key: []byte("ws:it"), Value: []byte("v")}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(pong) != "PONG" {
-		t.Errorf("WS PING reply = %q, want PONG", pong)
+	if err := ws.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err := ws.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wsReply ultimav1.CommandResponse
+	if err := proto.Unmarshal(payload, &wsReply); err != nil {
+		t.Fatal(err)
+	}
+	if got := wsReply.Reply.GetSimpleString(); got != "OK" {
+		t.Errorf("WS SET reply = %q, want OK", got)
 	}
 }

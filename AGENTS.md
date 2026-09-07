@@ -21,11 +21,14 @@ silently reversed. Milestones M0–M9 are defined in §14.4.
 RESP front-end, P0 commands), M2 (P1 collections: hash/list/set/zset,
 differential-green on H/L/S/Z) and M3 (P2: MULTI/EXEC/WATCH transactions,
 classic pub/sub, blocking list/zset ops; differential-green) are
-implemented and committed. M4 is **in progress**: the gRPC front-end is
-done (typed Command envelope, Exec bidi stream, ExecBatch, ExecGeneric,
-`lib/envelope` bridge; Subscribe/Monitor declared in the IDL but stubbed);
-the WebSocket front-end (`lib/wssrv`, binary protobuf frames at `/ws/v1`)
-is next. Later milestones from the design layout
+implemented and committed. M4 is **mostly done**: the gRPC front-end
+(typed Command envelope, Exec bidi stream, ExecBatch, ExecGeneric) and
+the WebSocket front-end (`lib/wssrv`, binary protobuf frames at `/ws/v1`,
+pub/sub pushes as unsolicited seq-0 frames) both ride the shared
+`lib/envelope` bridge. Still open in M4: the gRPC `Subscribe`/`Monitor`
+push streams (declared in the IDL, currently Unimplemented) and the
+go/ts client round-trip exit criterion (clients land with M7). Later
+milestones from the design layout
 (§14.1: `lib/persist`, `clients/`, `web/`, `api/`, extra CLIs under
 `cmd/`) do **not** exist yet.
 
@@ -54,7 +57,7 @@ One binary (`ultima-server`), one process, **three network surfaces**
 |----------------|--------------|------------------------------------------|
 | RESP (Redis protocol) | `:6379` | `lib/resp` (vendored redcon fork) → `lib/commands.Engine` |
 | gRPC           | `:6380`      | `lib/grpcsrv` on generated `gen/go/ultima/v1` code; server reflection on |
-| HTTP/WebSocket | `:6381`      | `lib/handler` mounted on a chi mux (`cmd/ultima-server/router.go`) |
+| HTTP/WebSocket | `:6381`      | `lib/handler` + `lib/wssrv` mounted on a chi mux (`cmd/ultima-server/router.go`) |
 
 Request flow: each front-end parses its wire format, calls
 `commands.Engine.Execute(ConnState, args)`, and renders the returned
@@ -152,7 +155,11 @@ lib/envelope/        shared bridge (M4): protobuf Command → engine argv, resp.
                      protobuf Value (RESP3 mirror); used by grpcsrv and wssrv (D3/D15)
 lib/grpcsrv/         gRPC front-end (M4: Exec bidi stream, ExecBatch, ExecGeneric, Ping;
                      Subscribe/Monitor stubbed)
-lib/handler/         HTTP/WS routes (/health, /ready, /api/v1/ping, /ws/v1 stub)
+lib/wssrv/           WebSocket front-end (M4, §6.3): binary protobuf Command frames at
+                     /ws/v1, one frame per command, seq-correlated replies; pub/sub
+                     pushes as unsolicited seq-0 frames over a bounded queue (slow
+                     consumer → close, as in lib/respserver)
+lib/handler/         HTTP routes (/health, /ready, /api/v1/ping) + RequestLogger
 proto/ultima/v1/     protobuf IDL
 gen/go/ultima/v1/    generated protobuf Go bindings (do not hand-edit)
 tests/               integration_test.go (three surfaces, ephemeral ports), m3_test.go
@@ -244,8 +251,9 @@ Running `go test ./...` also compiles `note/grpc-vs-text-benchmark` and
 - Command renaming (Redis's `rename-command`) is deliberately **excluded**
   as security by obscurity (design doc §1.2); protection comes from auth
   and, later, ACLs.
-- The M0 WebSocket stub has no origin policy (`CheckOrigin: true`); real
-  auth (JWT + TOTP 2FA via `pschlump/htotp`) is scheduled for M6 (§9).
+- The M4 WebSocket endpoint (`lib/wssrv`) has no origin policy
+  (`CheckOrigin: true`) and no upgrade-time auth yet; real auth (JWT +
+  TOTP 2FA via `pschlump/htotp`) is scheduled for M6 (§9).
   `note/redis-security-overview.md` is the security reference.
 - Command execution must never panic on client input; all errors are reply
   values (`Engine.Execute` contract).
