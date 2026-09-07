@@ -4,10 +4,22 @@ package ultima.v1;
 
 option go_package = "github.com/pschlump/ultima/gen/go/ultima/v1;ultimav1";
 
-// Ultima is the binary command surface (design doc §6.2). M0 ships only the
-// Ping health-check RPC; the typed Command envelope arrives with M4.
+import "proto/ultima/v1/command.proto";
+
+// Ultima is the binary command surface (design doc §6.2). The typed Command
+// envelope and the push/monitor stream payloads live in command.proto.
 service Ultima {
   rpc Ping(PingRequest) returns (PingResponse);
+  // Pipelined, ordered, typed command stream — the high-throughput path.
+  rpc Exec(stream Command) returns (stream CommandResponse);
+  // Same envelope as a unary batch.
+  rpc ExecBatch(BatchRequest) returns (BatchResponse);
+  // Tooling/CLI convenience: one generic command per call.
+  rpc ExecGeneric(CommandRequest) returns (CommandResponse);
+  // Pub/sub (and later keyspace notifications) push stream.
+  rpc Subscribe(SubscribeRequest) returns (stream PushEvent);
+  // MONITOR equivalent.
+  rpc Monitor(MonitorRequest) returns (stream CommandEvent);
 }
 
 message PingRequest {

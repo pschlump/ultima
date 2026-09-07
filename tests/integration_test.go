@@ -153,7 +153,7 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 
 	// --- gRPC surface ---
 	grpcLis := listen(t, cfg.Server.GrpcAddr)
-	grpcSrv := grpcsrv.New()
+	grpcSrv := grpcsrv.New(eng)
 	go func() {
 		if err := grpcSrv.Serve(grpcLis); err != nil {
 			t.Errorf("grpc serve: %v", err)

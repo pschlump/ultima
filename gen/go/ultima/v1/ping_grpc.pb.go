@@ -19,17 +19,32 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Ultima_Ping_FullMethodName = "/ultima.v1.Ultima/Ping"
+	Ultima_Ping_FullMethodName        = "/ultima.v1.Ultima/Ping"
+	Ultima_Exec_FullMethodName        = "/ultima.v1.Ultima/Exec"
+	Ultima_ExecBatch_FullMethodName   = "/ultima.v1.Ultima/ExecBatch"
+	Ultima_ExecGeneric_FullMethodName = "/ultima.v1.Ultima/ExecGeneric"
+	Ultima_Subscribe_FullMethodName   = "/ultima.v1.Ultima/Subscribe"
+	Ultima_Monitor_FullMethodName     = "/ultima.v1.Ultima/Monitor"
 )
 
 // UltimaClient is the client API for Ultima service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Ultima is the binary command surface (design doc §6.2). M0 ships only the
-// Ping health-check RPC; the typed Command envelope arrives with M4.
+// Ultima is the binary command surface (design doc §6.2). The typed Command
+// envelope and the push/monitor stream payloads live in command.proto.
 type UltimaClient interface {
 	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error)
+	// Pipelined, ordered, typed command stream — the high-throughput path.
+	Exec(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[Command, CommandResponse], error)
+	// Same envelope as a unary batch.
+	ExecBatch(ctx context.Context, in *BatchRequest, opts ...grpc.CallOption) (*BatchResponse, error)
+	// Tooling/CLI convenience: one generic command per call.
+	ExecGeneric(ctx context.Context, in *CommandRequest, opts ...grpc.CallOption) (*CommandResponse, error)
+	// Pub/sub (and later keyspace notifications) push stream.
+	Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[PushEvent], error)
+	// MONITOR equivalent.
+	Monitor(ctx context.Context, in *MonitorRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[CommandEvent], error)
 }
 
 type ultimaClient struct {
@@ -50,14 +65,95 @@ func (c *ultimaClient) Ping(ctx context.Context, in *PingRequest, opts ...grpc.C
 	return out, nil
 }
 
+func (c *ultimaClient) Exec(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[Command, CommandResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Ultima_ServiceDesc.Streams[0], Ultima_Exec_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[Command, CommandResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Ultima_ExecClient = grpc.BidiStreamingClient[Command, CommandResponse]
+
+func (c *ultimaClient) ExecBatch(ctx context.Context, in *BatchRequest, opts ...grpc.CallOption) (*BatchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BatchResponse)
+	err := c.cc.Invoke(ctx, Ultima_ExecBatch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ultimaClient) ExecGeneric(ctx context.Context, in *CommandRequest, opts ...grpc.CallOption) (*CommandResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommandResponse)
+	err := c.cc.Invoke(ctx, Ultima_ExecGeneric_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ultimaClient) Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[PushEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Ultima_ServiceDesc.Streams[1], Ultima_Subscribe_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SubscribeRequest, PushEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Ultima_SubscribeClient = grpc.ServerStreamingClient[PushEvent]
+
+func (c *ultimaClient) Monitor(ctx context.Context, in *MonitorRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[CommandEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Ultima_ServiceDesc.Streams[2], Ultima_Monitor_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[MonitorRequest, CommandEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Ultima_MonitorClient = grpc.ServerStreamingClient[CommandEvent]
+
 // UltimaServer is the server API for Ultima service.
 // All implementations must embed UnimplementedUltimaServer
 // for forward compatibility.
 //
-// Ultima is the binary command surface (design doc §6.2). M0 ships only the
-// Ping health-check RPC; the typed Command envelope arrives with M4.
+// Ultima is the binary command surface (design doc §6.2). The typed Command
+// envelope and the push/monitor stream payloads live in command.proto.
 type UltimaServer interface {
 	Ping(context.Context, *PingRequest) (*PingResponse, error)
+	// Pipelined, ordered, typed command stream — the high-throughput path.
+	Exec(grpc.BidiStreamingServer[Command, CommandResponse]) error
+	// Same envelope as a unary batch.
+	ExecBatch(context.Context, *BatchRequest) (*BatchResponse, error)
+	// Tooling/CLI convenience: one generic command per call.
+	ExecGeneric(context.Context, *CommandRequest) (*CommandResponse, error)
+	// Pub/sub (and later keyspace notifications) push stream.
+	Subscribe(*SubscribeRequest, grpc.ServerStreamingServer[PushEvent]) error
+	// MONITOR equivalent.
+	Monitor(*MonitorRequest, grpc.ServerStreamingServer[CommandEvent]) error
 	mustEmbedUnimplementedUltimaServer()
 }
 
@@ -70,6 +166,21 @@ type UnimplementedUltimaServer struct{}
 
 func (UnimplementedUltimaServer) Ping(context.Context, *PingRequest) (*PingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Ping not implemented")
+}
+func (UnimplementedUltimaServer) Exec(grpc.BidiStreamingServer[Command, CommandResponse]) error {
+	return status.Error(codes.Unimplemented, "method Exec not implemented")
+}
+func (UnimplementedUltimaServer) ExecBatch(context.Context, *BatchRequest) (*BatchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExecBatch not implemented")
+}
+func (UnimplementedUltimaServer) ExecGeneric(context.Context, *CommandRequest) (*CommandResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExecGeneric not implemented")
+}
+func (UnimplementedUltimaServer) Subscribe(*SubscribeRequest, grpc.ServerStreamingServer[PushEvent]) error {
+	return status.Error(codes.Unimplemented, "method Subscribe not implemented")
+}
+func (UnimplementedUltimaServer) Monitor(*MonitorRequest, grpc.ServerStreamingServer[CommandEvent]) error {
+	return status.Error(codes.Unimplemented, "method Monitor not implemented")
 }
 func (UnimplementedUltimaServer) mustEmbedUnimplementedUltimaServer() {}
 func (UnimplementedUltimaServer) testEmbeddedByValue()                {}
@@ -110,6 +221,71 @@ func _Ultima_Ping_Handler(srv interface{}, ctx context.Context, dec func(interfa
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Ultima_Exec_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(UltimaServer).Exec(&grpc.GenericServerStream[Command, CommandResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Ultima_ExecServer = grpc.BidiStreamingServer[Command, CommandResponse]
+
+func _Ultima_ExecBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UltimaServer).ExecBatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Ultima_ExecBatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UltimaServer).ExecBatch(ctx, req.(*BatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Ultima_ExecGeneric_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommandRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UltimaServer).ExecGeneric(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Ultima_ExecGeneric_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UltimaServer).ExecGeneric(ctx, req.(*CommandRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Ultima_Subscribe_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SubscribeRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(UltimaServer).Subscribe(m, &grpc.GenericServerStream[SubscribeRequest, PushEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Ultima_SubscribeServer = grpc.ServerStreamingServer[PushEvent]
+
+func _Ultima_Monitor_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(MonitorRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(UltimaServer).Monitor(m, &grpc.GenericServerStream[MonitorRequest, CommandEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Ultima_MonitorServer = grpc.ServerStreamingServer[CommandEvent]
+
 // Ultima_ServiceDesc is the grpc.ServiceDesc for Ultima service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -121,7 +297,32 @@ var Ultima_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "Ping",
 			Handler:    _Ultima_Ping_Handler,
 		},
+		{
+			MethodName: "ExecBatch",
+			Handler:    _Ultima_ExecBatch_Handler,
+		},
+		{
+			MethodName: "ExecGeneric",
+			Handler:    _Ultima_ExecGeneric_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Exec",
+			Handler:       _Ultima_Exec_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "Subscribe",
+			Handler:       _Ultima_Subscribe_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "Monitor",
+			Handler:       _Ultima_Monitor_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "proto/ultima/v1/ping.proto",
 }

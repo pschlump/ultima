@@ -116,13 +116,18 @@ var File_proto_ultima_v1_ping_proto protoreflect.FileDescriptor
 
 const file_proto_ultima_v1_ping_proto_rawDesc = "" +
 	"\n" +
-	"\x1aproto/ultima/v1/ping.proto\x12\tultima.v1\"'\n" +
+	"\x1aproto/ultima/v1/ping.proto\x12\tultima.v1\x1a\x1dproto/ultima/v1/command.proto\"'\n" +
 	"\vPingRequest\x12\x18\n" +
 	"\amessage\x18\x01 \x01(\tR\amessage\"(\n" +
 	"\fPingResponse\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage2A\n" +
+	"\amessage\x18\x01 \x01(\tR\amessage2\x86\x03\n" +
 	"\x06Ultima\x127\n" +
-	"\x04Ping\x12\x16.ultima.v1.PingRequest\x1a\x17.ultima.v1.PingResponseB6Z4github.com/pschlump/ultima/gen/go/ultima/v1;ultimav1b\x06proto3"
+	"\x04Ping\x12\x16.ultima.v1.PingRequest\x1a\x17.ultima.v1.PingResponse\x12:\n" +
+	"\x04Exec\x12\x12.ultima.v1.Command\x1a\x1a.ultima.v1.CommandResponse(\x010\x01\x12>\n" +
+	"\tExecBatch\x12\x17.ultima.v1.BatchRequest\x1a\x18.ultima.v1.BatchResponse\x12D\n" +
+	"\vExecGeneric\x12\x19.ultima.v1.CommandRequest\x1a\x1a.ultima.v1.CommandResponse\x12@\n" +
+	"\tSubscribe\x12\x1b.ultima.v1.SubscribeRequest\x1a\x14.ultima.v1.PushEvent0\x01\x12?\n" +
+	"\aMonitor\x12\x19.ultima.v1.MonitorRequest\x1a\x17.ultima.v1.CommandEvent0\x01B6Z4github.com/pschlump/ultima/gen/go/ultima/v1;ultimav1b\x06proto3"
 
 var (
 	file_proto_ultima_v1_ping_proto_rawDescOnce sync.Once
@@ -138,17 +143,36 @@ func file_proto_ultima_v1_ping_proto_rawDescGZIP() []byte {
 
 var file_proto_ultima_v1_ping_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
 var file_proto_ultima_v1_ping_proto_goTypes = []any{
-	(*PingRequest)(nil),  // 0: ultima.v1.PingRequest
-	(*PingResponse)(nil), // 1: ultima.v1.PingResponse
+	(*PingRequest)(nil),      // 0: ultima.v1.PingRequest
+	(*PingResponse)(nil),     // 1: ultima.v1.PingResponse
+	(*Command)(nil),          // 2: ultima.v1.Command
+	(*BatchRequest)(nil),     // 3: ultima.v1.BatchRequest
+	(*CommandRequest)(nil),   // 4: ultima.v1.CommandRequest
+	(*SubscribeRequest)(nil), // 5: ultima.v1.SubscribeRequest
+	(*MonitorRequest)(nil),   // 6: ultima.v1.MonitorRequest
+	(*CommandResponse)(nil),  // 7: ultima.v1.CommandResponse
+	(*BatchResponse)(nil),    // 8: ultima.v1.BatchResponse
+	(*PushEvent)(nil),        // 9: ultima.v1.PushEvent
+	(*CommandEvent)(nil),     // 10: ultima.v1.CommandEvent
 }
 var file_proto_ultima_v1_ping_proto_depIdxs = []int32{
-	0, // 0: ultima.v1.Ultima.Ping:input_type -> ultima.v1.PingRequest
-	1, // 1: ultima.v1.Ultima.Ping:output_type -> ultima.v1.PingResponse
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0,  // 0: ultima.v1.Ultima.Ping:input_type -> ultima.v1.PingRequest
+	2,  // 1: ultima.v1.Ultima.Exec:input_type -> ultima.v1.Command
+	3,  // 2: ultima.v1.Ultima.ExecBatch:input_type -> ultima.v1.BatchRequest
+	4,  // 3: ultima.v1.Ultima.ExecGeneric:input_type -> ultima.v1.CommandRequest
+	5,  // 4: ultima.v1.Ultima.Subscribe:input_type -> ultima.v1.SubscribeRequest
+	6,  // 5: ultima.v1.Ultima.Monitor:input_type -> ultima.v1.MonitorRequest
+	1,  // 6: ultima.v1.Ultima.Ping:output_type -> ultima.v1.PingResponse
+	7,  // 7: ultima.v1.Ultima.Exec:output_type -> ultima.v1.CommandResponse
+	8,  // 8: ultima.v1.Ultima.ExecBatch:output_type -> ultima.v1.BatchResponse
+	7,  // 9: ultima.v1.Ultima.ExecGeneric:output_type -> ultima.v1.CommandResponse
+	9,  // 10: ultima.v1.Ultima.Subscribe:output_type -> ultima.v1.PushEvent
+	10, // 11: ultima.v1.Ultima.Monitor:output_type -> ultima.v1.CommandEvent
+	6,  // [6:12] is the sub-list for method output_type
+	0,  // [0:6] is the sub-list for method input_type
+	0,  // [0:0] is the sub-list for extension type_name
+	0,  // [0:0] is the sub-list for extension extendee
+	0,  // [0:0] is the sub-list for field type_name
 }
 
 func init() { file_proto_ultima_v1_ping_proto_init() }
@@ -156,6 +180,7 @@ func file_proto_ultima_v1_ping_proto_init() {
 	if File_proto_ultima_v1_ping_proto != nil {
 		return
 	}
+	file_proto_ultima_v1_command_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

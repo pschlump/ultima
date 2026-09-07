@@ -21,7 +21,11 @@ silently reversed. Milestones M0–M9 are defined in §14.4.
 RESP front-end, P0 commands), M2 (P1 collections: hash/list/set/zset,
 differential-green on H/L/S/Z) and M3 (P2: MULTI/EXEC/WATCH transactions,
 classic pub/sub, blocking list/zset ops; differential-green) are
-implemented and committed. Later milestones from the design layout
+implemented and committed. M4 is **in progress**: the gRPC front-end is
+done (typed Command envelope, Exec bidi stream, ExecBatch, ExecGeneric,
+`lib/envelope` bridge; Subscribe/Monitor declared in the IDL but stubbed);
+the WebSocket front-end (`lib/wssrv`, binary protobuf frames at `/ws/v1`)
+is next. Later milestones from the design layout
 (§14.1: `lib/persist`, `clients/`, `web/`, `api/`, extra CLIs under
 `cmd/`) do **not** exist yet.
 
@@ -144,7 +148,10 @@ lib/commands/        front-end-agnostic command engine; table.go is the command 
                      shared parsing helpers (string2d-exact floats, range bounds);
                      tx.go (M3 MULTI/EXEC/WATCH), pubsub.go (M3 subscriptions + gate),
                      block.go (M3 blocking ops, park/wake engine)
-lib/grpcsrv/         gRPC front-end (M0: Ping only)
+lib/envelope/        shared bridge (M4): protobuf Command → engine argv, resp.Value →
+                     protobuf Value (RESP3 mirror); used by grpcsrv and wssrv (D3/D15)
+lib/grpcsrv/         gRPC front-end (M4: Exec bidi stream, ExecBatch, ExecGeneric, Ping;
+                     Subscribe/Monitor stubbed)
 lib/handler/         HTTP/WS routes (/health, /ready, /api/v1/ping, /ws/v1 stub)
 proto/ultima/v1/     protobuf IDL
 gen/go/ultima/v1/    generated protobuf Go bindings (do not hand-edit)

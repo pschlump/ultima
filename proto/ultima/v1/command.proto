@@ -1,0 +1,368 @@
+syntax = "proto3";
+
+package ultima.v1;
+
+option go_package = "github.com/pschlump/ultima/gen/go/ultima/v1;ultimav1";
+
+// Command-envelope IDL for the binary front-ends (design doc §6.2, decision
+// D15). The same Command/CommandResponse pair rides the gRPC bidi stream
+// (§6.2) and the WebSocket binary frames (§6.3). Hot commands get fully
+// typed messages — dispatch is a protobuf oneof tag switch, no string
+// parsing — while CommandRequest is the generic escape hatch for the long
+// tail. This file is the stable IDL delivered by milestone M4.
+
+// ---------------------------------------------------------------------------
+// Reply values: a protobuf mirror of the RESP3 type system (lib/resp Value).
+// ---------------------------------------------------------------------------
+
+// Value is one typed reply (or one nested element of one).
+message Value {
+  oneof kind {
+    bool null = 1;               // RESP3 _  (field presence carries the value)
+    string simple_string = 2;    // RESP3 +
+    string error = 3;            // RESP3 -  (text carries its "ERR "/… prefix)
+    int64 int = 4;               // RESP3 :
+    double double = 5;           // RESP3 ,
+    bool bool = 6;               // RESP3 #
+    bytes blob_string = 7;       // RESP3 $
+    string big_number = 8;       // RESP3 (
+    Verbatim verbatim = 9;       // RESP3 =
+    Array array = 10;            // RESP3 *
+    Map map = 11;                // RESP3 %
+    Set set = 12;                // RESP3 ~
+    Push push = 13;              // RESP3 >
+  }
+}
+
+message Verbatim {
+  string format = 1;  // 3-byte format tag, e.g. "txt", "mkd"
+  bytes payload = 2;
+}
+
+message Array {
+  repeated Value elems = 1;
+}
+
+message Pair {
+  Value key = 1;
+  Value value = 2;
+}
+
+message Map {
+  repeated Pair pairs = 1;
+}
+
+message Set {
+  repeated Value elems = 1;
+}
+
+// Push carries an out-of-band push frame (pub/sub message, subscribe ack).
+message Push {
+  repeated Value elems = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Command envelope.
+// ---------------------------------------------------------------------------
+
+// Command is one command on its way to the server. Exactly one oneof field
+// is set. Field numbers 1–99 are reserved for typed hot commands; 100+ are
+// envelope metadata and the generic escape hatch.
+message Command {
+  oneof cmd {
+    // --- strings / keyspace ---
+    GetCommand get = 1;
+    SetCommand set = 2;
+    DelCommand del = 3;
+    IncrCommand incr = 4;        // INCR/DECR/INCRBY/DECRBY: delta carries the signed step
+    IncrFloatCommand incr_float = 5;
+    MGetCommand mget = 6;
+    MSetCommand mset = 7;
+    AppendCommand append = 8;
+    ExistsCommand exists = 9;
+    // --- expiry ---
+    ExpireCommand expire = 10;
+    TtlCommand ttl = 11;
+    PersistCommand persist = 12;
+    // --- hashes ---
+    HGetCommand hget = 13;
+    HSetCommand hset = 14;
+    HGetAllCommand hgetall = 15;
+    HDelCommand hdel = 16;
+    HIncrByCommand hincrby = 17;
+    // --- lists ---
+    LPushCommand lpush = 18;
+    RPushCommand rpush = 19;
+    LPopCommand lpop = 20;
+    RPopCommand rpop = 21;
+    LRangeCommand lrange = 22;
+    LLenCommand llen = 23;
+    // --- sets ---
+    SAddCommand sadd = 24;
+    SRemCommand srem = 25;
+    SMembersCommand smembers = 26;
+    SIsMemberCommand sismember = 27;
+    // --- sorted sets ---
+    ZAddCommand zadd = 28;
+    ZScoreCommand zscore = 29;
+    ZRangeCommand zrange = 30;
+    ZRemCommand zrem = 31;
+    ZCardCommand zcard = 32;
+    // --- escape hatch ---
+    CommandRequest generic = 100;  // long tail: { string command; repeated bytes args; }
+  }
+
+  // Logical DB to run this command against; 0 (the default) means DB 0. The
+  // selection applies to this command only — it does not change the
+  // session's selected DB the way RESP SELECT does.
+  uint64 db = 101;
+
+  // Client correlation id, echoed back on the CommandResponse so pipelined
+  // stream clients can match replies to requests. Replies are always sent in
+  // arrival order, so seq is an aid, not a requirement.
+  uint64 seq = 102;
+}
+
+// CommandRequest is the generic escape hatch: a command name plus raw
+// arguments, parsed by the same front-end-agnostic engine the RESP surface
+// uses. args excludes the command name itself.
+message CommandRequest {
+  string command = 1;
+  repeated bytes args = 2;
+}
+
+// CommandResponse is one reply on the stream: the seq of the Command it
+// answers plus the reply value.
+message CommandResponse {
+  uint64 seq = 1;
+  Value reply = 2;
+}
+
+// BatchRequest is a unary batch of commands (same envelope, no stream).
+message BatchRequest {
+  repeated Command commands = 1;
+}
+
+message BatchResponse {
+  repeated CommandResponse responses = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Typed hot commands (§6.2: the ~30 commands that carry >95% of traffic).
+// Field numbers are per-message; semantics match the Redis command exactly.
+// ---------------------------------------------------------------------------
+
+message GetCommand {
+  bytes key = 1;
+}
+
+// SET key value [NX|XX] [GET] [PX ttl_ms]. ttl_ms <= 0 means no expiry.
+message SetCommand {
+  bytes key = 1;
+  bytes value = 2;
+  int64 ttl_ms = 3;
+  bool nx = 4;
+  bool xx = 5;
+  bool get = 6;
+}
+
+message DelCommand {
+  repeated bytes keys = 1;
+}
+
+message IncrCommand {
+  bytes key = 1;
+  int64 delta = 2;
+}
+
+message IncrFloatCommand {
+  bytes key = 1;
+  double delta = 2;
+}
+
+message MGetCommand {
+  repeated bytes keys = 1;
+}
+
+message MSetPair {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message MSetCommand {
+  repeated MSetPair pairs = 1;
+}
+
+message AppendCommand {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message ExistsCommand {
+  repeated bytes keys = 1;
+}
+
+// EXPIRE key ttl_ms-as-seconds is lossy, so the typed form carries
+// milliseconds and maps to PEXPIRE.
+message ExpireCommand {
+  bytes key = 1;
+  int64 ttl_ms = 2;
+}
+
+// TTL answers in milliseconds (PTTL semantics) for exactness.
+message TtlCommand {
+  bytes key = 1;
+}
+
+message PersistCommand {
+  bytes key = 1;
+}
+
+message HGetCommand {
+  bytes key = 1;
+  bytes field = 2;
+}
+
+message FieldValue {
+  bytes field = 1;
+  bytes value = 2;
+}
+
+message HSetCommand {
+  bytes key = 1;
+  repeated FieldValue pairs = 2;
+}
+
+message HGetAllCommand {
+  bytes key = 1;
+}
+
+message HDelCommand {
+  bytes key = 1;
+  repeated bytes fields = 2;
+}
+
+message HIncrByCommand {
+  bytes key = 1;
+  bytes field = 2;
+  int64 delta = 3;
+}
+
+message LPushCommand {
+  bytes key = 1;
+  repeated bytes elems = 2;
+}
+
+message RPushCommand {
+  bytes key = 1;
+  repeated bytes elems = 2;
+}
+
+message LPopCommand {
+  bytes key = 1;
+}
+
+message RPopCommand {
+  bytes key = 1;
+}
+
+message LRangeCommand {
+  bytes key = 1;
+  int64 start = 2;
+  int64 stop = 3;
+}
+
+message LLenCommand {
+  bytes key = 1;
+}
+
+message SAddCommand {
+  bytes key = 1;
+  repeated bytes members = 2;
+}
+
+message SRemCommand {
+  bytes key = 1;
+  repeated bytes members = 2;
+}
+
+message SMembersCommand {
+  bytes key = 1;
+}
+
+message SIsMemberCommand {
+  bytes key = 1;
+  bytes member = 2;
+}
+
+message ScoredMember {
+  double score = 1;
+  bytes member = 2;
+}
+
+// ZADD key [NX|XX] [GT|LT] [CH] [INCR] score member [...].
+message ZAddCommand {
+  bytes key = 1;
+  repeated ScoredMember members = 2;
+  bool nx = 3;
+  bool xx = 4;
+  bool gt = 5;
+  bool lt = 6;
+  bool ch = 7;
+  bool incr = 8;
+}
+
+message ZScoreCommand {
+  bytes key = 1;
+  bytes member = 2;
+}
+
+// ZRANGE key start stop [WITHSCORES] by rank.
+message ZRangeCommand {
+  bytes key = 1;
+  int64 start = 2;
+  int64 stop = 3;
+  bool withscores = 4;
+}
+
+message ZRemCommand {
+  bytes key = 1;
+  repeated bytes members = 2;
+}
+
+message ZCardCommand {
+  bytes key = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Pub/sub and monitoring streams.
+// ---------------------------------------------------------------------------
+
+// SubscribeRequest is the first (and only) client message on a Subscribe
+// stream: it lists the channels and patterns to subscribe to. Equivalent to
+// SUBSCRIBE/PSUBSCRIBE; there is no mid-stream re-subscribe in M4.
+message SubscribeRequest {
+  repeated string channels = 1;
+  repeated string patterns = 2;
+}
+
+// PushEvent is one pub/sub delivery (or the subscribe ack) on the stream.
+message PushEvent {
+  string channel = 1;   // channel the message arrived on
+  string pattern = 2;   // pattern matched, when this is a pattern delivery
+  bytes payload = 3;    // message payload; empty for subscribe acks
+  int64 count = 4;      // subscription count on subscribe acks, 0 otherwise
+  bool is_ack = 5;      // true for the (p)subscribe confirmation frame
+}
+
+// MonitorRequest starts a MONITOR-equivalent stream (§6.2).
+message MonitorRequest {}
+
+// CommandEvent is one executed command as observed by the monitor stream.
+message CommandEvent {
+  int64 unix_ms = 1;
+  uint64 db = 2;
+  string client_addr = 3;
+  string command = 4;
+  repeated bytes args = 5;
+}

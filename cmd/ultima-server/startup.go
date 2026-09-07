@@ -71,7 +71,7 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 		}
 	}()
 
-	grpcServer := grpcsrv.New()
+	grpcServer := grpcsrv.New(eng)
 	s.grpcSrv = grpcServer
 	go func() {
 		if err := grpcServer.Serve(s.grpcLis); err != nil {

@@ -10,4 +10,5 @@ mkdir -p gen/go
 protoc \
 	--go_out=gen/go --go_opt=module=github.com/pschlump/ultima/gen/go \
 	--go-grpc_out=gen/go --go-grpc_opt=module=github.com/pschlump/ultima/gen/go \
+	proto/ultima/v1/command.proto \
 	proto/ultima/v1/ping.proto
