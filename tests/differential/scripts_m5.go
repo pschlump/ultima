@@ -419,16 +419,56 @@ var configPolicyScripts = []script{
 	}},
 }
 
+// persistScripts: M5c persistence command + CONFIG parity (§13.1). Reply
+// shapes and error strings probed against redis-server 7.2.7. Not
+// compared: CONFIG GET dir (paths differ by construction), LASTSAVE
+// values (wall clock; mAnyInt asserts shape only), INFO persistence field
+// values (timing-dependent), and anything about file contents (D9: own
+// formats). Config persists across scripts in the suite, so the script
+// ends by restoring every knob it touched.
+var persistScripts = []script{
+	{"persist-config", []step{
+		cmd("CONFIG", "GET", "appendonly"),  // no
+		cmd("CONFIG", "GET", "appendfsync"), // everysec
+		cmd("CONFIG", "GET", "save"),        // "" (harness runs --save '')
+		cmd("CONFIG", "SET", "appendfsync", "always"),
+		cmd("CONFIG", "GET", "appendfsync"),
+		cmd("CONFIG", "SET", "appendfsync", "bogus"), // byte-exact error
+		cmd("CONFIG", "GET", "appendfsync"),          // untouched
+		cmd("CONFIG", "SET", "appendfsync", "everysec"),
+		cmd("CONFIG", "GET", "dbfilename"), // dump.rdb
+		// dir and dbfilename are protected configs in 7.2.7: byte-exact errors.
+		cmd("CONFIG", "SET", "dbfilename", "diff-test.dump"),
+		cmd("CONFIG", "SET", "dir", "/tmp"),
+		cmd("CONFIG", "SET", "appendonly", "maybe"), // byte-exact error
+		cmd("CONFIG", "GET", "appendonly"),          // still no
+	}},
+	{"persist-commands", []step{
+		cmd("SET", "pk", "pv"),
+		cmdM(mAnyInt, "LASTSAVE"), // unix seconds; values differ by wall clock
+		cmd("SAVE"),               // +OK both sides
+		cmdM(mAnyInt, "LASTSAVE"),
+		cmd("BGSAVE"), // +Background saving started
+		// Let the background save finish on both sides before BGREWRITEAOF
+		// (Redis's single-child rule would otherwise answer "scheduled").
+		cmd("SLEEP", "300"),
+		cmd("BGREWRITEAOF"), // +Background append only file rewriting started
+		cmd("GET", "pk"),
+	}},
+}
+
 // m5Scripts is the M5 differential table (M5a notifications, M5b
-// maxmemory gate).
+// maxmemory gate, M5c persistence).
 var m5Scripts = func() []script {
 	out := make([]script, 0, len(notifyConfigScripts)+len(notifyKeyeventScripts)+
-		len(notifyChannelScripts)+len(notifyMiscScripts)+len(oomScripts)+len(configPolicyScripts))
+		len(notifyChannelScripts)+len(notifyMiscScripts)+len(oomScripts)+len(configPolicyScripts)+
+		len(persistScripts))
 	out = append(out, notifyConfigScripts...)
 	out = append(out, notifyKeyeventScripts...)
 	out = append(out, notifyChannelScripts...)
 	out = append(out, notifyMiscScripts...)
 	out = append(out, oomScripts...)
 	out = append(out, configPolicyScripts...)
+	out = append(out, persistScripts...)
 	return out
 }()

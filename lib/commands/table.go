@@ -72,6 +72,8 @@ func init() {
 	def("exists", -2, []string{"readonly", "fast"}, 1, -1, 1, "keyspace", cmdExists)
 	def("expire", -3, []string{"write", "fast"}, 1, 1, 1, "keyspace", cmdExpire)
 	def("pexpire", -3, []string{"write", "fast"}, 1, 1, 1, "keyspace", cmdPExpire)
+	def("expireat", -3, []string{"write", "fast"}, 1, 1, 1, "keyspace", cmdExpireAt)
+	def("pexpireat", -3, []string{"write", "fast"}, 1, 1, 1, "keyspace", cmdPExpireAt)
 	def("ttl", 2, []string{"readonly", "fast"}, 1, 1, 1, "keyspace", cmdTTL)
 	def("pttl", 2, []string{"readonly", "fast"}, 1, 1, 1, "keyspace", cmdPTTL)
 	def("persist", 2, []string{"write", "fast"}, 1, 1, 1, "keyspace", cmdPersist)
@@ -186,6 +188,10 @@ func init() {
 	def("config", -2, []string{"admin"}, 0, 0, 0, "server", cmdConfig)
 	def("client", -2, []string{"admin"}, 0, 0, 0, "server", cmdClient)
 	def("command", -1, []string{"readonly"}, 0, 0, 0, "server", cmdCommand)
+	def("save", 1, []string{"admin"}, 0, 0, 0, "server", cmdSave)
+	def("bgsave", 1, []string{"admin"}, 0, 0, 0, "server", cmdBGSave)
+	def("lastsave", 1, []string{"readonly", "fast"}, 0, 0, 0, "server", cmdLastSave)
+	def("bgrewriteaof", 1, []string{"admin"}, 0, 0, 0, "server", cmdBGRewriteAOF)
 }
 
 // CommandCount reports the command table size (COMMAND COUNT).

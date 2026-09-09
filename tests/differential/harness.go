@@ -204,6 +204,7 @@ func startRedis(t *testing.T, requirepass string) string {
 	t.Helper()
 	port := freePort(t)
 	args := []string{"--port", strconv.Itoa(port), "--save", "", "--appendonly", "no",
+		"--dir", t.TempDir(), // M5c: SAVE/BGSAVE scripts write here, not the repo
 		"--enable-debug-command", "yes"}
 	if requirepass != "" {
 		args = append(args, "--requirepass", requirepass)

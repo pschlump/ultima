@@ -175,6 +175,18 @@ var p0Scripts = []script{
 		cmd("EXPIRE", "e", "10", "NX", "GT"),
 		cmd("EXPIRE", "e", "10", "GT", "LT"),
 		cmd("EXPIRE", "e", "10", "BADOPT"),
+		// absolute-time forms (M5c: EXPIREAT/PEXPIREAT, added for the AOF
+		// PEXPIREAT rewrite); far-future stamps stay valid for the run
+		cmd("EXPIREAT", "e", "2000000000"),
+		cmdM(mTTL, "TTL", "e"),
+		cmd("PEXPIREAT", "e", "2000000000000"),
+		cmdM(mTTL, "PTTL", "e"),
+		cmd("EXPIREAT", "e", "2000000000", "NX"), // has TTL: fails
+		cmd("EXPIREAT", "e", "1000000000", "GT"), // earlier than current: fails
+		cmd("PEXPIREAT", "e", "3000000000000", "GT"),
+		cmdM(mTTL, "PTTL", "e"),
+		cmd("EXPIREAT", "e", "abc"),
+		cmd("PEXPIREAT", "missing", "2000000000000"),
 		// zero/negative expire deletes the key
 		cmd("EXPIRE", "e", "0"),
 		cmd("EXISTS", "e"),

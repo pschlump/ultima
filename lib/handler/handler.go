@@ -14,13 +14,51 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/pschlump/ultima/lib/commands"
 )
 
-// Register wires the HTTP routes onto r.
-func Register(r chi.Router) {
+// Register wires the HTTP routes onto r. p is the M5c persistence
+// manager (commands.Persister) behind the /api/v1/save family of
+// triggers (§13.1); nil disables them (bare test servers).
+func Register(r chi.Router, p commands.Persister) {
 	r.Get("/health", health)
 	r.Get("/ready", health)
 	r.Get("/api/v1/ping", ping)
+	if p != nil {
+		r.Post("/api/v1/save", saveTrigger(p, false))
+		r.Post("/api/v1/bgsave", saveTrigger(p, true))
+		r.Post("/api/v1/bgrewriteaof", rewriteTrigger(p))
+	}
+}
+
+// saveTrigger runs SAVE (block=false: synchronous whole-server dump) or
+// BGSAVE (block=true: per-shard staggered background dump).
+func saveTrigger(p commands.Persister, background bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		var err error
+		if background {
+			err = p.BGSave()
+		} else {
+			err = p.Save()
+		}
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"status": "error", "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+// rewriteTrigger runs BGREWRITEAOF.
+func rewriteTrigger(p commands.Persister) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		if err := p.BGRewriteAOF(); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"status": "error", "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
 }
 
 func health(w http.ResponseWriter, _ *http.Request) {

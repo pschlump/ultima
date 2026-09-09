@@ -19,8 +19,22 @@ import (
 // Config is the root configuration. Groups are nested structs so
 // SetDefaults recursion reaches every field.
 type Config struct {
-	Server ServerConfig `json:"server"`
-	Debug  DebugConfig  `json:"debug"`
+	Server  ServerConfig  `json:"server"`
+	Persist PersistConfig `json:"persist"`
+	Debug   DebugConfig   `json:"debug"`
+}
+
+// PersistConfig is the persistence section (M5c, §13.1): Redis-parity
+// names (dir, dbfilename, appenddirname, appendonly, appendfsync, save)
+// plus the Ultima-only snapshot_compress (D9 own formats).
+type PersistConfig struct {
+	Dir              string `json:"dir" default:"./data"`
+	DbFilename       string `json:"dbfilename" default:"dump.rdb"`
+	AppendDirname    string `json:"appenddirname" default:"appendonlydir"`
+	AppendOnly       bool   `json:"appendonly" default:"false"`
+	AppendFsync      string `json:"appendfsync" default:"everysec"` // always | everysec | no
+	Save             string `json:"save" default:"3600 1 300 100 60 10000"`
+	SnapshotCompress bool   `json:"snapshot_compress" default:"false"`
 }
 
 // ServerConfig holds the three listener addresses and server knobs.

@@ -213,7 +213,18 @@ func cmdInfo(e *Engine, _ *ConnState, args [][]byte) resp.Value {
 		fmt.Fprintf(&sb, "maxmemory_policy:%s\r\n", e.Shards.Policy())
 	})
 	writeSection("persistence", func() {
-		sb.WriteString("loading:0\r\n")
+		if p := e.persister; p != nil {
+			p.InfoPersistence(&sb)
+		} else {
+			sb.WriteString("loading:0\r\n")
+			sb.WriteString("rdb_changes_since_last_save:0\r\n")
+			sb.WriteString("rdb_bgsave_in_progress:0\r\n")
+			sb.WriteString("rdb_last_save_time:0\r\n")
+			sb.WriteString("rdb_last_bgsave_status:ok\r\n")
+			sb.WriteString("aof_enabled:0\r\n")
+			sb.WriteString("aof_rewrite_in_progress:0\r\n")
+			sb.WriteString("aof_last_bgrewrite_status:ok\r\n")
+		}
 	})
 	writeSection("stats", func() {
 		fmt.Fprintf(&sb, "total_connections_received:%d\r\n", e.totalConns.Load())
@@ -301,6 +312,24 @@ type configParam struct {
 }
 
 var configParams = []configParam{
+	{name: "appendfsync",
+		get: func(e *Engine) string {
+			if p := e.persister; p != nil {
+				return p.AppendFsync()
+			}
+			return "everysec"
+		},
+		set: func(e *Engine, v string) (resp.Value, bool) {
+			switch strings.ToLower(v) {
+			case "everysec", "always", "no":
+			default:
+				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'appendfsync') - argument(s) must be one of the following: everysec, always, no"), true
+			}
+			if p := e.persister; p != nil {
+				p.SetAppendFsync(strings.ToLower(v))
+			}
+			return resp.Value{}, false
+		}},
 	{name: "appendonly",
 		get: func(e *Engine) string {
 			if e.appendOnly.Load() {
@@ -309,19 +338,47 @@ var configParams = []configParam{
 			return "no"
 		},
 		set: func(e *Engine, v string) (resp.Value, bool) {
+			var on bool
 			switch strings.ToLower(v) {
 			case "yes":
-				e.appendOnly.Store(true)
+				on = true
 			case "no":
-				e.appendOnly.Store(false)
 			default:
 				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'appendonly') - argument must be 'yes' or 'no'"), true
+			}
+			e.appendOnly.Store(on)
+			if p := e.persister; p != nil {
+				if err := p.SetAppendOnly(on); err != nil {
+					return resp.Err("ERR CONFIG SET failed (possibly related to argument 'appendonly') - " + err.Error()), true
+				}
 			}
 			return resp.Value{}, false
 		}},
 	{name: "databases",
 		get: func(e *Engine) string { return fmt.Sprintf("%d", e.Shards.MaxDBs()) },
 		set: nil},
+	{name: "dbfilename",
+		get: func(e *Engine) string {
+			if p := e.persister; p != nil {
+				return p.DbFilename()
+			}
+			return "dump.rdb"
+		},
+		// Redis 7.2.7: dbfilename is a protected config, not settable.
+		set: func(_ *Engine, _ string) (resp.Value, bool) {
+			return resp.Err("ERR CONFIG SET failed (possibly related to argument 'dbfilename') - can't set protected config"), true
+		}},
+	{name: "dir",
+		get: func(e *Engine) string {
+			if p := e.persister; p != nil {
+				return p.Dir()
+			}
+			return ""
+		},
+		// Redis 7.2.7: dir is a protected config, not settable at runtime.
+		set: func(_ *Engine, _ string) (resp.Value, bool) {
+			return resp.Err("ERR CONFIG SET failed (possibly related to argument 'dir') - can't set protected config"), true
+		}},
 	{name: "maxmemory",
 		get: func(e *Engine) string { return fmt.Sprintf("%d", e.MaxMemory()) },
 		set: func(e *Engine, v string) (resp.Value, bool) {
@@ -363,6 +420,9 @@ var configParams = []configParam{
 				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'save') - Invalid save parameters"), true
 			}
 			e.save.Store(v)
+			if p := e.persister; p != nil {
+				p.SetSaveRules(v) // M5c: the save string now schedules
+			}
 			return resp.Value{}, false
 		}},
 }

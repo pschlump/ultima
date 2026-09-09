@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"slices"
+
 	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/shard"
 )
@@ -90,13 +92,26 @@ func cmdExec(e *Engine, cs *ConnState, _ [][]byte) resp.Value {
 
 	// Commit: run the queue with the pause token. Arity was validated at
 	// queue time; handler errors become error elements in the reply array
-	// and execution continues, as in Redis.
+	// and execution continues, as in Redis. Each queued command is
+	// captured for the AOF individually (Redis 7.2.7 writes the inner
+	// commands to the AOF without MULTI/EXEC framing — verified by probe).
 	cs.tok = tok
 	cs.inExec = true
 	replies := make([]resp.Value, 0, len(cs.Queue))
 	for _, qargs := range cs.Queue {
 		if qdef, qok := table[lowerASCII(qargs[0])]; qok {
-			replies = append(replies, qdef.Handler(e, cs, qargs))
+			// Inner commands bypass Execute, so the M5c persist-drain
+			// tracking (persistInFlight) is applied here, per command.
+			track := e.persister != nil && slices.Contains(qdef.Flags, "write")
+			if track {
+				e.persistInFlight.Add(1)
+			}
+			qv := qdef.Handler(e, cs, qargs)
+			replies = append(replies, qv)
+			e.capturePersist(cs, qdef, lowerASCII(qargs[0]), qargs, qv)
+			if track {
+				e.persistInFlight.Add(-1)
+			}
 		}
 	}
 	return resp.Arr(replies...)

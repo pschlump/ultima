@@ -191,7 +191,7 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(handler.RequestLogger(logger))
-	handler.Register(r)
+	handler.Register(r, nil) // no persistence manager in the surface test
 	r.Get("/ws/v1", wssrv.Handler(eng, logger))
 	httpSrv := &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	go func() {

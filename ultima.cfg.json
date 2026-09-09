@@ -7,5 +7,14 @@
     "log_level": "info",
     "requirepass": "$ENV$ultima_password"
   },
+  "persist": {
+    "dir": "./data",
+    "dbfilename": "dump.rdb",
+    "appenddirname": "appendonlydir",
+    "appendonly": false,
+    "appendfsync": "everysec",
+    "save": "3600 1 300 100 60 10000",
+    "snapshot_compress": false
+  },
   "debug": { "enabled": { "dump.commands": false } }
 }

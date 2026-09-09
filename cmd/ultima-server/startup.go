@@ -16,14 +16,16 @@ import (
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/config"
 	"github.com/pschlump/ultima/lib/grpcsrv"
+	"github.com/pschlump/ultima/lib/persist"
 	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/respserver"
 	"github.com/pschlump/ultima/lib/shard"
 )
 
-// servers bundles the three listeners plus the shard engine for
-// coordinated shutdown. Listeners are bound up front (so ":0" test
-// configs resolve to real ports) before any serve loop starts.
+// servers bundles the three listeners plus the shard engine and persist
+// manager for coordinated shutdown. Listeners are bound up front (so
+// ":0" test configs resolve to real ports) but serve loops start only
+// after persistence restore completes (§13.1 restore-before-serve).
 type servers struct {
 	respSrv *resp.Server
 	respLis net.Listener
@@ -32,6 +34,7 @@ type servers struct {
 	httpSrv *http.Server
 	httpLis net.Listener
 	shards  *shard.Engine
+	persist *persist.Manager
 }
 
 func respPortOf(lis net.Listener) int {
@@ -73,6 +76,28 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 	}
 	s.shards.SetPolicy(pol)
 
+	// Persistence (M5c, §13.1): the manager restores synchronously (AOF
+	// when appendonly, else the snapshot) BEFORE any serve loop starts —
+	// listeners are bound but not yet accepting, so no client can observe
+	// an unrestored keyspace.
+	switch strings.ToLower(cfg.Persist.AppendFsync) {
+	case "always", "everysec", "no":
+	default:
+		return nil, fmt.Errorf("invalid appendfsync %q: use one of 'always', 'everysec', 'no'", cfg.Persist.AppendFsync)
+	}
+	s.persist = persist.NewManager(persist.Config{
+		Dir:           cfg.Persist.Dir,
+		DbFilename:    cfg.Persist.DbFilename,
+		AppendDirname: cfg.Persist.AppendDirname,
+		AppendOnly:    cfg.Persist.AppendOnly,
+		AppendFsync:   strings.ToLower(cfg.Persist.AppendFsync),
+		Save:          cfg.Persist.Save,
+		Compress:      cfg.Persist.SnapshotCompress,
+	}, s.shards, logger)
+	if err := s.persist.Start(eng); err != nil {
+		return nil, err
+	}
+
 	s.respSrv = respserver.New(cfg.Server.RespAddr, eng)
 	go func() {
 		if err := s.respSrv.Serve(s.respLis); err != nil {
@@ -89,7 +114,7 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 	}()
 
 	s.httpSrv = &http.Server{
-		Handler:           newRouter(logger, eng),
+		Handler:           newRouter(logger, eng, s.persist),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -128,6 +153,10 @@ func (s *servers) shutdown(ctx context.Context) error {
 
 	errs = append(errs, s.httpSrv.Shutdown(ctx))
 	errs = append(errs, s.respSrv.Close()) // closes the listener and all conns
+	// Persist before the shard engine stops (§13.1): final fsync (+ the
+	// shutdown snapshot when save rules are configured and unsaved writes
+	// remain) needs live shard goroutines.
+	s.persist.Close()
 	s.shards.Close()
 	return errors.Join(errs...)
 }

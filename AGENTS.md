@@ -38,8 +38,12 @@ differential-green incl. expiry events) and expiry hardening (time-boxed
 adaptive sweep). **M5b is done** — maxmemory eviction (all 8 Redis
 policies, per-shard memory accounting and eviction loops, the OOM gate
 with byte-exact `OOM`/`EXECABORT` replies; differential-green on the
-gate strings). M5c (`lib/persist` snapshot +
-AOF) and M5d (soak benchmark) are pending. Later milestones from the
+gate strings). **M5c is done** — persistence (`lib/persist`: own-format
+snapshot + per-shard AOF with global sequence merge at replay,
+SAVE/BGSAVE/LASTSAVE/BGREWRITEAOF, restore-before-serve, crash-recovery
+tested; M5c also closed the P0 gap EXPIREAT/PEXPIREAT, needed by the
+AOF's PEXPIREAT rewrite). M5d (soak benchmark) is pending. Later
+milestones from the
 design layout
 (§14.1: `lib/persist`, `clients/`, `web/`, `api/`, extra CLIs under
 `cmd/`) do **not** exist yet.
@@ -51,7 +55,11 @@ design layout
   - `github.com/pschlump/pluto` — generic data-structure library (thread-safe
     `_ts` variants). **Pulled in via `replace` directive to the sibling
     checkout `../pluto`** — that directory must exist for the module to
-    build. Its per-structure specs live in `docs/pluto/`.
+    build. Its per-structure specs live in `docs/pluto/`. **Standing
+    permission**: when the efficient way to implement something is to add a
+    feature to `../pluto` (e.g. `lru_ts`, `lfu_ts`), add it to the data-structure
+    library — with tests there — rather than working around its API here.
+    Update the matching `docs/pluto/` spec when you do.
   - `github.com/go-chi/chi/v5` — HTTP router for the management surface.
   - `github.com/gorilla/websocket` — WebSocket endpoint.
   - `google.golang.org/grpc` + `protobuf` — gRPC front-end.
@@ -98,9 +106,10 @@ Request flow: each front-end parses its wire format, calls
 **Commands implemented so far**: M1/P0 — connection (PING, ECHO, HELLO,
 AUTH, SELECT, QUIT), strings (SET/GET family, INCR/DECR family +
 INCRBYFLOAT (M4), APPEND,
-STRLEN, MGET/MSET/MSETNX), keyspace (DEL, EXISTS, EXPIRE/PEXPIRE, TTL/PTTL,
+STRLEN, MGET/MSET/MSETNX), keyspace (DEL, EXISTS, EXPIRE/PEXPIRE/
+EXPIREAT/PEXPIREAT (M5c), TTL/PTTL,
 PERSIST, TYPE, SCAN), server (INFO, DBSIZE, FLUSHDB/FLUSHALL, CONFIG,
-CLIENT, COMMAND). M2/P1 — hashes (HSET/HGET/HMSET/HMGET/HGETALL/HDEL/
+CLIENT, COMMAND, SAVE/BGSAVE/LASTSAVE/BGREWRITEAOF (M5c)). M2/P1 — hashes (HSET/HGET/HMSET/HMGET/HGETALL/HDEL/
 HEXISTS/HLEN/HKEYS/HVALS/HINCRBY/HINCRBYFLOAT/HSETNX/HSTRLEN/HRANDFIELD/
 HSCAN), lists (LPUSH/RPUSH/LPUSHX/RPUSHX/LPOP/RPOP/LLEN/LRANGE/LINDEX/
 LSET/LINSERT/LREM/LTRIM/RPOPLPUSH/LPOS/LMOVE), sets (SADD/SREM/SMEMBERS/
@@ -200,6 +209,67 @@ M5b architecture notes:
   under the limit. `maxmemory-policy` CONFIG with byte-exact enum error;
   `Engine.EvictSamples` = Redis maxmemory-samples default (5).
 
+M5c architecture notes:
+
+- **Snapshot** (`lib/persist/snapshot.go`, own format per D9): magic
+  `ULTIMA01`, header, one segment per (db, shard) with CRC-64/XZ (pluto
+  `crc`) per segment + whole-file trailer; payloads optionally
+  LZW-compressed (pluto `quicklist.LZWCodec()`, `snapshot_compress`).
+  Each segment is serialized inside its shard goroutine via
+  `Shard.DumpDB` (walks only stripe i through the new pluto
+  `sharded_hash_ts.StripeWalk`, skipping passively-expired keys) — a
+  consistent per-shard point-in-time with no pause. SAVE takes
+  `PauseAll` + `WriteSnapshotTok` (a tok-0 dump under the pause
+  DEADLOCKS — parked shards stash non-token tasks); BGSAVE runs
+  unstopped per-shard staggered tasks (divergence from fork-RDB,
+  documented). tmp+rename atomicity, `snapshot.manifest` JSON sidecar.
+- **AOF** (`lib/persist/aof.go`): per-shard logs `appendonlydir/
+  shard-<i>.aof` + manifest. Every record is self-contained and
+  seq-stamped — `["ULTIMAREC","<db>","<seq>",cmd,args...]` — seq from a
+  set-wide atomic counter; broadcasts (FLUSHDB/FLUSHALL) share ONE seq
+  across all logs. Replay (`replay.go`) merges all logs by seq
+  (sort-merge over collected records) and executes each seq once — a
+  file-at-a-time replay would re-execute broadcasts once per shard and
+  clobber keys restored from earlier logs (found by unit test). Post-
+  restart seqs resume above the replayed max. fsync: `always` syncs
+  after each append, `everysec` via the manager's 1s ticker, `no`.
+- **Capture** (`lib/commands/aof.go`): `Execute` reports every
+  successful write-flagged command post-handler; EXEC is skipped there
+  and `cmdExec` captures each queued command individually (7.2.7's AOF
+  has no MULTI/EXEC framing — probed). Redis-exact rewrites (probed
+  against live 7.2.7 AOF bytes): relative expires → absolute
+  (`PEXPIREAT key abs [cond]` — condition kept; SET … EX/PX/EXAT →
+  PXAT; GETEX → PEXPIREAT/PERSIST), blocking pops → plain effect on the
+  replied key (BLPOP→LPOP, BLMOVE→LMOVE sans timeout, BLMPOP→1-key
+  LMPOP, BZ* likewise), SPOP → SREM of the replied members, null/timeout
+  → nothing. Expiry/eviction deletions arrive via `OnKeyGone` →
+  synthesized DEL. v1 limitation: record order follows per-connection
+  completion order; same-key writes racing across connections can
+  replay in the other relative order (apply-time seq assignment is the
+  M8 answer).
+- **BGREWRITEAOF** dumps state as SET/RPUSH/SADD/ZADD/HSET + PEXPIREAT
+  under PauseAll after draining write commands caught between mutation
+  and capture (`commands.Engine.PersistQuiesced` — the
+  persistInFlight/persistShardTasks/blockParked counters; EXEC excluded
+  from tracking since it blocks on txMu). Stop-the-world rewrite — the
+  documented divergence from fork+COW. Redis single-child rule mirrored:
+  rewrite rejects BGSAVE (byte-exact "Another child process is
+  active…" error), BGSAVE-in-progress makes BGREWRITEAOF reply
+  "scheduled".
+- **Restore/wiring**: `Manager.Start` restores synchronously BEFORE the
+  serve loops start (listeners bound first, accepting after) — AOF when
+  appendonly and logs exist, else snapshot; `loading:1` in INFO during
+  restore. Replay feeds argv through `Engine.Execute` with a synthetic
+  authed ConnState per record db. Shutdown: listeners → `persist.Close`
+  (final fsync; shutdown snapshot when save rules configured, appendonly
+  off, unsaved writes) → `shards.Close`. CONFIG gained `appendfsync`
+  (live), `dir`/`dbfilename` (protected in 7.2.7 — byte-exact SET
+  error; default dbfilename `dump.rdb` for GET parity); `appendonly`
+  and `save` SETs are now live (open/close AOF, reschedule auto-save).
+  HTTP triggers: POST `/api/v1/save`, `/bgsave`, `/bgrewriteaof`.
+  Crash-recovery tests: `tests/m5_test.go` (subprocess, SIGKILL, three
+  variants); unit round-trips in `lib/persist/persist_test.go`.
+
 ## Code Organization
 
 ```
@@ -230,7 +300,9 @@ lib/commands/        front-end-agnostic command engine; table.go is the command 
                      tx.go (M3 MULTI/EXEC/WATCH), pubsub.go (M3 subscriptions + gate),
                      block.go (M3 blocking ops, park/wake engine),
                      notify.go (M5a notify-keyspace-events: class parser,
-                     notifyKeyspace emission point)
+                     notifyKeyspace emission point), aof.go (M5c Persister
+                     interface + capture/rewrite rules), persist.go (M5c
+                     SAVE/BGSAVE/LASTSAVE/BGREWRITEAOF)
 lib/envelope/        shared bridge (M4): protobuf Command → engine argv, resp.Value ↔
                      protobuf Value (RESP3 mirror; FromProto is the inverse, used by
                      the RESP↔gRPC wire-byte parity gate); used by grpcsrv and wssrv (D3/D15)
@@ -240,14 +312,24 @@ lib/wssrv/           WebSocket front-end (M4, §6.3): binary protobuf Command fr
                      /ws/v1, one frame per command, seq-correlated replies; pub/sub
                      pushes as unsolicited seq-0 frames over a bounded queue (slow
                      consumer → close, as in lib/respserver)
-lib/handler/         HTTP routes (/health, /ready, /api/v1/ping) + RequestLogger
+lib/handler/         HTTP routes (/health, /ready, /api/v1/ping, POST
+                     /api/v1/save|bgsave|bgrewriteaof) + RequestLogger
+lib/persist/         persistence (M5c, §13.1, D9 own formats): format.go
+                     (snapshot codec, CRC-64/XZ, LZW payloads), snapshot.go
+                     (per-(db,shard) segments via Shard.DumpDB; WriteSnapshot[Tok]
+                     + LoadSnapshot), aof.go (per-shard seq-stamped logs +
+                     BGREWRITEAOF dump), replay.go (seq merge + broadcast
+                     dedup), manager.go (save rules, fsync policies,
+                     restore-before-serve, INFO persistence fields)
 proto/ultima/v1/     protobuf IDL
 gen/go/ultima/v1/    generated protobuf Go bindings (do not hand-edit)
 gen/ts/ultima/v1/    generated protobuf TypeScript bindings (protobuf-es; do not hand-edit)
 tests/               integration_test.go (three surfaces, ephemeral ports), m3_test.go
                      (M3 real-socket pub/sub + blocking + WATCH/EXEC stress tests),
                      m4_grpc_test.go / m4_ws_test.go (M4 front-ends), m4_parity_test.go
-                     (RESP↔gRPC wire-byte diff), m4_ts_test.go (TS round-trip driver)
+                     (RESP↔gRPC wire-byte diff), m4_ts_test.go (TS round-trip driver),
+                     m5_test.go (M5c crash recovery: subprocess + SIGKILL,
+                     snapshot/AOF/AOF-rewrite variants)
 tests/ts-roundtrip/  protobuf-es TS client script (bun; `bun install` first) — the M4
                      go+ts round-trip exit criterion; strict tsc typecheck via tsconfig
 tests/differential/  harness diffs replies against a real redis-server (the parity gate);
@@ -305,12 +387,20 @@ values are expanded from the environment (`lib/config/config.go`).
    `redis-server` subprocess; decoded replies **including error strings**
    are diffed — this is the primary parity gate. Requires `redis-server`
    on PATH (or `REDIS_BIN`); skipped under `-short` or `DIFFERENTIAL=0`.
+   **Standing permission**: `redis-server` and `redis-cli` may be run on
+   this machine at any time for probing behavior (there is no data on the
+   local Redis that can be broken). Prefer probing the live installed
+   server (7.2.7, the compat target) over reading `note/redis/`, which is
+   a newer 8.x source checkout and can diverge from 7.2.7 behavior.
    Scripts live in `scripts.go` (P0), `scripts_p1.go` (P1), `scripts_m3.go`
    (P2: transactions, pub/sub, blocking — uses the multi-connection
    `cmdOn`/`sendOn`/`recvOn`/`expectPush` step constructors documented in
    `compare.go`), `scripts_m5.go` (M5a: keyspace notifications — notify
    scripts must reset `notify-keyspace-events ""` at the end; config
-   persists across scripts); extend the appropriate file when adding commands.
+   persists across scripts; M5b: OOM gate + policy CONFIG; M5c:
+   SAVE/BGSAVE/LASTSAVE/BGREWRITEAOF reply shapes + persist CONFIG keys —
+   the harness's Ultima gets a temp-dir persist manager and its redis a
+   temp `--dir`); extend the appropriate file when adding commands.
 
 Running `go test ./...` also compiles `note/grpc-vs-text-benchmark` and
 `note/crc-probe` (scratch modules kept for reference).

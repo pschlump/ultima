@@ -161,19 +161,26 @@ func (e *Engine) block(cs *ConnState, keys [][]byte, timeout time.Duration,
 			e.blockedClients.Add(1)
 			blocked = true
 		}
+		// blockParked marks the channel-parked window for the M5c
+		// persist-drain check (PersistQuiesced): while parked, no mutation
+		// of ours can be in flight, so the drain need not wait for us.
+		e.blockParked.Add(1)
 		select {
 		case <-w.Ch:
 			// Another connection may have won the pop race: deregister,
 			// retry the fast path, and re-register if still empty.
 			// Re-registration goes to the BACK of each FIFO (Redis keeps
 			// a blocked client's original position; this is looser).
+			e.blockParked.Add(-1)
 			e.blockDeregister(cs, keys, w)
 		case <-timeoutCh:
+			e.blockParked.Add(-1)
 			e.blockDeregister(cs, keys, w)
 			return resp.Null()
 		case <-e.Shards.Closing():
 			// Shutdown: reply null. The shards are being stopped, so no
 			// deregistration — submitting shard tasks now could hang.
+			e.blockParked.Add(-1)
 			return resp.Null()
 		}
 	}

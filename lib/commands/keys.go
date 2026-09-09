@@ -91,7 +91,7 @@ func parseExpireFlags(args [][]byte) (expireFlags, resp.Value, bool) {
 	return f, resp.Value{}, false
 }
 
-func expireCommon(e *Engine, cs *ConnState, args [][]byte, ms bool) resp.Value {
+func expireCommon(e *Engine, cs *ConnState, args [][]byte, ms, abs bool) resp.Value {
 	v, ok := parseIntStrict(args[2])
 	if !ok {
 		return errNotInt
@@ -102,13 +102,22 @@ func expireCommon(e *Engine, cs *ConnState, args [][]byte, ms bool) resp.Value {
 	}
 	now := e.Shards.NowMs()
 	var at int64
-	if ms {
-		at = now + v
-	} else {
+	switch {
+	case abs && ms:
+		at = v // PEXPIREAT: absolute ms
+	case abs:
+		if v > math.MaxInt64/1000 {
+			at = math.MaxInt64
+		} else {
+			at = v * 1000 // EXPIREAT: absolute seconds
+		}
+	case ms:
+		at = now + v // PEXPIRE: relative ms
+	default:
 		if v > (math.MaxInt64-now)/1000 {
 			at = math.MaxInt64
 		} else {
-			at = now + v*1000
+			at = now + v*1000 // EXPIRE: relative seconds
 		}
 	}
 	key := string(args[1])
@@ -161,11 +170,19 @@ func expireCommon(e *Engine, cs *ConnState, args [][]byte, ms bool) resp.Value {
 }
 
 func cmdExpire(e *Engine, cs *ConnState, args [][]byte) resp.Value {
-	return expireCommon(e, cs, args, false)
+	return expireCommon(e, cs, args, false, false)
 }
 
 func cmdPExpire(e *Engine, cs *ConnState, args [][]byte) resp.Value {
-	return expireCommon(e, cs, args, true)
+	return expireCommon(e, cs, args, true, false)
+}
+
+func cmdExpireAt(e *Engine, cs *ConnState, args [][]byte) resp.Value {
+	return expireCommon(e, cs, args, false, true)
+}
+
+func cmdPExpireAt(e *Engine, cs *ConnState, args [][]byte) resp.Value {
+	return expireCommon(e, cs, args, true, true)
 }
 
 func ttlCommon(e *Engine, cs *ConnState, args [][]byte, ms bool) resp.Value {

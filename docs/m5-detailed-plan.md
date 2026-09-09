@@ -16,7 +16,7 @@ keys use **Redis-parity names** (`appendonly`, `appendfsync`,
 differential gate diffs CONFIG GET replies byte-exact, so parity names win.
 §8 is a sketch, not a D-decision.
 
-**Status: M5a done, M5b done. M5c/M5d not started.**
+**Status: M5a done, M5b done, M5c done. M5d not started.**
 
 ---
 
@@ -138,6 +138,45 @@ counts keyspace, D10) — unit-tested instead.
 Own format per D9. No new module dependencies: CRC-64 via pluto `crc`,
 compression via pluto `quicklist.LZWCodec()` (the documented LZF stand-in)
 behind a `compress` config flag.
+
+**As-built adjustments (from implementation + live-7.2.7 probes):**
+
+- `sharded_hash_ts.StripeWalk(i)` was added to pluto (per-stripe walk;
+  the per-shard dump walks only its own stripe).
+- The EXEC gap resolution changed: 7.2.7's AOF does NOT wrap transactions
+  in MULTI/EXEC (probed — replicas get the framing, the AOF doesn't).
+  cmdExec captures each queued command individually instead.
+- Rewrite rules probed against live 7.2.7 AOF bytes: EXPIRE-family →
+  `PEXPIREAT key abs-ms [cond]` (condition kept!); SET … EX/PX/EXAT →
+  `PXAT abs`; GETEX … EX/PX/EXAT → PEXPIREAT, … PERSIST → PERSIST;
+  BLPOP/BRPOP → LPOP/RPOP of the replied key (even when it never
+  blocked); BLMOVE → LMOVE sans timeout; BRPOPLPUSH → RPOPLPUSH;
+  BZPOPMIN/MAX → ZPOPMIN/MAX; BLMPOP/BZMPOP → single-key LMPOP/ZMPOP;
+  SPOP → SREM of the replied members; timeouts/null replies log nothing.
+  EXPIREAT/PEXPIREAT had to be implemented as commands (P0 gap) since
+  the AOF speaks PEXPIREAT.
+- Per-shard AOF records carry a global sequence number and per-record db
+  (`["ULTIMAREC","<db>","<seq>",cmd,args...]`), and replay is a merge by
+  seq with broadcast (FLUSHDB/FLUSHALL) dedup — a plain per-file replay
+  loses cross-shard ordering (found by unit test: a broadcast FLUSHDB
+  replayed once per shard file at per-shard positions clobbered other
+  shards' replayed keys). BGREWRITEAOF dump records take fresh seqs from
+  the same counter; post-restart seqs resume above the replayed max.
+- BGREWRITEAOF takes PauseAll for the dump+swap plus a capture drain
+  (`commands.Engine.PersistQuiesced`): commands caught between mutation
+  and AOF append are waited out, so no mutation is both in the dump and
+  in the new log (which would duplicate INCR/RPUSH effects on replay).
+  Stop-the-world rewrite, proportional to keyspace size — the documented
+  divergence from fork+COW; chunked dump is the follow-up.
+- v1 limitation (documented): AOF record order follows per-connection
+  completion order; same-key writes racing across connections can replay
+  in the other relative order. Apply-time sequence assignment is the M8
+  (replication) answer.
+- SAVE deadlocks if the dump runs tok-0 DoShard under PauseAll — SAVE
+  uses WriteSnapshotTok with the pause token (found by smoke test).
+- `dir` and `dbfilename` are protected configs in 7.2.7 (byte-exact
+  "can't set protected config" on SET); default dbfilename is `dump.rdb`
+  for CONFIG GET parity.
 
 ### Snapshot (RDB-equivalent)
 

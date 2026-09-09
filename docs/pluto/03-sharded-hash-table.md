@@ -49,6 +49,14 @@ func (h *ShardedHash[T]) StripeLen(i int) int   // per-stripe load, for metrics
 // a per-chain reservoir draw; attempt-capped, may return < n on sparse
 // stripes, duplicates possible.
 func (h *ShardedHash[T]) SampleStripe(stripe, n int, rng *rand.Rand) []T
+
+// StripeWalk (added for the Ultima M5c snapshot writer): visit every element
+// of ONE stripe, pos counting from 0 within the stripe, holding only that
+// stripe's read lock — shard i serializes just its own stripe.  Panics on an
+// out-of-range stripe index (the SampleStripe convention); a nil table
+// visits nothing and returns true (the Walk convention).  Same no-reentrancy
+// rule as Walk.
+func (h *ShardedHash[T]) StripeWalk(i int, fx ApplyFunction[T]) (b bool)
 ```
 
 (Adjust the exact KV shape — separate `key, value` params vs. a single `T`

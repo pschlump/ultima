@@ -2,6 +2,8 @@ package differential
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"sort"
 	"strconv"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pschlump/ultima/lib/commands"
+	"github.com/pschlump/ultima/lib/persist"
 	"github.com/pschlump/ultima/lib/respserver"
 	"github.com/pschlump/ultima/lib/shard"
 )
@@ -24,6 +27,20 @@ func startUltima(t *testing.T, requirepass string) string {
 	if requirepass != "" {
 		eng.SetRequirePass(requirepass)
 	}
+	// M5c: persistence manager on a per-test temp dir, so SAVE/BGSAVE/
+	// CONFIG-persist scripts run against real persistence wiring (AOF off
+	// by default, as Redis).
+	pm := persist.NewManager(persist.Config{
+		Dir:           t.TempDir(),
+		DbFilename:    "dump.rdb",
+		AppendDirname: "appendonlydir",
+		AppendFsync:   "everysec",
+		// Save "": the harness's redis-server runs with --save ''.
+	}, sh, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := pm.Start(eng); err != nil {
+		t.Fatalf("persist manager start: %v", err)
+	}
+	t.Cleanup(pm.Close) // registered after sh.Close → runs first
 	srv := respserver.New(lisAddr, eng)
 	ready := make(chan error, 1)
 	go func() {

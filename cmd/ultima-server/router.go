@@ -15,11 +15,11 @@ import (
 // newRouter builds the chi mux for the HTTP/WS port: request logging and
 // panic recovery wrap the HTTP routes from lib/handler and the /ws/v1
 // WebSocket command endpoint from lib/wssrv (design doc §6.3).
-func newRouter(logger *slog.Logger, eng *commands.Engine) http.Handler {
+func newRouter(logger *slog.Logger, eng *commands.Engine, p commands.Persister) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(handler.RequestLogger(logger))
-	handler.Register(r)
+	handler.Register(r, p)
 	r.Get("/ws/v1", wssrv.Handler(eng, logger))
 	return r
 }

@@ -72,6 +72,13 @@ type ConnState struct {
 	StartPush func() func(resp.Value)
 	deliver   func(resp.Value)
 	outbox    []resp.Value
+
+	// trackPersist is set by Execute around the handler of a write command
+	// while a persister is installed: it makes do/doMulti count the
+	// command's in-flight shard tasks (persistShardTasks) so the persist
+	// layer can drain every post-mutation/pre-capture command before an
+	// AOF rewrite cuts over (M5c, §13.1).
+	trackPersist bool
 }
 
 // WatchRef is one WATCHed key's dirty-check state: the logical DB, the
@@ -107,6 +114,11 @@ type Engine struct {
 	save        atomic.Value // string
 	appendOnly  atomic.Bool
 
+	// persister is the M5c persistence sink (lib/persist.Manager via the
+	// Persister interface), installed once at startup after restore; nil
+	// in bare test engines. See aof.go for the capture/rewrite rules.
+	persister Persister
+
 	// Keyspace notifications (M5): notifyFlags is the parsed
 	// notify-keyspace-events class bitmask (hot-path gate in
 	// notifyKeyspace); CONFIG GET renders it back to the canonical
@@ -121,6 +133,25 @@ type Engine struct {
 	// blockedClients counts connections currently parked in a blocking
 	// command (BLPOP…BZMPOP), surfaced as INFO blocked_clients.
 	blockedClients atomic.Int64
+
+	// Persist-drain counters (M5c AOF rewrite, §13.1). A write command's
+	// AOF record is appended AFTER its mutation (capturePersist runs when
+	// the handler returns), so a rewrite that dumps live state must first
+	// drain commands sitting in that gap — otherwise the mutation is in
+	// the dump AND its record in the rewrite backlog, duplicating
+	// non-idempotent effects (INCR, RPUSH) on replay. The counters:
+	//   persistInFlight   write commands between handler start and capture
+	//                     end (EXEC excluded; cmdExec tracks inner commands);
+	//   persistShardTasks such commands' submitted-but-unfinished shard
+	//                     tasks (only while cs.trackPersist);
+	//   blockParked       such commands parked on a blocking-op channel
+	//                     (no mutation in flight while parked).
+	// Under PauseAll a command's contribution to persistInFlight is always
+	// matched by one to the other two unless it is mid-capture, so
+	// PersistQuiesced's equality check finds exactly the drained state.
+	persistInFlight   atomic.Int64
+	persistShardTasks atomic.Int64
+	blockParked       atomic.Int64
 
 	// Monitors (§6.2 MonitorEvent feed for the gRPC Monitor stream):
 	// monitorN is the hot-path gate (one atomic load per command);
@@ -147,9 +178,14 @@ func NewEngine(sh *shard.Engine, version string, respPort int) *Engine {
 	e.requirePass.Store("")
 	e.save.Store("3600 1 300 100 60 10000")
 	// Expiry-driven keyspace notifications (M5): the shard engine reports
-	// passive/active expiry deletions; route them to the broker.
+	// passive/active expiry deletions; route them to the broker. The M5c
+	// persister additionally receives them as synthesized DEL records
+	// (AOF capture of shard-originated removals, §13.1).
 	sh.SetOnKeyGone(func(db int, key, reason string) {
 		e.notifyKeyspace(db, key, reason)
+		if p := e.persister; p != nil {
+			p.LogKeyGone(db, key)
+		}
 	})
 	return e
 }
@@ -168,6 +204,15 @@ func (e *Engine) RequirePass() string { return e.requirePass.Load().(string) }
 
 // SetRequirePass updates requirepass (CONFIG SET requirepass).
 func (e *Engine) SetRequirePass(pw string) { e.requirePass.Store(pw) }
+
+// SetSaveString replaces the save-rules string (config file at startup;
+// CONFIG SET goes through configParams, which also notifies the
+// persister).
+func (e *Engine) SetSaveString(v string) { e.save.Store(v) }
+
+// SetAppendOnlyFlag syncs the appendonly flag from the config file at
+// startup (CONFIG SET appendonly goes through configParams).
+func (e *Engine) SetAppendOnlyFlag(on bool) { e.appendOnly.Store(on) }
 
 // MaxMemory returns the configured maxmemory in bytes (0 = unlimited).
 // The value lives on the shard engine, which enforces it (M5b eviction).
@@ -217,6 +262,10 @@ func (cs *ConnState) DeliverFunc() func(resp.Value) { return cs.deliver }
 // command handlers submit per-key work through do/doMulti so EXEC can
 // run them inside the paused engine.
 func (e *Engine) do(cs *ConnState, key []byte, fn func(s *shard.Shard)) {
+	if cs.trackPersist {
+		e.persistShardTasks.Add(1)
+		defer e.persistShardTasks.Add(-1)
+	}
 	e.Shards.DoTok(cs.tok, e.Shards.ShardIndex(key), fn)
 }
 
@@ -224,7 +273,25 @@ func (e *Engine) do(cs *ConnState, key []byte, fn func(s *shard.Shard)) {
 // fn may run CONCURRENTLY on several shard goroutines: shared writes
 // must be synchronized (atomic/mutex) or slot-indexed by key position.
 func (e *Engine) doMulti(cs *ConnState, keys [][]byte, fn func(s *shard.Shard, idxs []int)) {
+	if cs.trackPersist {
+		e.persistShardTasks.Add(1)
+		defer e.persistShardTasks.Add(-1)
+	}
 	e.Shards.DoMultiTok(cs.tok, keys, fn)
+}
+
+// PersistQuiesced reports whether no write command sits between its
+// completed mutation and its persistence capture (the AOF append). The
+// persist layer calls it in a loop while holding shard.Engine.PauseAll
+// before an AOF rewrite cutover: with mutations frozen, persistInFlight
+// exceeds persistShardTasks+blockParked exactly while such a command
+// exists, and the double reads guard against sampling mid-transition.
+func (e *Engine) PersistQuiesced() bool {
+	s1 := e.persistInFlight.Load()
+	d1 := e.persistShardTasks.Load() + e.blockParked.Load()
+	s2 := e.persistInFlight.Load()
+	d2 := e.persistShardTasks.Load() + e.blockParked.Load()
+	return s1 == s2 && d1 == d2 && s1 == d1
 }
 
 // Execute runs one command. args[0] is the command name (any case).
@@ -331,7 +398,21 @@ func (e *Engine) Execute(cs *ConnState, args [][]byte) resp.Value {
 		cs.Queue = append(cs.Queue, cloneArgs(args))
 		return replyQueued
 	}
+	// M5c persist-drain tracking (see persistInFlight): cover write
+	// commands from before the handler until after the capture. EXEC is
+	// excluded — it can block on txMu (PauseAll), which the rewrite's
+	// drain must not wait on; cmdExec tracks its inner commands instead.
+	track := e.persister != nil && name != "exec" && slices.Contains(def.Flags, "write")
+	if track {
+		cs.trackPersist = true
+		e.persistInFlight.Add(1)
+	}
 	v := def.Handler(e, cs, args)
+	e.capturePersist(cs, def, name, args, v)
+	if track {
+		e.persistInFlight.Add(-1)
+		cs.trackPersist = false
+	}
 	e.notifyMonitors(cs, args)
 	return v
 }

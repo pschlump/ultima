@@ -93,6 +93,14 @@ func (z *ZSet) At(i int) (ZElem, bool) {
 	return z.sl.AtIndex(i)
 }
 
+// Each calls fn for every element in ascending (score, member) order —
+// the snapshot dump order (M5c, design doc §13.1).
+func (z *ZSet) Each(fn func(member string, score float64)) {
+	for el := range z.sl.All() {
+		fn(el.Member, el.Score)
+	}
+}
+
 // RemoveRankRange deletes the elements at 0-based ranks [start, stop]
 // (inclusive, already clamped by the caller) and returns how many.
 func (z *ZSet) RemoveRankRange(start, stop int) int {
