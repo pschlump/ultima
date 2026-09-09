@@ -10,6 +10,7 @@ import (
 	"github.com/pschlump/ultima/lib/auth"
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/handler"
+	"github.com/pschlump/ultima/lib/wssession"
 	"github.com/pschlump/ultima/lib/wssrv"
 )
 
@@ -18,12 +19,12 @@ import (
 // WebSocket command endpoint from lib/wssrv (design doc §6.3). authSvc is
 // the M6a auth service (nil when auth.enabled is false): it gates
 // /api/v1/* behind Bearer tokens (§10.1) and the WS upgrade behind an
-// access token (§9.3).
-func newRouter(logger *slog.Logger, eng *commands.Engine, p commands.Persister, authSvc *auth.Service) http.Handler {
+// access token (§9.3). reg is the M6b resumable-session registry (§9.4).
+func newRouter(logger *slog.Logger, eng *commands.Engine, p commands.Persister, authSvc *auth.Service, reg *wssession.Registry) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(handler.RequestLogger(logger))
 	handler.Register(r, p, authSvc)
-	r.Get("/ws/v1", wssrv.Handler(eng, authSvc, logger))
+	r.Get("/ws/v1", wssrv.Handler(eng, authSvc, reg, logger))
 	return r
 }

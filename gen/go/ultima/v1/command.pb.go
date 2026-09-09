@@ -609,7 +609,16 @@ type Command struct {
 	// Client correlation id, echoed back on the CommandResponse so pipelined
 	// stream clients can match replies to requests. Replies are always sent in
 	// arrival order, so seq is an aid, not a requirement.
-	Seq           uint64 `protobuf:"varint,102,opt,name=seq,proto3" json:"seq,omitempty"`
+	Seq uint64 `protobuf:"varint,102,opt,name=seq,proto3" json:"seq,omitempty"`
+	// Resumable-session handshake (§9.4, decision D18), WebSocket surface
+	// only. A connection's first frame MAY be a handshake: session empty with
+	// no cmd oneof set requests a fresh session; session set to a previously
+	// issued id with last_push_seq resumes that session, replaying buffered
+	// pushes after that sequence number. A sessionless connection (no
+	// handshake frame) behaves exactly as in M4. Frames sent after the
+	// handshake carry neither field.
+	Session       string `protobuf:"bytes,103,opt,name=session,proto3" json:"session,omitempty"`
+	LastPushSeq   uint64 `protobuf:"varint,104,opt,name=last_push_seq,json=lastPushSeq,proto3" json:"last_push_seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -962,6 +971,20 @@ func (x *Command) GetSeq() uint64 {
 	return 0
 }
 
+func (x *Command) GetSession() string {
+	if x != nil {
+		return x.Session
+	}
+	return ""
+}
+
+func (x *Command) GetLastPushSeq() uint64 {
+	if x != nil {
+		return x.LastPushSeq
+	}
+	return 0
+}
+
 type isCommand_Cmd interface {
 	isCommand_Cmd()
 }
@@ -1229,9 +1252,19 @@ func (x *CommandRequest) GetArgs() [][]byte {
 // CommandResponse is one reply on the stream: the seq of the Command it
 // answers plus the reply value.
 type CommandResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	Reply         *Value                 `protobuf:"bytes,2,opt,name=reply,proto3" json:"reply,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Seq   uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	Reply *Value                 `protobuf:"bytes,2,opt,name=reply,proto3" json:"reply,omitempty"`
+	// Session id, set only on the resumable-session handshake reply (§9.4):
+	// the freshly assigned id for a new session, or the echoed id on a
+	// successful resume. A failed resume carries an error reply whose text
+	// starts with SESSION_EXPIRED.
+	Session string `protobuf:"bytes,3,opt,name=session,proto3" json:"session,omitempty"`
+	// Per-session monotonic stamp on push frames (seq == 0): pub/sub
+	// deliveries, keyspace notifications. 0 when the connection has no
+	// resumable session. Clients track the highest push_seq received and
+	// present it as last_push_seq on reconnect.
+	PushSeq       uint64 `protobuf:"varint,4,opt,name=push_seq,json=pushSeq,proto3" json:"push_seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1278,6 +1311,20 @@ func (x *CommandResponse) GetReply() *Value {
 		return x.Reply
 	}
 	return nil
+}
+
+func (x *CommandResponse) GetSession() string {
+	if x != nil {
+		return x.Session
+	}
+	return ""
+}
+
+func (x *CommandResponse) GetPushSeq() uint64 {
+	if x != nil {
+		return x.PushSeq
+	}
+	return 0
 }
 
 // BatchRequest is a unary batch of commands (same envelope, no stream).
@@ -3485,7 +3532,7 @@ const file_proto_ultima_v1_command_proto_rawDesc = "" +
 	"\x03Set\x12&\n" +
 	"\x05elems\x18\x01 \x03(\v2\x10.ultima.v1.ValueR\x05elems\".\n" +
 	"\x04Push\x12&\n" +
-	"\x05elems\x18\x01 \x03(\v2\x10.ultima.v1.ValueR\x05elems\"\x90\r\n" +
+	"\x05elems\x18\x01 \x03(\v2\x10.ultima.v1.ValueR\x05elems\"\xce\r\n" +
 	"\aCommand\x12)\n" +
 	"\x03get\x18\x01 \x01(\v2\x15.ultima.v1.GetCommandH\x00R\x03get\x12)\n" +
 	"\x03set\x18\x02 \x01(\v2\x15.ultima.v1.SetCommandH\x00R\x03set\x12)\n" +
@@ -3523,14 +3570,18 @@ const file_proto_ultima_v1_command_proto_rawDesc = "" +
 	"\x05zcard\x18  \x01(\v2\x17.ultima.v1.ZCardCommandH\x00R\x05zcard\x125\n" +
 	"\ageneric\x18d \x01(\v2\x19.ultima.v1.CommandRequestH\x00R\ageneric\x12\x0e\n" +
 	"\x02db\x18e \x01(\x04R\x02db\x12\x10\n" +
-	"\x03seq\x18f \x01(\x04R\x03seqB\x05\n" +
+	"\x03seq\x18f \x01(\x04R\x03seq\x12\x18\n" +
+	"\asession\x18g \x01(\tR\asession\x12\"\n" +
+	"\rlast_push_seq\x18h \x01(\x04R\vlastPushSeqB\x05\n" +
 	"\x03cmd\">\n" +
 	"\x0eCommandRequest\x12\x18\n" +
 	"\acommand\x18\x01 \x01(\tR\acommand\x12\x12\n" +
-	"\x04args\x18\x02 \x03(\fR\x04args\"K\n" +
+	"\x04args\x18\x02 \x03(\fR\x04args\"\x80\x01\n" +
 	"\x0fCommandResponse\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12&\n" +
-	"\x05reply\x18\x02 \x01(\v2\x10.ultima.v1.ValueR\x05reply\">\n" +
+	"\x05reply\x18\x02 \x01(\v2\x10.ultima.v1.ValueR\x05reply\x12\x18\n" +
+	"\asession\x18\x03 \x01(\tR\asession\x12\x19\n" +
+	"\bpush_seq\x18\x04 \x01(\x04R\apushSeq\">\n" +
 	"\fBatchRequest\x12.\n" +
 	"\bcommands\x18\x01 \x03(\v2\x12.ultima.v1.CommandR\bcommands\"I\n" +
 	"\rBatchResponse\x128\n" +

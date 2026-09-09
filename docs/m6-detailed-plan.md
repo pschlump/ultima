@@ -13,7 +13,7 @@ file paths, both required, no auto-generation). Do not reverse these.
 Execution is phased M6a → M6d, each phase independently green
 (`go test ./...`, `make lint`).
 
-**Status: M6a done. M6b–M6d not started.**
+**Status: M6a and M6b done. M6c–M6d not started.**
 
 ---
 
@@ -78,18 +78,44 @@ the full API surface lands.
   no origin policy on `/ws/v1` (M6d); token TTL strings parsed at startup
   only (no CONFIG SET).
 
-## M6b — WS resumable sessions (§9.4, D18)
+## M6b — WS resumable sessions (§9.4, D18) — **done**
 
-- Proto: add `session`/`last_push_seq` handshake fields to
-  `Command`/`CommandResponse` (and `push_seq` on push frames); `make
-  gen_proto` regenerates Go + TS.
-- `lib/wssession`: per-session registry, bounded replay buffer
-  (`auth.ws_replay_buffer_ms` / `ws_replay_buffer_max_msgs`), `push_seq`
-  stamping at the `ConnState.StartPush` funnel, subscription retention
-  across disconnect (defer `CloseConn` within the retention window),
-  SESSION_EXPIRED / ABORTED-by-seq frames.
-- Tests: reconnect replay (no gap, no duplicates), buffer-window expiry,
-  slow-consumer interplay, goleak clean.
+- Proto: `Command.session` / `last_push_seq` handshake fields (103/104),
+  `CommandResponse.session` / `push_seq` (3/4); Go + TS bindings
+  regenerated.
+- `lib/wssession`: `Registry` (map id→session, retention window +
+  max-msgs bounds from `auth.ws_replay_buffer_ms` /
+  `ws_replay_buffer_max_msgs`), `Session` (monotonic `push_seq` counter,
+  bounded replay buffer trimmed by count and age, retention timer while
+  detached, aborted-reply seq list). The session's `Deliver` is the
+  stable broker-facing funnel — stamping, buffering, and live enqueue all
+  happen under the session lock, so live order equals buffer order and
+  broker registrations survive reconnects untouched.
+- Resume (`Session.Attach`) is atomic under the lock: gap check (buffer
+  no longer holds `last_push_seq+1` → SESSION_EXPIRED, session
+  untouched), takeover (previous attachment closed), head callback
+  (enqueues the handshake-OK ahead of the replay on the ordered queue),
+  replay, sink install, aborted-seqs handoff. Sessions are bound to the
+  creating account — a resume under another identity is SESSION_EXPIRED.
+- `lib/wssrv`: first-frame handshake (empty Command = new session;
+  session+last_push_seq = resume; frames after negotiation carry
+  neither). Sessioned pushes are seq-0 frames with `push_seq`;
+  sessionless connections keep M4/M6a behavior exactly (unstamped). On
+  teardown a sessioned connection detaches (the ConnState, and with it
+  the broker subscriptions, is retained) instead of `CloseConn`; replies
+  still queued, refused, or failed mid-write are recorded via
+  `RecordAborted` and reported as `ABORTED` error frames by seq on the
+  next resume (command replies are never replayed, §9.4).
+- Expiry releases the retained ConnState (`eng.CloseConn` → broker
+  unsubscribe) when no resume happens within the window; takeover makes a
+  stale connection's detach a no-op (sink token compare).
+- Tests: `lib/wssession/session_test.go` (stamping, replay, gap,
+  expiry, takeover, aborted round-trip, time-trim — goleak clean),
+  `lib/wssrv/resume_test.go` (real-socket handshake/replay/gap/
+  retention/takeover/ABORTED via an 8 MB reply, and a 9000-push
+  slow-consumer flood recovered across repeated resumes with no gap and
+  no duplicates), `tests/m6_test.go` (auth-enabled session user
+  binding).
 
 ## M6c — HTTP management API (§10.1, D7/D11)
 

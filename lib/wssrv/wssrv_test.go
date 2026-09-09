@@ -24,6 +24,7 @@ import (
 	ultimav1 "github.com/pschlump/ultima/gen/go/ultima/v1"
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/shard"
+	"github.com/pschlump/ultima/lib/wssession"
 )
 
 func TestMain(m *testing.M) {
@@ -37,8 +38,10 @@ func newTestServer(t *testing.T) (*commands.Engine, string) {
 	shards := shard.NewEngine(4, 16)
 	t.Cleanup(shards.Close)
 	eng := commands.NewEngine(shards, "test", 0)
+	reg := wssession.NewRegistry(eng, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(reg.Close)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws/v1", Handler(eng, nil, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	mux.HandleFunc("/ws/v1", Handler(eng, nil, reg, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return eng, "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/v1"

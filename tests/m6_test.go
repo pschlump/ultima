@@ -35,6 +35,7 @@ import (
 	"github.com/pschlump/ultima/lib/grpcsrv"
 	"github.com/pschlump/ultima/lib/handler"
 	"github.com/pschlump/ultima/lib/shard"
+	"github.com/pschlump/ultima/lib/wssession"
 	"github.com/pschlump/ultima/lib/wssrv"
 )
 
@@ -92,7 +93,9 @@ func newM6Env(t *testing.T) *m6Env {
 
 	r := chi.NewRouter()
 	handler.Register(r, nil, svc)
-	r.Get("/ws/v1", wssrv.Handler(eng, svc, testLogger()))
+	reg := wssession.NewRegistry(eng, 0, 0, testLogger())
+	t.Cleanup(reg.Close)
+	r.Get("/ws/v1", wssrv.Handler(eng, svc, reg, testLogger()))
 	httpSrv := httptest.NewServer(r)
 	t.Cleanup(httpSrv.Close)
 
@@ -389,6 +392,56 @@ func TestM6WSUpgradeAuth(t *testing.T) {
 	replies = wsRoundTrip(t, c2, wsGeneric("PING"))
 	if replies[0].GetReply().GetSimpleString() != "PONG" {
 		t.Fatalf("WS PING via subprotocol: %v", replies[0])
+	}
+}
+
+// TestM6WSSessionBoundToUser (M6b, §9.4): a resumable session is bound to
+// the account that created it — resuming with a different identity gets
+// SESSION_EXPIRED, while the owning identity resumes and replays.
+func TestM6WSSessionBoundToUser(t *testing.T) {
+	e := newM6Env(t)
+	admin := e.login(t, auth.BootstrapAdmin, "boot-pw", "")
+	adminAccess := admin["access_token"].(string)
+	if st, b := e.do(t, http.MethodPost, "/api/v1/admin/users", adminAccess,
+		map[string]string{"username": "dave", "password": "pw1", "class": "data"}); st != http.StatusCreated {
+		t.Fatalf("create dave: status %d body %v", st, b)
+	}
+	daveAccess := e.login(t, "dave", "pw1", "")["access_token"].(string)
+
+	wsBase := "ws" + strings.TrimPrefix(e.httpURL, "http") + "/ws/v1"
+	dialAs := func(tok string) *websocket.Conn {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsBase+"?access_token="+tok, nil)
+		if err != nil {
+			t.Fatalf("WS dial: %s", err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+
+	// admin opens a session and subscribes.
+	c1 := dialAs(adminAccess)
+	replies := wsRoundTrip(t, c1, &ultimav1.Command{Seq: 1})
+	sess := replies[0].GetSession()
+	if sess == "" {
+		t.Fatal("handshake returned no session id")
+	}
+	wsRoundTrip(t, c1, &ultimav1.Command{Seq: 2, Cmd: &ultimav1.Command_Generic{
+		Generic: &ultimav1.CommandRequest{Command: "SUBSCRIBE", Args: [][]byte{[]byte("m6-ch")}}}})
+	_ = c1.Close()
+
+	// dave cannot resume admin's session.
+	c2 := dialAs(daveAccess)
+	replies = wsRoundTrip(t, c2, &ultimav1.Command{Seq: 1, Session: sess})
+	if got := replies[0].GetReply().GetError(); !strings.HasPrefix(got, "SESSION_EXPIRED") {
+		t.Fatalf("dave resume of admin session = %v, want SESSION_EXPIRED", replies[0])
+	}
+
+	// admin can.
+	c3 := dialAs(adminAccess)
+	replies = wsRoundTrip(t, c3, &ultimav1.Command{Seq: 1, Session: sess})
+	if replies[0].GetReply().GetSimpleString() != "OK" {
+		t.Fatalf("admin resume = %v, want OK", replies[0])
 	}
 }
 

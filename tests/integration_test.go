@@ -38,6 +38,7 @@ import (
 	"github.com/pschlump/ultima/lib/handler"
 	"github.com/pschlump/ultima/lib/respserver"
 	"github.com/pschlump/ultima/lib/shard"
+	"github.com/pschlump/ultima/lib/wssession"
 	"github.com/pschlump/ultima/lib/wssrv"
 )
 
@@ -192,7 +193,9 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 	r.Use(middleware.Recoverer)
 	r.Use(handler.RequestLogger(logger))
 	handler.Register(r, nil, nil) // no persistence manager in the surface test
-	r.Get("/ws/v1", wssrv.Handler(eng, nil, logger))
+	reg := wssession.NewRegistry(eng, 0, 0, logger)
+	t.Cleanup(reg.Close)
+	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, logger))
 	httpSrv := &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		if err := httpSrv.Serve(httpLis); err != nil && err != http.ErrServerClosed {

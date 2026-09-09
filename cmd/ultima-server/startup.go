@@ -21,6 +21,7 @@ import (
 	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/respserver"
 	"github.com/pschlump/ultima/lib/shard"
+	"github.com/pschlump/ultima/lib/wssession"
 )
 
 // servers bundles the three listeners plus the shard engine and persist
@@ -36,6 +37,7 @@ type servers struct {
 	httpLis net.Listener
 	shards  *shard.Engine
 	persist *persist.Manager
+	wssess  *wssession.Registry
 }
 
 func respPortOf(lis net.Listener) int {
@@ -125,8 +127,14 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 		}
 	}()
 
+	// Resumable WS sessions (M6b, §9.4, D18): the registry bounds replay
+	// retention by auth.ws_replay_buffer_ms / ws_replay_buffer_max_msgs.
+	s.wssess = wssession.NewRegistry(eng,
+		time.Duration(cfg.Auth.WSReplayBufferMs)*time.Millisecond,
+		cfg.Auth.WSReplayBufferMaxMsgs, logger)
+
 	s.httpSrv = &http.Server{
-		Handler:           newRouter(logger, eng, s.persist, authSvc),
+		Handler:           newRouter(logger, eng, s.persist, authSvc, s.wssess),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -165,6 +173,7 @@ func (s *servers) shutdown(ctx context.Context) error {
 
 	errs = append(errs, s.httpSrv.Shutdown(ctx))
 	errs = append(errs, s.respSrv.Close()) // closes the listener and all conns
+	s.wssess.Close()                       // expire retained WS sessions (§9.4)
 	// Persist before the shard engine stops (§13.1): final fsync (+ the
 	// shutdown snapshot when save rules are configured and unsaved writes
 	// remain) needs live shard goroutines.

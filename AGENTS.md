@@ -56,8 +56,11 @@ refresh-token families with theft detection, TOTP 2FA via
 endpoints (`lib/handler/auth.go`), Bearer gating of `/api/v1/*`, gRPC
 interceptors (`authorization: bearer` metadata), and WS upgrade auth
 (`?access_token=` or `Sec-WebSocket-Protocol: bearer, <token>`), all
-behind the `auth.enabled` config gate (off = pre-M6 behavior). M6b (WS
-resumable sessions, §9.4), M6c (OpenAPI/oapi-codegen management API,
+behind the `auth.enabled` config gate (off = pre-M6 behavior). **M6b is
+done** — resumable WS sessions (§9.4, D18): `lib/wssession` (per-session
+replay buffer + `push_seq` handshake; subscription retention across
+drops; SESSION_EXPIRED/ABORTED frames), wired into `lib/wssrv`. M6c
+(OpenAPI/oapi-codegen management API,
 §10.1) and M6d (web UI, §10.2) are pending. Later
 milestones from the
 design layout
@@ -322,6 +325,27 @@ M5c architecture notes:
   Crash-recovery tests: `tests/m5_test.go` (subprocess, SIGKILL, three
   variants); unit round-trips in `lib/persist/persist_test.go`.
 
+M6 architecture notes (detail in `docs/m6-detailed-plan.md`):
+
+- **M6a auth core**: `lib/auth` (bcrypt accounts + refresh families,
+  Ed25519 EdDSA JWTs per D20, TOTP via htotp), enforced on
+  `/api/v1/*` (chi middleware), gRPC (interceptors), and WS upgrade
+  (`?access_token=` / bearer subprotocol); everything gated by
+  `auth.enabled` (off = pre-M6 behavior). `ConnState.User` carries the
+  account on the JWT surfaces.
+- **M6b resumable WS sessions** (`lib/wssession`, §9.4, D18): the
+  session's `Deliver` func is the stable broker-facing funnel — stamping
+  (`push_seq`), buffering, and live enqueue under one lock, so
+  subscriptions survive reconnects with no re-registration and no
+  reorder. `Session.Attach` is atomic: gap check → takeover close →
+  handshake-OK head → replay → install sink → hand off aborted seqs.
+  Sessioned WS teardown detaches (ConnState + broker subs retained) with
+  a retention timer (`auth.ws_replay_buffer_ms`); expiry calls
+  `eng.CloseConn`. Command replies are never replayed — lost ones
+  (queued/refused/write-failed at drop) come back as `ABORTED` error
+  frames by seq. Sessions bind to the creating account; a foreign resume
+  is SESSION_EXPIRED. Sessionless WS connections behave exactly as M4.
+
 ## Code Organization
 
 ```
@@ -363,7 +387,12 @@ lib/grpcsrv/         gRPC front-end (M4: Exec bidi stream, ExecBatch, ExecGeneri
 lib/wssrv/           WebSocket front-end (M4, §6.3): binary protobuf Command frames at
                      /ws/v1, one frame per command, seq-correlated replies; pub/sub
                      pushes as unsolicited seq-0 frames over a bounded queue (slow
-                     consumer → close, as in lib/respserver)
+                     consumer → close, as in lib/respserver); M6b: resumable-session
+                     handshake (§9.4), push_seq stamping, SESSION_EXPIRED/ABORTED
+lib/wssession/       WS resumable sessions (M6b, §9.4, D18): session registry,
+                     bounded per-session replay buffer (ws_replay_buffer_ms/
+                     max_msgs), atomic attach/takeover with replay, retention
+                     expiry releasing the retained ConnState
 lib/handler/         HTTP routes (/health, /ready, /api/v1/ping, POST
                      /api/v1/save|bgsave|bgrewriteaof) + RequestLogger;
                      auth.go (M6a, §9.3/§9.5): /api/v1/auth/* (login,

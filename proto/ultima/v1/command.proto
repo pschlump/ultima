@@ -121,6 +121,16 @@ message Command {
   // stream clients can match replies to requests. Replies are always sent in
   // arrival order, so seq is an aid, not a requirement.
   uint64 seq = 102;
+
+  // Resumable-session handshake (§9.4, decision D18), WebSocket surface
+  // only. A connection's first frame MAY be a handshake: session empty with
+  // no cmd oneof set requests a fresh session; session set to a previously
+  // issued id with last_push_seq resumes that session, replaying buffered
+  // pushes after that sequence number. A sessionless connection (no
+  // handshake frame) behaves exactly as in M4. Frames sent after the
+  // handshake carry neither field.
+  string session = 103;
+  uint64 last_push_seq = 104;
 }
 
 // CommandRequest is the generic escape hatch: a command name plus raw
@@ -136,6 +146,18 @@ message CommandRequest {
 message CommandResponse {
   uint64 seq = 1;
   Value reply = 2;
+
+  // Session id, set only on the resumable-session handshake reply (§9.4):
+  // the freshly assigned id for a new session, or the echoed id on a
+  // successful resume. A failed resume carries an error reply whose text
+  // starts with SESSION_EXPIRED.
+  string session = 3;
+
+  // Per-session monotonic stamp on push frames (seq == 0): pub/sub
+  // deliveries, keyspace notifications. 0 when the connection has no
+  // resumable session. Clients track the highest push_seq received and
+  // present it as last_push_seq on reconnect.
+  uint64 push_seq = 4;
 }
 
 // BatchRequest is a unary batch of commands (same envelope, no stream).

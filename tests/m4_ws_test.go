@@ -16,6 +16,7 @@ import (
 	ultimav1 "github.com/pschlump/ultima/gen/go/ultima/v1"
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/shard"
+	"github.com/pschlump/ultima/lib/wssession"
 	"github.com/pschlump/ultima/lib/wssrv"
 )
 
@@ -26,9 +27,11 @@ func wsTestServer(t *testing.T) (*commands.Engine, string) {
 	shards := shard.NewEngine(0, 16)
 	t.Cleanup(shards.Close)
 	eng := commands.NewEngine(shards, "test", 0)
+	reg := wssession.NewRegistry(eng, 0, 0, testLogger())
+	t.Cleanup(reg.Close)
 
 	r := chi.NewRouter()
-	r.Get("/ws/v1", wssrv.Handler(eng, nil, testLogger()))
+	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, testLogger()))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	return eng, "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/v1"
