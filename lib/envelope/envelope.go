@@ -66,127 +66,127 @@ func Execute(eng *commands.Engine, cs *commands.ConnState, cmd *ultimav1.Command
 func ArgsFor(cmd *ultimav1.Command) ([][]byte, error) {
 	switch c := cmd.GetCmd().(type) {
 	case *ultimav1.Command_Get:
-		return argv("GET", c.Get.Key), nil
+		return argv("GET", c.Get.GetKey()), nil
 	case *ultimav1.Command_Set:
-		a := argv("SET", c.Set.Key, c.Set.Value)
-		if c.Set.TtlMs > 0 {
-			a = append(a, s2b("PX"), int64b(c.Set.TtlMs))
+		a := argv("SET", c.Set.GetKey(), c.Set.GetValue())
+		if c.Set.GetTtlMs() > 0 {
+			a = append(a, s2b("PX"), int64b(c.Set.GetTtlMs()))
 		}
-		if c.Set.Nx {
+		if c.Set.GetNx() {
 			a = append(a, s2b("NX"))
 		}
-		if c.Set.Xx {
+		if c.Set.GetXx() {
 			a = append(a, s2b("XX"))
 		}
-		if c.Set.Get {
+		if c.Set.GetGet() {
 			a = append(a, s2b("GET"))
 		}
 		return a, nil
 	case *ultimav1.Command_Del:
-		return argv("DEL", c.Del.Keys...), nil
+		return argv("DEL", c.Del.GetKeys()...), nil
 	case *ultimav1.Command_Incr:
 		// INCRBY covers INCR/DECR/INCRBY/DECRBY: the delta carries the sign.
-		return argv("INCRBY", c.Incr.Key, int64b(c.Incr.Delta)), nil
+		return argv("INCRBY", c.Incr.GetKey(), int64b(c.Incr.GetDelta())), nil
 	case *ultimav1.Command_IncrFloat:
-		return argv("INCRBYFLOAT", c.IncrFloat.Key, float64b(c.IncrFloat.Delta)), nil
+		return argv("INCRBYFLOAT", c.IncrFloat.GetKey(), float64b(c.IncrFloat.GetDelta())), nil
 	case *ultimav1.Command_Mget:
-		return argv("MGET", c.Mget.Keys...), nil
+		return argv("MGET", c.Mget.GetKeys()...), nil
 	case *ultimav1.Command_Mset:
 		a := argv("MSET")
-		for _, p := range c.Mset.Pairs {
-			a = append(a, p.Key, p.Value)
+		for _, p := range c.Mset.GetPairs() {
+			a = append(a, p.GetKey(), p.GetValue())
 		}
 		return a, nil
 	case *ultimav1.Command_Append:
-		return argv("APPEND", c.Append.Key, c.Append.Value), nil
+		return argv("APPEND", c.Append.GetKey(), c.Append.GetValue()), nil
 	case *ultimav1.Command_Exists:
-		return argv("EXISTS", c.Exists.Keys...), nil
+		return argv("EXISTS", c.Exists.GetKeys()...), nil
 	case *ultimav1.Command_Expire:
 		// The typed form carries milliseconds and maps to PEXPIRE; the
 		// second-granularity EXPIRE stays reachable via the generic hatch.
-		return argv("PEXPIRE", c.Expire.Key, int64b(c.Expire.TtlMs)), nil
+		return argv("PEXPIRE", c.Expire.GetKey(), int64b(c.Expire.GetTtlMs())), nil
 	case *ultimav1.Command_Ttl:
-		return argv("PTTL", c.Ttl.Key), nil
+		return argv("PTTL", c.Ttl.GetKey()), nil
 	case *ultimav1.Command_Persist:
-		return argv("PERSIST", c.Persist.Key), nil
+		return argv("PERSIST", c.Persist.GetKey()), nil
 	case *ultimav1.Command_Hget:
-		return argv("HGET", c.Hget.Key, c.Hget.Field), nil
+		return argv("HGET", c.Hget.GetKey(), c.Hget.GetField()), nil
 	case *ultimav1.Command_Hset:
-		a := argv("HSET", c.Hset.Key)
-		for _, p := range c.Hset.Pairs {
-			a = append(a, p.Field, p.Value)
+		a := argv("HSET", c.Hset.GetKey())
+		for _, p := range c.Hset.GetPairs() {
+			a = append(a, p.GetField(), p.GetValue())
 		}
 		return a, nil
 	case *ultimav1.Command_Hgetall:
-		return argv("HGETALL", c.Hgetall.Key), nil
+		return argv("HGETALL", c.Hgetall.GetKey()), nil
 	case *ultimav1.Command_Hdel:
-		return argv("HDEL", append([][]byte{c.Hdel.Key}, c.Hdel.Fields...)...), nil
+		return argv("HDEL", append([][]byte{c.Hdel.GetKey()}, c.Hdel.GetFields()...)...), nil
 	case *ultimav1.Command_Hincrby:
-		return argv("HINCRBY", c.Hincrby.Key, c.Hincrby.Field, int64b(c.Hincrby.Delta)), nil
+		return argv("HINCRBY", c.Hincrby.GetKey(), c.Hincrby.GetField(), int64b(c.Hincrby.GetDelta())), nil
 	case *ultimav1.Command_Lpush:
-		return argv("LPUSH", append([][]byte{c.Lpush.Key}, c.Lpush.Elems...)...), nil
+		return argv("LPUSH", append([][]byte{c.Lpush.GetKey()}, c.Lpush.GetElems()...)...), nil
 	case *ultimav1.Command_Rpush:
-		return argv("RPUSH", append([][]byte{c.Rpush.Key}, c.Rpush.Elems...)...), nil
+		return argv("RPUSH", append([][]byte{c.Rpush.GetKey()}, c.Rpush.GetElems()...)...), nil
 	case *ultimav1.Command_Lpop:
-		return argv("LPOP", c.Lpop.Key), nil
+		return argv("LPOP", c.Lpop.GetKey()), nil
 	case *ultimav1.Command_Rpop:
-		return argv("RPOP", c.Rpop.Key), nil
+		return argv("RPOP", c.Rpop.GetKey()), nil
 	case *ultimav1.Command_Lrange:
-		return argv("LRANGE", c.Lrange.Key, int64b(c.Lrange.Start), int64b(c.Lrange.Stop)), nil
+		return argv("LRANGE", c.Lrange.GetKey(), int64b(c.Lrange.GetStart()), int64b(c.Lrange.GetStop())), nil
 	case *ultimav1.Command_Llen:
-		return argv("LLEN", c.Llen.Key), nil
+		return argv("LLEN", c.Llen.GetKey()), nil
 	case *ultimav1.Command_Sadd:
-		return argv("SADD", append([][]byte{c.Sadd.Key}, c.Sadd.Members...)...), nil
+		return argv("SADD", append([][]byte{c.Sadd.GetKey()}, c.Sadd.GetMembers()...)...), nil
 	case *ultimav1.Command_Srem:
-		return argv("SREM", append([][]byte{c.Srem.Key}, c.Srem.Members...)...), nil
+		return argv("SREM", append([][]byte{c.Srem.GetKey()}, c.Srem.GetMembers()...)...), nil
 	case *ultimav1.Command_Smembers:
-		return argv("SMEMBERS", c.Smembers.Key), nil
+		return argv("SMEMBERS", c.Smembers.GetKey()), nil
 	case *ultimav1.Command_Sismember:
-		return argv("SISMEMBER", c.Sismember.Key, c.Sismember.Member), nil
+		return argv("SISMEMBER", c.Sismember.GetKey(), c.Sismember.GetMember()), nil
 	case *ultimav1.Command_Zadd:
-		a := argv("ZADD", c.Zadd.Key)
-		if c.Zadd.Nx {
+		a := argv("ZADD", c.Zadd.GetKey())
+		if c.Zadd.GetNx() {
 			a = append(a, s2b("NX"))
 		}
-		if c.Zadd.Xx {
+		if c.Zadd.GetXx() {
 			a = append(a, s2b("XX"))
 		}
-		if c.Zadd.Gt {
+		if c.Zadd.GetGt() {
 			a = append(a, s2b("GT"))
 		}
-		if c.Zadd.Lt {
+		if c.Zadd.GetLt() {
 			a = append(a, s2b("LT"))
 		}
-		if c.Zadd.Ch {
+		if c.Zadd.GetCh() {
 			a = append(a, s2b("CH"))
 		}
-		if c.Zadd.Incr {
+		if c.Zadd.GetIncr() {
 			a = append(a, s2b("INCR"))
 		}
-		for _, m := range c.Zadd.Members {
-			a = append(a, float64b(m.Score), m.Member)
+		for _, m := range c.Zadd.GetMembers() {
+			a = append(a, float64b(m.GetScore()), m.GetMember())
 		}
 		return a, nil
 	case *ultimav1.Command_Zscore:
-		return argv("ZSCORE", c.Zscore.Key, c.Zscore.Member), nil
+		return argv("ZSCORE", c.Zscore.GetKey(), c.Zscore.GetMember()), nil
 	case *ultimav1.Command_Zrange:
-		a := argv("ZRANGE", c.Zrange.Key, int64b(c.Zrange.Start), int64b(c.Zrange.Stop))
-		if c.Zrange.Withscores {
+		a := argv("ZRANGE", c.Zrange.GetKey(), int64b(c.Zrange.GetStart()), int64b(c.Zrange.GetStop()))
+		if c.Zrange.GetWithscores() {
 			a = append(a, s2b("WITHSCORES"))
 		}
 		return a, nil
 	case *ultimav1.Command_Zrem:
-		return argv("ZREM", append([][]byte{c.Zrem.Key}, c.Zrem.Members...)...), nil
+		return argv("ZREM", append([][]byte{c.Zrem.GetKey()}, c.Zrem.GetMembers()...)...), nil
 	case *ultimav1.Command_Zcard:
-		return argv("ZCARD", c.Zcard.Key), nil
+		return argv("ZCARD", c.Zcard.GetKey()), nil
 	case *ultimav1.Command_Generic:
 		g := c.Generic
-		if g.Command == "" {
+		if g.GetCommand() == "" {
 			return nil, errors.New("unknown command ''")
 		}
-		a := make([][]byte, 0, len(g.Args)+1)
-		a = append(a, s2b(g.Command))
-		return append(a, g.Args...), nil
+		a := make([][]byte, 0, len(g.GetArgs())+1)
+		a = append(a, s2b(g.GetCommand()))
+		return append(a, g.GetArgs()...), nil
 	default:
 		return nil, errEmpty
 	}
