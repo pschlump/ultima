@@ -6,7 +6,7 @@ require (
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/gorilla/websocket v1.5.3
-	github.com/pschlump/htotp v0.0.0-00010101000000-000000000000
+	github.com/pschlump/htotp v1.1.2
 	github.com/pschlump/pluto v0.0.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/crypto v0.55.0
@@ -25,4 +25,4 @@ require (
 
 replace github.com/pschlump/pluto => ../pluto
 
-replace github.com/pschlump/htotp => ../htotp
+// replace github.com/pschlump/htotp => ../htotp
