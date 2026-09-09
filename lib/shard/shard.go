@@ -821,9 +821,14 @@ func (s *Shard) tombstone(db int, key string, ver uint64) {
 }
 
 // flushDB drops db's tombstones, zeroes db's memory-estimate share (the
-// keyspace swap already dropped the entries), and bumps db's epoch,
-// dirtying every watcher on db. Eviction trackers keep their now-stale
-// db entries; the eviction loop's candidate validation discards them.
+// keyspace swap already dropped the entries), purges db's eviction-tracker
+// entries, and bumps db's epoch, dirtying every watcher on db. The purge
+// matters: the keyspace swap makes every tracked (db,key) stale at once,
+// and the eviction loops' stale-entry self-healing is budgeted for a
+// handful of stragglers (2*EvictSamples pops per victim attempt) — a whole
+// flushed DB's worth of stale entries would exhaust that budget, stall
+// eviction, and wedge the OOM gate (the M5d soak's post-FLUSHALL OOM
+// storm); a stale duplicate could also evict a re-inserted LIVE key.
 // Call only from inside the shard goroutine.
 func (s *Shard) flushDB(db int) {
 	for k := range s.tomb {
@@ -832,7 +837,51 @@ func (s *Shard) flushDB(db int) {
 		}
 	}
 	s.addMem(db, -s.usedBytes[db].Load())
+	s.purgeTrackers(db)
 	s.epoch[db]++
+}
+
+// purgeTrackers drops db's entries from every eviction tracker. The LRU
+// iterator is a snapshot and the LFU Keys list is a copy, so deleting
+// while ranging is safe. O(tracked keys) — FlushDB itself is O(1) via the
+// keyspace swap, but Redis's FLUSHDB is O(N) too (or lazy with a later
+// cost), so the linear purge is in-family.
+// Call only from inside the shard goroutine.
+func (s *Shard) purgeTrackers(db int) {
+	for k := range s.lruAll.All() {
+		if k.db == db {
+			s.lruAll.Delete(k)
+		}
+	}
+	for k := range s.lruVol.All() {
+		if k.db == db {
+			s.lruVol.Delete(k)
+		}
+	}
+	for _, k := range s.lfuAll.Keys() {
+		if k.db == db {
+			s.lfuAll.Delete(k)
+		}
+	}
+	for _, k := range s.lfuVol.Keys() {
+		if k.db == db {
+			s.lfuVol.Delete(k)
+		}
+	}
+	// The expiry heap goes stale the same way (every db item's key is
+	// gone); volatile-ttl's victim loop has the same small stale budget as
+	// the LRU pops, so rebuild the heap without db's items rather than
+	// leaving it to self-heal.
+	var keep []expItem
+	for it := range s.exp.All() {
+		if it.DB != db {
+			keep = append(keep, it)
+		}
+	}
+	s.exp.Truncate()
+	for _, it := range keep {
+		s.exp.Push(it)
+	}
 }
 
 // WatchVersion samples key's WATCH state (§4.2): the shard's current

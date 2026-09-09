@@ -348,3 +348,56 @@ func TestEvictLoopBoundsMemory(t *testing.T) {
 		t.Error("freshest keys missing after LRU soak")
 	}
 }
+
+func TestFlushDBPurgesEvictionTrackers(t *testing.T) {
+	// The M5d soak's failure shape: FlushDB swaps the keyspace wholesale,
+	// so every tracker entry goes stale at once; without the flushDB purge
+	// the eviction budget (2*EvictSamples pops per victim attempt) is spent
+	// discarding the backlog, eviction stalls, and the OOM gate wedges.
+	e := NewEngine(1, 1)
+	defer e.Close()
+	e.SetPolicy(PolicyAllKeysLRU)
+	now := e.NowMs()
+	for i := range 2000 {
+		storeStrLen(e, 0, fmt.Sprintf("old%04d", i), 30)
+	}
+	// Some TTL'd keys too, so the expiry heap carries stale items across
+	// the flush (volatile-ttl's victim loop has the same small stale
+	// budget as the LRU pops).
+	for i := range 50 {
+		k := fmt.Sprintf("oldttl%04d", i)
+		e.Do(0, []byte(k), func(s *Shard) {
+			ent := &Entry{Type: TypeString, Str: make([]byte, 30), ExpireAtMs: now + 600000}
+			s.Store(0, k, ent)
+			s.PushExpire(0, k, ent)
+		})
+	}
+	e.FlushDB(0)
+	e.Do(0, []byte("x"), func(s *Shard) {
+		if n := s.lruAll.Len(); n != 0 {
+			t.Errorf("lruAll.Len after FlushDB = %d, want 0 (purge)", n)
+		}
+		if n := s.lfuAll.Len(); n != 0 {
+			t.Errorf("lfuAll.Len after FlushDB = %d, want 0 (purge)", n)
+		}
+		if n := s.exp.Len(); n != 0 {
+			t.Errorf("expiry heap Len after FlushDB = %d, want 0 (purge)", n)
+		}
+	})
+	// Refill past the quota: eviction must keep up against live keys.
+	e.SetMaxMemory(2000) // ~17 keys of 30+7+80 bytes
+	for i := range 40 {
+		storeStrLen(e, 0, fmt.Sprintf("new%04d", i), 30)
+	}
+	if stillOver := e.EvictNow(0); stillOver {
+		t.Fatal("EvictNow still over quota after a FlushDB refill — the stale tracker backlog wedged eviction")
+	}
+	if got := e.UsedBytes(); got > 2000 {
+		t.Errorf("usedBytes = %d after refill eviction, want <= 2000", got)
+	}
+	// The freshest post-flush writes survive (LRU order is over
+	// post-flush writes only — no stale duplicates of live keys).
+	if !exists(t, e, 0, "new0039") || !exists(t, e, 0, "new0038") {
+		t.Error("freshest post-flush keys missing after eviction")
+	}
+}

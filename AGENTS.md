@@ -42,7 +42,12 @@ gate strings). **M5c is done** — persistence (`lib/persist`: own-format
 snapshot + per-shard AOF with global sequence merge at replay,
 SAVE/BGSAVE/LASTSAVE/BGREWRITEAOF, restore-before-serve, crash-recovery
 tested; M5c also closed the P0 gap EXPIREAT/PEXPIREAT, needed by the
-AOF's PEXPIREAT rewrite). M5d (soak benchmark) is pending. Later
+AOF's PEXPIREAT rewrite). **M5d is done** — the maxmemory soak
+(`bin/bench-m5.sh`, `make bench-m5`): sustained SET load at 20x keyspace
+oversubscription against a bounded maxmemory under all 8 eviction
+policies, gating on bounded `used_memory`, advancing `evicted_keys`, and
+the byte-exact OOM/probe behavior; report in `docs/benchmarks/M5-<date>.md`;
+memo in `note/M5-implemented.md`. Later
 milestones from the
 design layout
 (§14.1: `lib/persist`, `clients/`, `web/`, `api/`, extra CLIs under
@@ -195,8 +200,12 @@ M5b architecture notes:
   `lfu_ts` Morris counters with `maxmemory-samples`-style candidate
   sampling (new pluto `sharded_hash_ts.SampleStripe`, per-stripe since
   stripe i == shard i), volatile-* twins holding TTL'd keys only (added
-  at `Store`/`PushExpire`-via-`trackAccess`; stale entries self-heal at
-  victim validation), volatile-ttl pops the expiry heap. Victims emit
+  `Store`/`PushExpire`-via-`trackAccess`), volatile-ttl pops the expiry
+  heap. FlushDB purges the flushed DB's entries from all four trackers
+  AND rebuilds the expiry heap without them (M5d: a whole flushed DB's
+  stale entries exhaust the small victim-validation budgets and wedge
+  eviction); the remaining self-heal-at-validation path covers the
+  slow-drip cases (TTL dropped on overwrite). Victims emit
   `evicted` via the M5a `OnKeyGone` sink; an overdue candidate is
   expired, not evicted.
 - **OOM gate** (`lib/commands/engine.go`, probed against 7.2.7): over
@@ -206,8 +215,35 @@ M5b architecture notes:
   a denyoom command aborts with the OOM reason embedded. Non-noeviction
   policies get a synchronous `Engine.EvictNow(cs.tok)` attempt first
   (performEvictions analogue) — rejection only when eviction can't get
-  under the limit. `maxmemory-policy` CONFIG with byte-exact enum error;
+  under the limit. EvictNow's verdict is per-shard, checked inside each
+  shard goroutine right after its eviction pass: a global re-check races
+  other connections' in-flight writes (a shard is legitimately over
+  quota for the microseconds between a write's Store and its post-task
+  maybeEvict — at saturation some shard is always in that window, so a
+  global verdict spuriously OOMs under load; M5d soak found it).
+  `maxmemory-policy` CONFIG with byte-exact enum error;
   `Engine.EvictSamples` = Redis maxmemory-samples default (5).
+
+M5d architecture notes:
+
+- **Soak harness** (`bin/bench-m5.sh`, `make bench-m5`, chained from
+  `bin/bench.sh` unless `BENCH_M5=0`): all 8 eviction policies on Ultima
+  and redis-server, `SET key:__rand_int__` over a ~20x oversubscribed
+  random keyspace; gates on bounded `used_memory` (5% slack for
+  cross-connection in-flight skew), advancing `evicted_keys`, and the
+  byte-exact OOM/OK probe. Report: `docs/benchmarks/M5-<date>.md`.
+  Gotcha: `redis-benchmark` EXITS on the first error reply (7.2.7), so
+  one stray OOM fails a whole run, and no throughput summary is printed
+  for runs with errors.
+- **Bugs the M5d soak smoked out** (all fixed, regression tests in
+  `lib/shard/evict_test.go` + pluto): (1) FlushDB left the eviction
+  trackers and expiry heap fully stale → post-FLUSHALL eviction stall →
+  OOM storm; (2) pluto `sharded_hash_ts` bucket placement masked the raw
+  hash's low bits, and CRC-64/ISO holds its low ~28 bits constant on
+  sequential decimal keys (`key:000000123456`) — whole stripes collapsed
+  into one bucket chain, starving `SampleStripe` eviction sampling;
+  bucket indexing now mixes via murmur3 fmix64 (`mix64`), and
+  SampleStripe's attempt budget scales with stripe sparsity.
 
 M5c architecture notes:
 
@@ -335,7 +371,8 @@ tests/ts-roundtrip/  protobuf-es TS client script (bun; `bun install` first) —
 tests/differential/  harness diffs replies against a real redis-server (the parity gate);
                      multi-connection scripts, push frames and blocking wakeups supported
 bin/                 gen.sh (protoc), gen-build-stamp.sh (ldflags), bench.sh (M1 sweep,
-                     chains into bench-pubsub.sh for the M3 pub/sub benchmark)
+                     chains into bench-pubsub.sh for the M3 pub/sub benchmark and
+                     bench-m5.sh for the M5 maxmemory soak)
 docs/                ULTIMA-DESIGN.md, pluto/ structure specs, benchmarks/ reports
 note/                scratch/reference (Redis checkout, benchmarks); gitignored, lint-excluded
 ```
@@ -364,9 +401,13 @@ All via the Makefile (default goal is `build`):
   `redis-benchmark`; writes a report to `docs/benchmarks/M1-<date>.md`,
   then runs `bin/bench-pubsub.sh` (M3 pub/sub sweep, subscribers are the
   `note/pubsub-bench-sub` Go driver; skip with `BENCH_PUBSUB=0`), which
-  writes `docs/benchmarks/M3-<date>.md`.
+  writes `docs/benchmarks/M3-<date>.md`, then `bin/bench-m5.sh` (M5
+  maxmemory soak over all 8 eviction policies, gated on bounded memory;
+  skip with `BENCH_M5=0`), which writes `docs/benchmarks/M5-<date>.md`.
   Tunable via `REDIS_BIN`, `BENCH_BIN`, `BENCH_*_PORT`, `BENCH_REQUESTS`,
-  `BENCH_SUBS`, `BENCH_SINGLE_REQUESTS`.
+  `BENCH_SUBS`, `BENCH_SINGLE_REQUESTS`; the soak has its own
+  `BENCH_M5_*` knobs (requests, maxmemory MB, datasize, keyspace, TTL).
+- `make bench-m5` — just the M5 maxmemory soak.
 - `make tidy`, `make clean`.
 
 Configuration: JSON file (`ultima.cfg.json` by default). Defaults come

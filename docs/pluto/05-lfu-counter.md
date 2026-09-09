@@ -50,6 +50,10 @@ func (l *Lfu[K]) Add(key K)                      // insert with LFU_INIT_VAL
 func (l *Lfu[K]) Delete(key K) bool
 func (l *Lfu[K]) Len() int
 func (l *Lfu[K]) Truncate()
+// Keys returns the tracked keys in first-insert order (snapshot copy; safe
+// to Delete while ranging). Used by Ultima's FLUSHDB to purge one DB's
+// counters from a shared tracker. (lfu_ts; NlKeys is the under-Lock form.)
+func (l *Lfu[K]) Keys() []K
 
 // IdleMinutes returns minutes since last Touch (from the stored minute clock).
 func (l *Lfu[K]) IdleMinutes(key K) (int, bool)

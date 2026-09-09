@@ -128,18 +128,34 @@ func (e *Engine) OverMemory() bool {
 }
 
 // EvictNow runs the eviction loop on every shard, synchronously, and
-// reports whether the keyspace is still over maxmemory afterwards — the
-// OOM gate's performEvictions analogue (§5.2): commands flagged denyoom
-// are rejected only when eviction could not get back under the limit.
+// reports whether any shard is still over its per-shard quota afterwards
+// — the OOM gate's performEvictions analogue (§5.2): commands flagged
+// denyoom are rejected only when eviction could not get back under the
+// limit. The verdict is per-shard, checked inside each shard goroutine
+// right after its eviction pass: a GLOBAL re-check would race the other
+// connections' in-flight writes (a shard is legitimately over quota for
+// the microseconds between a write task's Store and its post-task
+// maybeEvict, and at saturation some shard is always in that window, so
+// a global re-check can stay over forever and spuriously OOM — the M5d
+// soak failure). A shard still over quota after its own pass means
+// eviction genuinely found no victims (e.g. volatile-* with the TTL'd
+// set exhausted) — the real OOM condition.
 // tok carries the caller's pause token (EXEC runs under PauseAll).
 func (e *Engine) EvictNow(tok uint64) (stillOver bool) {
-	if e.maxMemory.Load() <= 0 {
+	mm := e.maxMemory.Load()
+	if mm <= 0 {
 		return false
 	}
+	quota := mm / int64(e.n)
 	for i := range e.shard {
-		e.DoTok(tok, i, func(s *Shard) { s.maybeEvict() })
+		e.DoTok(tok, i, func(s *Shard) {
+			s.maybeEvict()
+			if s.used() > quota {
+				stillOver = true
+			}
+		})
 	}
-	return e.OverMemory()
+	return stillOver
 }
 
 // used returns the shard's current memory estimate across all DBs.

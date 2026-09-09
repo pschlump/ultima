@@ -46,8 +46,8 @@ func (h *ShardedHash[T]) StripeLen(i int) int   // per-stripe load, for metrics
 
 // SampleStripe (added for Ultima M5b eviction, maxmemory-samples style):
 // up to n pseudo-random elements from ONE stripe — random bucket probes with
-// a per-chain reservoir draw; attempt-capped, may return < n on sparse
-// stripes, duplicates possible.
+// a per-chain reservoir draw; the attempt budget scales with stripe sparsity
+// (heads/live), duplicates possible.
 func (h *ShardedHash[T]) SampleStripe(stripe, n int, rng *rand.Rand) []T
 
 // StripeWalk (added for the Ultima M5c snapshot writer): visit every element
@@ -66,6 +66,12 @@ the existing `HashTab[T]` API matters more than this sketch.)
 ### 2. Semantics
 
 - Insert replaces on equal key and reports whether it replaced.
+- Bucket placement applies the murmur3 fmix64 finalizer to the caller hash
+  before masking (added when Ultima's M5d soak showed CRC-64/ISO's low ~28
+  bits constant on sequential keys, collapsing whole stripes into one
+  bucket chain and starving eviction sampling). The mix is a bijection, so
+  per-stripe doubling still splits bucket v into exactly {v, v+len(old)}
+  and the Scan guarantee below is unchanged.
 - Per-stripe independent growth (open addressing or cuckoo — reuse existing
   pluto internals if practical; document which).
 - `Scan` guarantees, matching Redis SCAN: a full iteration (cursor 0 → cursor 0)

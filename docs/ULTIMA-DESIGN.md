@@ -425,7 +425,10 @@ Modeled directly on exsms `lib/config/config.go`:
   (`--redis-conf path`) to ease drop-in migration — translation layer maps to
   the JSON model.
 
-Example sketch:
+Example sketch (persistence/eviction keys use the as-built Redis-parity
+names — `maxmemory_policy`, `appendonly`, `appendfsync`, `save`, `dir`,
+`dbfilename` — not the `eviction_policy`/`aof_*` names sketched earlier,
+so CONFIG GET replies diff byte-exact against Redis):
 
 ```json
 {
@@ -435,10 +438,18 @@ Example sketch:
     "http_addr": ":6381",
     "shard_count": 0,
     "max_memory_mb": 0,
-    "eviction_policy": "noeviction",
-    "requirepass": "$ENV$ultima_password",
-    "aof_enabled": true,
-    "aof_fsync": "everysec"
+    "maxmemory_policy": "noeviction",
+    "notify_keyspace_events": "",
+    "requirepass": "$ENV$ultima_password"
+  },
+  "persist": {
+    "dir": "./data",
+    "dbfilename": "dump.rdb",
+    "appenddirname": "appendonlydir",
+    "appendonly": true,
+    "appendfsync": "everysec",
+    "save": "3600 1 300 100 60 10000",
+    "snapshot_compress": false
   },
   "auth": {
     "jwt_secret": "$ENV$ultima_jwt_secret",
@@ -844,6 +855,10 @@ Key dependencies: `go-chi/chi/v5`, `go-playground/validator/v10`,
 | **M7** | Client libraries (§11) + example applications                                                   | Go + TS + JS packages build; CLIs run on the Go client; leaderboard + chat examples run end-to-end  |
 | **M8** | P3/P4 parity tail (streams, Lua-lite, bitfield, geo, PF\*), sharded pub/sub SSUBSCRIBE/SPUBLISH (deferred from P2) | differential green on covered tail                                                                 |
 | **M9** | Superset features (§12) + performance campaign                                                  | ≥4× Redis on target workload; final report                                                          |
+
+Status: M0–M5 are done (M5 completed via the M5a–M5d phases of
+`docs/m5-detailed-plan.md`; soak report in `docs/benchmarks/M5-*.md`,
+implementation memo in `note/M5-implemented.md`).
 
 ---
 
