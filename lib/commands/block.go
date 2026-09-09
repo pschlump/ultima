@@ -210,7 +210,7 @@ func bpopCmd(e *Engine, cs *ConnState, args [][]byte, head bool) resp.Value {
 			}
 			l := ent.Obj.(*types.List)
 			v, _ := popOne(l, head)
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 			// Publish our own events before signaling the next waiter:
 			// Redis's single-threaded order guarantees this pop's events
 			// precede the next woken waiter's.
@@ -364,7 +364,7 @@ func cmdBLMPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				v, _ := popOne(l, head)
 				out = append(out, resp.BlobString(v))
 			}
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 			e.notifyKeyspace(cs.DB, key, ev) // before the wake: see bpopCmd
 			if l.Len() == 0 {
 				s.Delete(cs.DB, key)
@@ -422,7 +422,7 @@ func bzpopCmd(e *Engine, cs *ConnState, args [][]byte, fromMin bool) resp.Value 
 			}
 			el, _ := z.At(i)
 			z.Remove(el.Member)
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 			e.notifyKeyspace(cs.DB, key, ev) // before the wake: see bpopCmd
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)
@@ -472,7 +472,7 @@ func cmdBZMPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				out = append(out, resp.Arr(resp.BlobStr(el.Member), zScoreValue(cs, el.Score)))
 				z.Remove(el.Member)
 			}
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 			e.notifyKeyspace(cs.DB, key, ev) // before the wake: see bpopCmd
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)

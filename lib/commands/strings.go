@@ -269,7 +269,7 @@ func cmdGetEx(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		case persist:
 			persisted = ent.ExpireAtMs != 0
 			ent.ExpireAtMs = 0
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 		case expKind != "":
 			expVal, ok := parseIntStrict(expRaw)
 			if !ok {
@@ -307,7 +307,7 @@ func cmdGetEx(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				deleted = true
 			} else {
 				ent.ExpireAtMs = at
-				s.Touch(ent)
+				s.Touch(cs.DB, key, ent)
 				s.PushExpire(cs.DB, key, ent)
 				expireSet = true
 			}
@@ -379,7 +379,7 @@ func incrBy(e *Engine, cs *ConnState, keyB []byte, delta int64) resp.Value {
 		cur += delta
 		if found {
 			ent.Str = []byte(fmt.Sprintf("%d", cur))
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 		} else {
 			s.Store(cs.DB, key, &shard.Entry{
 				Type: shard.TypeString,
@@ -433,7 +433,7 @@ func cmdIncrByFloat(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		out := formatHumanFloat(cur)
 		if found {
 			ent.Str = []byte(out)
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 		} else {
 			s.Store(cs.DB, key, &shard.Entry{
 				Type: shard.TypeString,
@@ -463,7 +463,7 @@ func cmdAppend(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				return
 			}
 			ent.Str = append(ent.Str, args[2]...)
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 			reply = resp.Int(int64(len(ent.Str)))
 			done = true
 			return

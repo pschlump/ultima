@@ -23,6 +23,7 @@ package shard
 
 import (
 	"math/bits"
+	"math/rand"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -30,7 +31,10 @@ import (
 
 	"github.com/pschlump/pluto/crc"
 	"github.com/pschlump/pluto/heap_ts"
+	"github.com/pschlump/pluto/lfu_ts"
+	"github.com/pschlump/pluto/lru_ts"
 	"github.com/pschlump/pluto/sharded_hash_ts"
+	"github.com/pschlump/ultima/lib/types"
 )
 
 // Type tags a keyspace entry's value kind. M1 implements strings; M2 adds
@@ -50,6 +54,9 @@ const (
 // counter (WATCH in M3; ExpGen invalidates stale expiry-heap entries).
 // Strings live in Str; collections live in Obj as one of *types.Hash,
 // *types.List, *types.Set, *types.ZSet (shard goroutine–owned, no locks).
+// memBytes caches the entry's estimated memory cost (key + value +
+// overhead, M5b), maintained by Store/Touch/Delete so usedBytes stays
+// O(1) per write.
 type Entry struct {
 	Type       Type
 	Str        []byte
@@ -57,6 +64,7 @@ type Entry struct {
 	ExpireAtMs int64 // absolute expiry in ms; 0 = no expiry
 	ExpGen     uint64
 	Version    uint64
+	memBytes   int64
 }
 
 // item is the sharded_hash_ts element: a two-field struct whose
@@ -149,6 +157,19 @@ type Engine struct {
 	// ExpiredKeys counts keys removed by expiry (passive or sweep).
 	ExpiredKeys atomic.Int64
 
+	// EvictedKeys counts keys removed by maxmemory eviction (M5b).
+	EvictedKeys atomic.Int64
+
+	// EvictSamples is the eviction candidate count for the LFU and
+	// random policies (Redis maxmemory-samples, DefaultEvictSamples).
+	EvictSamples int
+
+	// maxmemory and the eviction policy (M5b): set via CONFIG SET /
+	// config file, read by the per-shard eviction loop and the command
+	// layer's OOM gate. 0 = unlimited.
+	maxMemory atomic.Int64
+	policy    atomic.Int32 // EvictPolicy
+
 	// closing is closed at the start of Close, before the shard
 	// goroutines stop: parked blocking-command waiters select on it and
 	// reply null on shutdown instead of hanging (§4.2).
@@ -164,11 +185,12 @@ func NewEngine(shardCount, maxDBs int) *Engine {
 		maxDBs = 16
 	}
 	e := &Engine{
-		n:       n,
-		k:       uint(bits.Len(uint(n)) - 1),
-		tab:     crc.MakeTable64(crc.ISO), // any stable CRC-64 is fine for routing
-		NowMs:   func() int64 { return time.Now().UnixMilli() },
-		closing: make(chan struct{}),
+		n:            n,
+		k:            uint(bits.Len(uint(n)) - 1),
+		tab:          crc.MakeTable64(crc.ISO), // any stable CRC-64 is fine for routing
+		NowMs:        func() int64 { return time.Now().UnixMilli() },
+		closing:      make(chan struct{}),
+		EvictSamples: DefaultEvictSamples,
 	}
 	e.dbs = make([]*db, maxDBs)
 	for i := range e.dbs {
@@ -483,10 +505,36 @@ type Shard struct {
 
 	// OnKeyGone, when non-nil, is invoked after the shard deletes a key
 	// for a non-command reason — passive expiry in Lookup, active expiry
-	// in sweep (reason "expired"); M5b eviction will reuse it ("evicted").
-	// Runs on the shard goroutine, so the hook must be cheap and
+	// in sweep (reason "expired"), maxmemory eviction (reason "evicted",
+	// M5b). Runs on the shard goroutine, so the hook must be cheap and
 	// non-blocking. Install once via Engine.SetOnKeyGone before serving.
 	OnKeyGone func(db int, key, reason string)
+
+	// usedBytes is the shard's share of the keyspace memory estimate
+	// (M5b), one counter per logical DB so FLUSHDB can zero its share,
+	// plus usedTotal as the shard-wide rollup for the hot paths (the OOM
+	// gate and the eviction loop read it per command). Written only by
+	// the shard goroutine; read anywhere via the atomics.
+	usedBytes []atomic.Int64
+	usedTotal atomic.Int64
+
+	// Eviction recency/frequency trackers (M5b, D14): lruAll/lfuAll hold
+	// every key, lruVol/lfuVol only keys with a TTL. Maintained by
+	// Lookup/Store/Touch/PushExpire/Delete below — always on, like
+	// Redis's per-object LRU clock, so CONFIG SET maxmemory-policy never
+	// starts cold. Stale entries (deleted/flushed keys) are self-healing:
+	// the eviction loop validates every candidate against the keyspace.
+	// Keys are tombKey{db,key} — the same (db,key) pair the tombstones
+	// and the waiter registry use. Shard-goroutine only, so the _ts
+	// locks are uncontended.
+	lruAll *lru_ts.Lru[tombKey, struct{}]
+	lruVol *lru_ts.Lru[tombKey, struct{}]
+	lfuAll *lfu_ts.Lfu[tombKey]
+	lfuVol *lfu_ts.Lfu[tombKey]
+
+	// rng feeds victim sampling (random/LFU policies). Shard-goroutine
+	// only; seeded per shard so tests are reproducible enough.
+	rng *rand.Rand
 
 	// TombCap bounds the tombstone map; shrunk by tests.
 	TombCap int
@@ -503,6 +551,12 @@ func newShard(eng *Engine, id int) *Shard {
 		tomb:          make(map[tombKey]uint64),
 		epoch:         make([]uint64, eng.MaxDBs()),
 		waiters:       make(map[tombKey][]*Waiter),
+		usedBytes:     make([]atomic.Int64, eng.MaxDBs()),
+		lruAll:        lru_ts.NewLru[tombKey, struct{}](evictTrackerCap),
+		lruVol:        lru_ts.NewLru[tombKey, struct{}](evictTrackerCap),
+		lfuAll:        lfu_ts.NewLfu[tombKey](lfu_ts.DefaultLogFactor, lfu_ts.DefaultDecayTime),
+		lfuVol:        lfu_ts.NewLfu[tombKey](lfu_ts.DefaultLogFactor, lfu_ts.DefaultDecayTime),
+		rng:           rand.New(rand.NewSource(int64(id)*7919 + 42)),
 		SweepInterval: 100 * time.Millisecond,
 		SweepMax:      1000,
 		SweepTimeBox:  time.Millisecond,
@@ -536,6 +590,7 @@ func (s *Shard) run() {
 			} else {
 				t.fn(s)
 				close(t.done)
+				s.maybeEvict()
 			}
 		case <-timer.C:
 			expired, more := s.sweep(s.eng.NowMs(), s.SweepMax, time.Now().Add(s.SweepTimeBox))
@@ -583,6 +638,7 @@ func (s *Shard) park(tok uint64) {
 		for _, st := range stash {
 			st.fn(s)
 			close(st.done)
+			s.maybeEvict()
 		}
 	}
 	for {
@@ -595,6 +651,7 @@ func (s *Shard) park(tok uint64) {
 			if t.tok == tok {
 				t.fn(s)
 				close(t.done)
+				s.maybeEvict()
 			} else {
 				stash = append(stash, t)
 			}
@@ -613,7 +670,8 @@ func (s *Shard) tab(db int) *sharded_hash_ts.ShardedHash[item] {
 
 // Lookup fetches the entry for key, applying passive expiry: a live
 // expired entry is deleted (and tombstoned for WATCH) and reported
-// missing (§5.2).
+// missing (§5.2). A hit counts as an access for the M5b eviction
+// trackers (LRU recency / LFU frequency), like Redis's object access.
 func (s *Shard) Lookup(db int, key string) (*Entry, bool) {
 	it, found := s.tab(db).Search(item{Key: key})
 	if !found {
@@ -623,13 +681,68 @@ func (s *Shard) Lookup(db int, key string) (*Entry, bool) {
 	if e.ExpireAtMs > 0 && e.ExpireAtMs <= s.eng.NowMs() {
 		s.tombstone(db, key, e.Version)
 		s.tab(db).Delete(item{Key: key})
+		s.addMem(db, -e.memBytes)
+		s.untrack(db, key)
 		s.eng.ExpiredKeys.Add(1)
 		if s.OnKeyGone != nil {
 			s.OnKeyGone(db, key, "expired")
 		}
 		return nil, false
 	}
+	s.trackAccess(db, key, e)
 	return e, true
+}
+
+// addMem adjusts db's memory estimate and the shard-wide rollup by delta
+// (negative on removal). Call only from inside the shard goroutine.
+func (s *Shard) addMem(db int, delta int64) {
+	s.usedBytes[db].Add(delta)
+	s.usedTotal.Add(delta)
+}
+
+// trackAccess records one keyspace access in the M5b eviction trackers:
+// recency in the allkeys/volatile LRU, frequency in the LFU counters
+// (Redis's per-object LRU/LFU clock update analogue). Call only from
+// inside the shard goroutine.
+func (s *Shard) trackAccess(db int, key string, e *Entry) {
+	k := tombKey{db, key}
+	s.lruAll.Put(k, struct{}{})
+	s.lfuAll.Touch(k)
+	if e.ExpireAtMs > 0 {
+		s.lruVol.Put(k, struct{}{})
+		s.lfuVol.Touch(k)
+	}
+}
+
+// untrack drops key from every eviction tracker (key deleted or expiry
+// removed). Call only from inside the shard goroutine.
+func (s *Shard) untrack(db int, key string) {
+	k := tombKey{db, key}
+	s.lruAll.Delete(k)
+	s.lruVol.Delete(k)
+	s.lfuAll.Delete(k)
+	s.lfuVol.Delete(k)
+}
+
+// entryMem estimates one entry's memory cost in bytes: the key, the
+// entry/overhead share, and the value (string bytes or the collection's
+// MemUsage). An estimate, per D10 — monotone and comparable, not exact.
+func entryMem(key string, e *Entry) int64 {
+	const entryOverhead = 80 // Entry + table node + bookkeeping share
+	v := int64(len(key)) + entryOverhead
+	switch e.Type {
+	case TypeString:
+		v += int64(len(e.Str))
+	case TypeHash:
+		v += e.Obj.(*types.Hash).MemUsage()
+	case TypeList:
+		v += e.Obj.(*types.List).MemUsage()
+	case TypeSet:
+		v += e.Obj.(*types.Set).MemUsage()
+	case TypeZSet:
+		v += e.Obj.(*types.ZSet).MemUsage()
+	}
+	return v
 }
 
 // Store inserts or replaces key with e. The caller builds e (including any
@@ -642,12 +755,27 @@ func (s *Shard) Lookup(db int, key string) (*Entry, bool) {
 // previous entry's version and the tombstone's.
 func (s *Shard) Store(db int, key string, e *Entry) {
 	base := s.tomb[tombKey{db, key}]
-	if old, found := s.tab(db).Search(item{Key: key}); found && old.E.Version > base {
+	old, found := s.tab(db).Search(item{Key: key})
+	if found && old.E.Version > base {
 		base = old.E.Version
 	}
 	e.Version = base + 1
+	e.memBytes = entryMem(key, e)
+	if found {
+		s.addMem(db, e.memBytes-old.E.memBytes)
+	} else {
+		s.addMem(db, e.memBytes)
+	}
 	delete(s.tomb, tombKey{db, key})
 	s.tab(db).Insert(item{Key: key, E: e})
+	s.trackAccess(db, key, e)
+	if e.ExpireAtMs == 0 {
+		// An overwrite drops any TTL (Redis SET semantics): the volatile
+		// trackers must not keep the key.
+		k := tombKey{db, key}
+		s.lruVol.Delete(k)
+		s.lfuVol.Delete(k)
+	}
 }
 
 // Delete removes key, returning whether it existed (passively expired
@@ -659,15 +787,23 @@ func (s *Shard) Delete(db int, key string) bool {
 		return false
 	}
 	s.tombstone(db, key, e.Version)
+	s.addMem(db, -e.memBytes)
+	s.untrack(db, key)
 	return s.tab(db).Delete(item{Key: key})
 }
 
 // Touch bumps e's version after an in-place mutation of a live entry
 // (INCR, HSET, list pushes, ZADD… do not go through Store, but §4.2
-// WATCH must still observe the write). Call only from inside the shard
+// WATCH must still observe the write). It also refreshes the cached
+// memory estimate (the mutation changed the value's size) and records
+// the access in the eviction trackers. Call only from inside the shard
 // goroutine.
-func (s *Shard) Touch(e *Entry) {
+func (s *Shard) Touch(db int, key string, e *Entry) {
 	e.Version++
+	mem := entryMem(key, e)
+	s.addMem(db, mem-e.memBytes)
+	e.memBytes = mem
+	s.trackAccess(db, key, e)
 }
 
 // tombstone records key's deletion for WATCH dirty tracking: the version
@@ -684,15 +820,18 @@ func (s *Shard) tombstone(db int, key string, ver uint64) {
 	s.tomb[tombKey{db, key}] = ver + 1
 }
 
-// flushDB drops db's tombstones and bumps db's epoch, dirtying every
-// watcher on db (the keyspace swap in Engine.FlushDB has already
-// happened). Call only from inside the shard goroutine.
+// flushDB drops db's tombstones, zeroes db's memory-estimate share (the
+// keyspace swap already dropped the entries), and bumps db's epoch,
+// dirtying every watcher on db. Eviction trackers keep their now-stale
+// db entries; the eviction loop's candidate validation discards them.
+// Call only from inside the shard goroutine.
 func (s *Shard) flushDB(db int) {
 	for k := range s.tomb {
 		if k.db == db {
 			delete(s.tomb, k)
 		}
 	}
+	s.addMem(db, -s.usedBytes[db].Load())
 	s.epoch[db]++
 }
 
@@ -802,6 +941,8 @@ func (s *Shard) sweep(now int64, limit int, deadline time.Time) (expired int, mo
 		if e.ExpireAtMs == top.At && e.ExpGen == top.Gen {
 			s.tombstone(top.DB, top.Key, e.Version)
 			s.tab(top.DB).Delete(item{Key: top.Key})
+			s.addMem(top.DB, -e.memBytes)
+			s.untrack(top.DB, top.Key)
 			s.eng.ExpiredKeys.Add(1)
 			expired++
 			if s.OnKeyGone != nil {

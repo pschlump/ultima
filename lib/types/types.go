@@ -13,6 +13,8 @@
 package types
 
 import (
+	"iter"
+
 	"github.com/pschlump/pluto/quicklist_ts"
 )
 
@@ -25,11 +27,119 @@ const (
 )
 
 // List is the Redis list value: a pluto segmented deque (quicklist
-// equivalent, §5.3 #10). The zero value is ready to use.
-type List = quicklist_ts.QuickList[[]byte]
+// equivalent, §5.3 #10) plus a running total of element bytes for
+// MemUsage (M5b memory accounting). The zero value is ready to use.
+type List struct {
+	ql    quicklist_ts.QuickList[[]byte]
+	bytes int64
+}
 
 // NewList returns an empty list.
-func NewList() *List { return &quicklist_ts.QuickList[[]byte]{} }
+func NewList() *List { return &List{} }
+
+// Len returns the number of elements.
+func (l *List) Len() int { return l.ql.Len() }
+
+// PushHead prepends v.
+func (l *List) PushHead(v []byte) { l.bytes += int64(len(v)); l.ql.PushHead(v) }
+
+// PushTail appends v.
+func (l *List) PushTail(v []byte) { l.bytes += int64(len(v)); l.ql.PushTail(v) }
+
+// PopHead removes and returns the first element.
+func (l *List) PopHead() ([]byte, bool) {
+	v, ok := l.ql.PopHead()
+	if ok {
+		l.bytes -= int64(len(v))
+	}
+	return v, ok
+}
+
+// PopTail removes and returns the last element.
+func (l *List) PopTail() ([]byte, bool) {
+	v, ok := l.ql.PopTail()
+	if ok {
+		l.bytes -= int64(len(v))
+	}
+	return v, ok
+}
+
+// PeekHead returns the first element without removing it.
+func (l *List) PeekHead() ([]byte, bool) { return l.ql.PeekHead() }
+
+// PeekTail returns the last element without removing it.
+func (l *List) PeekTail() ([]byte, bool) { return l.ql.PeekTail() }
+
+// At returns the element at index i.
+func (l *List) At(i int) ([]byte, bool) { return l.ql.At(i) }
+
+// Set replaces the element at index i.
+func (l *List) Set(i int, v []byte) bool {
+	old, ok := l.ql.At(i)
+	if !ok {
+		return false
+	}
+	l.bytes += int64(len(v)) - int64(len(old))
+	return l.ql.Set(i, v)
+}
+
+// InsertBefore inserts v ahead of index i.
+func (l *List) InsertBefore(i int, v []byte) bool {
+	if !l.ql.InsertBefore(i, v) {
+		return false
+	}
+	l.bytes += int64(len(v))
+	return true
+}
+
+// InsertAfter inserts v behind index i.
+func (l *List) InsertAfter(i int, v []byte) bool {
+	if !l.ql.InsertAfter(i, v) {
+		return false
+	}
+	l.bytes += int64(len(v))
+	return true
+}
+
+// Delete removes the element at index i.
+func (l *List) Delete(i int) bool {
+	v, ok := l.ql.At(i)
+	if !ok {
+		return false
+	}
+	l.bytes -= int64(len(v))
+	return l.ql.Delete(i)
+}
+
+// Trim keeps only the elements in [start, stop], recomputing the byte
+// total from the survivors (O(n), like Redis LTRIM).
+func (l *List) Trim(start, stop int) {
+	l.ql.Trim(start, stop)
+	var keep int64
+	for _, v := range l.ql.All() {
+		keep += int64(len(v))
+	}
+	l.bytes = keep
+}
+
+// All iterates the elements head to tail.
+func (l *List) All() iter.Seq2[int, []byte] { return l.ql.All() }
+
+// Range iterates the elements in [start, stop].
+func (l *List) Range(start, stop int) iter.Seq2[int, []byte] { return l.ql.Range(start, stop) }
+
+// Lock takes the list's lock for compound operations (see the Nl*
+// methods); shard-goroutine ownership makes it uncontended in practice.
+func (l *List) Lock() { l.ql.Lock() }
+
+// Unlock releases the lock taken by Lock.
+func (l *List) Unlock() { l.ql.Unlock() }
+
+// NlLen is Len for use while holding Lock.
+func (l *List) NlLen() int { return l.ql.NlLen() }
+
+// NlAt is At for use while holding Lock.
+func (l *List) NlAt(i int) ([]byte, bool) { return l.ql.NlAt(i) }
 
 // ParseInt64 mirrors Redis string2ll: optional '-', no '+' or spaces, no
 // leading zeros ("0" itself is fine), range-checked int64. Used for the

@@ -144,7 +144,7 @@ func expireCommon(e *Engine, cs *ConnState, args [][]byte, ms bool) resp.Value {
 			s.Delete(cs.DB, key)
 		} else {
 			ent.ExpireAtMs = at
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 			s.PushExpire(cs.DB, key, ent)
 		}
 		applied = true
@@ -213,7 +213,7 @@ func cmdPersist(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			return
 		}
 		ent.ExpireAtMs = 0
-		s.Touch(ent)
+		s.Touch(cs.DB, key, ent)
 		removed = true
 		reply = resp.Int(1)
 	})

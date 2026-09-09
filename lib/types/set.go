@@ -11,6 +11,7 @@ type Set struct {
 	ints   []int64             // sorted; valid while isInt
 	isInt  bool                // intset encoding active
 	member map[string]struct{} // valid when !isInt
+	bytes  int64               // sum of member lengths, map encoding only; for MemUsage
 }
 
 // NewSet returns an empty set (intset encoding).
@@ -80,6 +81,7 @@ func (s *Set) Add(m string) bool {
 		return false
 	}
 	s.member[m] = struct{}{}
+	s.bytes += int64(len(m))
 	return true
 }
 
@@ -87,7 +89,9 @@ func (s *Set) Add(m string) bool {
 func (s *Set) promote() {
 	s.member = make(map[string]struct{}, len(s.ints))
 	for _, v := range s.ints {
-		s.member[strconv.FormatInt(v, 10)] = struct{}{}
+		m := strconv.FormatInt(v, 10)
+		s.member[m] = struct{}{}
+		s.bytes += int64(len(m))
 	}
 	s.ints = nil
 	s.isInt = false
@@ -111,6 +115,7 @@ func (s *Set) Remove(m string) bool {
 		return false
 	}
 	delete(s.member, m)
+	s.bytes -= int64(len(m))
 	return true
 }
 

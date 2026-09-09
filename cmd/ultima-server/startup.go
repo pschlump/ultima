@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -66,6 +67,11 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 	if !eng.SetNotifyKeyspaceEvents(cfg.Server.NotifyKeyspaceEvents) {
 		return nil, fmt.Errorf("invalid notify_keyspace_events %q: use characters from 'Ag$lshzxeKEtmdn'", cfg.Server.NotifyKeyspaceEvents)
 	}
+	pol, ok := shard.ParseEvictPolicy(cfg.Server.MaxMemoryPolicy)
+	if !ok {
+		return nil, fmt.Errorf("invalid maxmemory_policy %q: use one of '%s'", cfg.Server.MaxMemoryPolicy, strings.Join(shard.EvictPolicyNames, ", "))
+	}
+	s.shards.SetPolicy(pol)
 
 	s.respSrv = respserver.New(cfg.Server.RespAddr, eng)
 	go func() {

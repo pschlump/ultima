@@ -19,6 +19,10 @@ allow safe cross-shard inspection (metrics, DEBUG commands).
 - Identical public API to `lru`: `NewLru`, `NewLruFunc` (with eviction-veto
   callback), `Get`, `Peek`, `Put`, `Delete`, `Clear`, `Len`, MRU→LRU /
   LRU→MRU iterators.
+  (Added for Ultima M5b eviction, both twins: `Oldest` / `PopOldest`
+  peek at / remove the least-recently-used entry in O(1) — `PopOldest`
+  skips veto-protected entries like `Put`'s eviction — plus the
+  `NlOldest` / `NlPopOldest` no-lock variants.)
 - Internal `sync.RWMutex`: read lock for `Get`-shaped reads where possible —
   **but note** `Get` mutates recency, so it needs the write lock; `Peek` is a
   true read. Document which methods take which lock.

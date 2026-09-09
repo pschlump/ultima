@@ -61,7 +61,7 @@ func pushCmd(e *Engine, cs *ConnState, args [][]byte, head, onlyIfExists bool) r
 			}
 		}
 		if ent != nil {
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 		}
 		// Publish BEFORE waking: a woken BLPOP/BLMOVE/BLMPOP pops on its
 		// own goroutine and publishes lpop — Redis's single-threaded order
@@ -112,7 +112,7 @@ func popCmd(e *Engine, cs *ConnState, args [][]byte, head bool) resp.Value {
 			l := ent.Obj.(*types.List)
 			if !hasCount {
 				v, _ := popOne(l, head)
-				s.Touch(ent)
+				s.Touch(cs.DB, key, ent)
 				if l.Len() == 0 {
 					s.Delete(cs.DB, key)
 					deleted = true
@@ -131,7 +131,7 @@ func popCmd(e *Engine, cs *ConnState, args [][]byte, head bool) resp.Value {
 				v, _ := popOne(l, head)
 				out = append(out, resp.BlobString(v))
 			}
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 			if l.Len() == 0 {
 				s.Delete(cs.DB, key)
 				deleted = true
@@ -248,7 +248,7 @@ func cmdLSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			if !ent.Obj.(*types.List).Set(int(idx), dupBytes(args[3])) {
 				reply = resp.Err("ERR index out of range")
 			} else {
-				s.Touch(ent)
+				s.Touch(cs.DB, key, ent)
 				done = true
 				reply = replyOK
 			}
@@ -298,7 +298,7 @@ func cmdLInsert(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			} else {
 				l.InsertAfter(idx, dupBytes(args[4]))
 			}
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 			inserted = true
 			reply = resp.Int(int64(l.Len()))
 		}
@@ -360,7 +360,7 @@ func cmdLRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				l.Delete(i)
 			}
 			if len(idxs) > 0 {
-				s.Touch(ent)
+				s.Touch(cs.DB, key, ent)
 			}
 			if l.Len() == 0 {
 				s.Delete(cs.DB, key)
@@ -398,7 +398,7 @@ func cmdLTrim(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		default:
 			l := ent.Obj.(*types.List)
 			l.Trim(int(start), int(stop))
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 			exists = true // Redis emits ltrim even when nothing was trimmed
 			if l.Len() == 0 {
 				s.Delete(cs.DB, key)
@@ -473,7 +473,7 @@ func lmoveCmd(e *Engine, cs *ConnState, srcB, dstB []byte, srcHead, dstHead bool
 				} else {
 					l.PushTail(v)
 				}
-				s.Touch(ent)
+				s.Touch(cs.DB, src, ent)
 				// Publish before waking (see pushCmd): the element stays in
 				// the list, so a woken waiter can pop it immediately.
 				e.notifyKeyspace(cs.DB, src, pushEv)
@@ -550,7 +550,7 @@ func lmoveCmd(e *Engine, cs *ConnState, srcB, dstB []byte, srcHead, dstHead bool
 			l.PushTail(dupBytes(val))
 		}
 		if ent != nil {
-			s.Touch(ent)
+			s.Touch(cs.DB, dst, ent)
 		}
 		e.notifyKeyspace(cs.DB, dst, pushEv)
 		s.WakeWaiter(cs.DB, dst) // a BLMOVE/BLPOP on dst can proceed
@@ -562,7 +562,7 @@ func lmoveCmd(e *Engine, cs *ConnState, srcB, dstB []byte, srcHead, dstHead bool
 		}
 		l := ent.Obj.(*types.List)
 		popOne(l, srcHead)
-		s.Touch(ent)
+		s.Touch(cs.DB, src, ent)
 		e.notifyKeyspace(cs.DB, src, popEv)
 		if l.Len() == 0 {
 			s.Delete(cs.DB, src)

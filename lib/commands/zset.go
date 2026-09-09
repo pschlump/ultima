@@ -125,7 +125,7 @@ pairs:
 			incrScore = score
 		}
 		if ent != nil && (added > 0 || changed > 0) {
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 		}
 		if added > 0 || changed > 0 {
 			// Publish before waking (see pushCmd in list.go): a woken
@@ -197,7 +197,7 @@ func cmdZIncrBy(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		if ent == nil {
 			storeColl(s, cs.DB, key, shard.TypeZSet, z)
 		} else {
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 		}
 		e.notifyKeyspace(cs.DB, key, "zincr") // before the wake: see pushCmd
 		s.WakeWaiter(cs.DB, key)              // serve parked BZPOPMIN/BZMPOP waiters
@@ -293,7 +293,7 @@ func cmdZRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				}
 			}
 			if n > 0 {
-				s.Touch(ent)
+				s.Touch(cs.DB, key, ent)
 			}
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)
@@ -726,7 +726,7 @@ func cmdZRemRangeByRank(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			lo, hi := req.window(z)
 			n = z.RemoveRankRange(lo, hi-1)
 			if n > 0 {
-				s.Touch(ent)
+				s.Touch(cs.DB, key, ent)
 			}
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)
@@ -789,7 +789,7 @@ func zRemRange(e *Engine, cs *ConnState, keyB []byte, event string, loc func(*ty
 			}
 			n = z.RemoveRankRange(lo, hi-1)
 			if n > 0 {
-				s.Touch(ent)
+				s.Touch(cs.DB, key, ent)
 			}
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)
@@ -906,7 +906,7 @@ func zPopCmd(e *Engine, cs *ConnState, args [][]byte, fromMin bool) resp.Value {
 			popped = append(popped, el)
 			z.Remove(el.Member)
 		}
-		s.Touch(ent)
+		s.Touch(cs.DB, key, ent)
 		if z.Len() == 0 {
 			s.Delete(cs.DB, key)
 			deleted = true

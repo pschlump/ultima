@@ -34,7 +34,7 @@ func cmdSAdd(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			}
 		}
 		if ent != nil && n > 0 {
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 		}
 		reply = resp.Int(n)
 	})
@@ -66,7 +66,7 @@ func cmdSRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				}
 			}
 			if n > 0 {
-				s.Touch(ent)
+				s.Touch(cs.DB, key, ent)
 			}
 			if st.Len() == 0 {
 				s.Delete(cs.DB, key)
@@ -196,7 +196,7 @@ func cmdSPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		if !hasCount {
 			m := st.Members()[rand.IntN(st.Len())]
 			st.Remove(m)
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 			popped = true
 			if st.Len() == 0 {
 				s.Delete(cs.DB, key)
@@ -223,7 +223,7 @@ func cmdSPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 					st.Remove(m)
 					out = append(out, resp.BlobStr(m))
 				}
-				s.Touch(ent)
+				s.Touch(cs.DB, key, ent)
 				popped = true
 			}
 		}
@@ -364,7 +364,7 @@ func cmdSMove(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				}
 				st := ent.Obj.(*types.Set)
 				st.Remove(member)
-				s.Touch(ent)
+				s.Touch(cs.DB, src, ent)
 				if st.Len() == 0 {
 					s.Delete(cs.DB, src)
 					srcDeleted = true
@@ -380,7 +380,7 @@ func cmdSMove(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				}
 				dstAdded = st.Add(member)
 				if ent != nil {
-					s.Touch(ent)
+					s.Touch(cs.DB, dst, ent)
 				}
 			}
 		}

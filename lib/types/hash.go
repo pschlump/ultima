@@ -8,6 +8,7 @@ package types
 type Hash struct {
 	pairs []hashPair
 	idx   map[string]int // nil while small
+	bytes int64          // sum of len(field)+len(value), for MemUsage
 }
 
 type hashPair struct {
@@ -45,20 +46,24 @@ func (h *Hash) Get(field string) (string, bool) {
 func (h *Hash) Set(field, value string) (added bool) {
 	if h.idx != nil {
 		if i, ok := h.idx[field]; ok {
+			h.bytes += int64(len(value)) - int64(len(h.pairs[i].value))
 			h.pairs[i].value = value
 			return false
 		}
 		h.idx[field] = len(h.pairs)
 		h.pairs = append(h.pairs, hashPair{field, value})
+		h.bytes += int64(len(field)) + int64(len(value))
 		return true
 	}
 	for i := range h.pairs {
 		if h.pairs[i].field == field {
+			h.bytes += int64(len(value)) - int64(len(h.pairs[i].value))
 			h.pairs[i].value = value
 			return false
 		}
 	}
 	h.pairs = append(h.pairs, hashPair{field, value})
+	h.bytes += int64(len(field)) + int64(len(value))
 	if len(h.pairs) > HashMaxListpackEntries ||
 		len(field) > HashMaxListpackValue || len(value) > HashMaxListpackValue {
 		h.promote()
@@ -82,6 +87,7 @@ func (h *Hash) Del(field string) bool {
 		if !ok {
 			return false
 		}
+		h.bytes -= int64(len(field)) + int64(len(h.pairs[i].value))
 		delete(h.idx, field)
 		h.pairs = append(h.pairs[:i], h.pairs[i+1:]...)
 		for j := i; j < len(h.pairs); j++ {
@@ -91,6 +97,7 @@ func (h *Hash) Del(field string) bool {
 	}
 	for i := range h.pairs {
 		if h.pairs[i].field == field {
+			h.bytes -= int64(len(field)) + int64(len(h.pairs[i].value))
 			h.pairs = append(h.pairs[:i], h.pairs[i+1:]...)
 			return true
 		}

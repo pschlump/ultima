@@ -28,8 +28,9 @@ func cmpZElem(a, b ZElem) int {
 // (score, member) plus a member→score map (§5.1, §5.3 #1). The skiplist
 // carries span counters, so rank and by-index access are O(log n).
 type ZSet struct {
-	sl *skip_list_ts.SkipList[ZElem]
-	m  map[string]float64
+	sl    *skip_list_ts.SkipList[ZElem]
+	m     map[string]float64
+	bytes int64 // sum of member lengths, for MemUsage
 }
 
 // NewZSet returns an empty sorted set.
@@ -63,6 +64,7 @@ func (z *ZSet) Add(member string, score float64) bool {
 	}
 	z.sl.Insert(ZElem{Score: score, Member: member})
 	z.m[member] = score
+	z.bytes += int64(len(member))
 	return true
 }
 
@@ -73,6 +75,7 @@ func (z *ZSet) Remove(member string) bool {
 		return false
 	}
 	delete(z.m, member)
+	z.bytes -= int64(len(member))
 	return z.sl.Delete(ZElem{Score: s, Member: member})
 }
 
@@ -101,6 +104,7 @@ func (z *ZSet) RemoveRankRange(start, stop int) int {
 		}
 		z.sl.Delete(el)
 		delete(z.m, el.Member)
+		z.bytes -= int64(len(el.Member))
 		n++
 	}
 	return n

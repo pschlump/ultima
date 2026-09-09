@@ -274,7 +274,7 @@ func TestWatchDirtyTouch(t *testing.T) {
 			return
 		}
 		ent.Str = []byte("v2")
-		s.Touch(ent)
+		s.Touch(0, "k", ent)
 		if ent.Version != 2 {
 			t.Errorf("version after Touch = %d, want 2", ent.Version)
 		}

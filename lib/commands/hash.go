@@ -41,7 +41,7 @@ func cmdHSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			}
 		}
 		if ent != nil {
-			s.Touch(ent) // field set/overwrite mutates the live hash
+			s.Touch(cs.DB, key, ent) // field set/overwrite mutates the live hash
 		}
 		done = true // Redis emits hset even when no field was new
 		reply = resp.Int(added)
@@ -156,7 +156,7 @@ func cmdHDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				}
 			}
 			if n > 0 {
-				s.Touch(ent)
+				s.Touch(cs.DB, key, ent)
 			}
 			if h.Len() == 0 {
 				s.Delete(cs.DB, key)
@@ -286,7 +286,7 @@ func cmdHSetNX(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		if ent == nil {
 			storeColl(s, cs.DB, key, shard.TypeHash, h)
 		} else {
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 		}
 		set = true
 		reply = resp.Int(1)
@@ -335,7 +335,7 @@ func cmdHIncrBy(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		if ent == nil {
 			storeColl(s, cs.DB, key, shard.TypeHash, h)
 		} else {
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 		}
 		done = true
 		reply = resp.Int(cur)
@@ -388,7 +388,7 @@ func cmdHIncrByFloat(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		if ent == nil {
 			storeColl(s, cs.DB, key, shard.TypeHash, h)
 		} else {
-			s.Touch(ent)
+			s.Touch(cs.DB, key, ent)
 		}
 		done = true
 		reply = resp.BlobStr(out)

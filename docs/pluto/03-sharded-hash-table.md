@@ -43,6 +43,12 @@ func (h *ShardedHash[T]) Scan(cursor uint64, count int) (items []Pair[T, V], nex
 
 func (h *ShardedHash[T]) StripeCount() int
 func (h *ShardedHash[T]) StripeLen(i int) int   // per-stripe load, for metrics
+
+// SampleStripe (added for Ultima M5b eviction, maxmemory-samples style):
+// up to n pseudo-random elements from ONE stripe — random bucket probes with
+// a per-chain reservoir draw; attempt-capped, may return < n on sparse
+// stripes, duplicates possible.
+func (h *ShardedHash[T]) SampleStripe(stripe, n int, rng *rand.Rand) []T
 ```
 
 (Adjust the exact KV shape — separate `key, value` params vs. a single `T`

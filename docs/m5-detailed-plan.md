@@ -16,7 +16,7 @@ keys use **Redis-parity names** (`appendonly`, `appendfsync`,
 differential gate diffs CONFIG GET replies byte-exact, so parity names win.
 §8 is a sketch, not a D-decision.
 
-**Status: M5a in progress. M5b/M5c/M5d not started.**
+**Status: M5a done, M5b done. M5c/M5d not started.**
 
 ---
 
@@ -64,6 +64,20 @@ differential gate diffs CONFIG GET replies byte-exact, so parity names win.
 ---
 
 ## M5b — maxmemory eviction
+
+**Done.** As below, with these as-built adjustments: the LRU/LFU
+trackers (per-shard, keyed by `(db,key)`, always-on like Redis's
+per-object clock) needed two pluto additions — `lru_ts`/`lru`
+`Oldest`/`PopOldest` (the `Backward()` iterator snapshot is O(n), too
+slow per victim) and `sharded_hash_ts.SampleStripe` (per-stripe random
+sampling for LFU candidates and the random policies). `Shard.Touch`
+gained `(db, key)` to feed accounting. The OOM gate replicates three
+probed 7.2.7 behaviors: queue-time OOM rejects ANY queued command while
+over limit, EXEC of a denyoom-containing tx aborts with the OOM reason
+embedded, and eviction policies get a synchronous `EvictNow`
+(performEvictions analogue) before rejection. The eviction-reprieve case
+is not differential-scriptable (Redis counts process baseline, Ultima
+counts keyspace, D10) — unit-tested instead.
 
 ### Memory accounting (prerequisite — nothing exists today)
 

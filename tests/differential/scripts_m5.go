@@ -342,13 +342,93 @@ var notifyMiscScripts = []script{
 	}},
 }
 
-// m5Scripts is the M5a differential table.
+// --- M5b: maxmemory eviction / OOM gate -------------------------------
+//
+// Absolute memory numbers can never match (Go encodings vs robj, D10),
+// so the OOM scripts drive BOTH servers into a guaranteed-over state —
+// maxmemory 1 byte: Redis's baseline is already over, Ultima's keyspace
+// counter goes over after one small SET — and diff only the gate's
+// replies, which are byte-exact (strings probed against 7.2.7). Eviction
+// victim CHOICE is unit-tested in lib/shard/evict_test.go instead.
+
+var oomScripts = []script{
+	{"oom-noeviction-gate", []step{
+		cmd("CONFIG", "SET", "maxmemory-policy", "noeviction"),
+		cmd("CONFIG", "SET", "maxmemory", "0"),
+		cmd("SET", "oomk", "v"),
+		// Queue a write while under the limit, then go over: EXEC of a
+		// transaction containing a denyoom command aborts with the OOM
+		// reason embedded.
+		cmdOn(1, "MULTI"),
+		cmdOn(1, "SET", "oomq", "w"), // QUEUED
+		cmd("CONFIG", "SET", "maxmemory", "1"),
+		cmdOn(1, "EXEC"), // EXECABORT ... because of: OOM ...
+		// While over, every queued command — even a read — is rejected
+		// at queue time and dirties the transaction.
+		cmdOn(1, "MULTI"),
+		cmdOn(1, "SET", "a", "b"), // OOM
+		cmdOn(1, "GET", "oomk"),   // OOM
+		cmdOn(1, "EXEC"),          // EXECABORT previous errors
+		cmdOn(1, "MULTI"),
+		cmdOn(1, "DISCARD"), // control commands are never gated
+		// Top level: only denyoom commands are rejected.
+		cmd("SET", "a", "b"),      // OOM
+		cmd("INCR", "oomn"),       // OOM
+		cmd("LPUSH", "ooml", "x"), // OOM
+		cmd("GET", "oomk"),        // v
+		cmd("EXPIRE", "oomk", "100"),
+		cmd("DEL", "oomk"),
+		// Reset the shared config state (it persists across scripts).
+		cmd("CONFIG", "SET", "maxmemory", "0"),
+		cmd("CONFIG", "SET", "maxmemory-policy", "noeviction"),
+		cmd("DEL", "oomq", "a", "oomn", "ooml"),
+	}},
+	{"oom-volatile-exhausted", []step{
+		// volatile-lru with no TTL'd keys: eviction has no victims, so
+		// the gate rejects writes exactly like noeviction (Redis's
+		// performEvictions == EVICT_FAIL path).
+		cmd("CONFIG", "SET", "maxmemory-policy", "volatile-lru"),
+		cmd("SET", "oomv", "v"),
+		cmd("CONFIG", "SET", "maxmemory", "1"),
+		cmd("SET", "a", "b"), // OOM on both: nothing evictable
+		cmd("GET", "oomv"),   // reads still pass
+		cmd("CONFIG", "SET", "maxmemory", "0"),
+		cmd("CONFIG", "SET", "maxmemory-policy", "noeviction"),
+		cmd("DEL", "oomv", "a"),
+	}},
+	// NOT scripted: the eviction-reprieve case (over-limit write succeeds
+	// because eviction frees space). Redis counts its process baseline
+	// toward maxmemory, Ultima counts keyspace only (D10), so no static
+	// maxmemory value puts both servers in "over but evictable" at the
+	// same step. Reprieve is unit-tested in lib/commands/oom_test.go
+	// (TestEvictionPolicyReprieve, TestVolatileEvictionMakesRoom) and
+	// end-to-end by the M5d soak.
+}
+
+var configPolicyScripts = []script{
+	{"config-maxmemory-policy", []step{
+		cmd("CONFIG", "GET", "maxmemory-policy"), // noeviction
+		cmd("CONFIG", "SET", "maxmemory-policy", "bogus"),
+		cmd("CONFIG", "GET", "maxmemory-policy"),
+		cmd("CONFIG", "SET", "maxmemory-policy", "ALLKEYS-LFU"), // case-insensitive
+		cmd("CONFIG", "GET", "maxmemory-policy"),                // allkeys-lfu
+		cmd("CONFIG", "SET", "maxmemory-policy", "Volatile-Ttl"),
+		cmd("CONFIG", "GET", "maxmemory-policy"),
+		cmd("CONFIG", "SET", "maxmemory-policy", "noeviction"),
+		cmd("CONFIG", "GET", "maxmemory-policy"),
+	}},
+}
+
+// m5Scripts is the M5 differential table (M5a notifications, M5b
+// maxmemory gate).
 var m5Scripts = func() []script {
 	out := make([]script, 0, len(notifyConfigScripts)+len(notifyKeyeventScripts)+
-		len(notifyChannelScripts)+len(notifyMiscScripts))
+		len(notifyChannelScripts)+len(notifyMiscScripts)+len(oomScripts)+len(configPolicyScripts))
 	out = append(out, notifyConfigScripts...)
 	out = append(out, notifyKeyeventScripts...)
 	out = append(out, notifyChannelScripts...)
 	out = append(out, notifyMiscScripts...)
+	out = append(out, oomScripts...)
+	out = append(out, configPolicyScripts...)
 	return out
 }()

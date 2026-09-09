@@ -37,6 +37,9 @@ type ServerConfig struct {
 	// NotifyKeyspaceEvents mirrors Redis's notify-keyspace-events (M5a);
 	// "" = off. Validated at startup against the Redis class letters.
 	NotifyKeyspaceEvents string `json:"notify_keyspace_events" default:""`
+	// MaxMemoryPolicy mirrors Redis's maxmemory-policy (M5b): one of the
+	// eight Redis policy names; validated at startup.
+	MaxMemoryPolicy string `json:"maxmemory_policy" default:"noeviction"`
 }
 
 // DebugConfig holds feature flags (§8 debug.enabled map).

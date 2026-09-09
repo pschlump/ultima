@@ -35,7 +35,10 @@ under way per `docs/m5-detailed-plan.md`: **M5a is done** — keyspace
 notifications (`notify-keyspace-events`, K/E classes on
 `__keyspace@<db>__`/`__keyevent@<db>__` channels over the M3 broker,
 differential-green incl. expiry events) and expiry hardening (time-boxed
-adaptive sweep). M5b (maxmemory eviction), M5c (`lib/persist` snapshot +
+adaptive sweep). **M5b is done** — maxmemory eviction (all 8 Redis
+policies, per-shard memory accounting and eviction loops, the OOM gate
+with byte-exact `OOM`/`EXECABORT` replies; differential-green on the
+gate strings). M5c (`lib/persist` snapshot +
 AOF) and M5d (soak benchmark) are pending. Later milestones from the
 design layout
 (§14.1: `lib/persist`, `clients/`, `web/`, `api/`, extra CLIs under
@@ -163,6 +166,40 @@ M5a architecture notes:
   left, relaxing back to `SweepInterval` (100 ms) when clean
   (`nextSweepInterval`; the `active_expire_effort` analogue, §5.2).
 
+M5b architecture notes:
+
+- **Memory accounting**: `shard.Entry` caches `memBytes` (key + value +
+  overhead estimate, D10 — monotone and comparable, never Redis-exact);
+  collections track their content bytes incrementally
+  (`lib/types/memusage.go`, O(1) `MemUsage()`). Choke points `Store`
+  (new − old), `Touch` (recompute; signature is now
+  `Touch(db, key, e)`), `Delete`/expiry (subtract) update per-DB
+  `usedBytes` plus a shard-total rollup; `Engine.UsedBytes()` sums shard
+  totals. FLUSHDB zeroes its DB share. INFO `used_memory` is the
+  keyspace counter (Go heap moved to `used_memory_process`);
+  `maxmemory_policy` is live; stats gained `evicted_keys`.
+- **Eviction** (`lib/shard/evict.go`): `maybeEvict` runs after every
+  shard task (run + park loops) while `maxmemory > 0` and policy ≠
+  noeviction, evicting to the per-shard quota (maxmemory/shardCount).
+  Always-on per-shard trackers keyed by `(db, key)`: exact LRU via pluto
+  `lru_ts` (D14; `Oldest`/`PopOldest` added to pluto for this), LFU via
+  `lfu_ts` Morris counters with `maxmemory-samples`-style candidate
+  sampling (new pluto `sharded_hash_ts.SampleStripe`, per-stripe since
+  stripe i == shard i), volatile-* twins holding TTL'd keys only (added
+  at `Store`/`PushExpire`-via-`trackAccess`; stale entries self-heal at
+  victim validation), volatile-ttl pops the expiry heap. Victims emit
+  `evicted` via the M5a `OnKeyGone` sink; an overdue candidate is
+  expired, not evicted.
+- **OOM gate** (`lib/commands/engine.go`, probed against 7.2.7): over
+  limit → denyoom commands get `OOM command not allowed when used memory
+  > 'maxmemory'.`; EVERY command queued in MULTI is OOM-rejected at
+  queue time (dirties EXEC → generic EXECABORT); EXEC of a tx containing
+  a denyoom command aborts with the OOM reason embedded. Non-noeviction
+  policies get a synchronous `Engine.EvictNow(cs.tok)` attempt first
+  (performEvictions analogue) — rejection only when eviction can't get
+  under the limit. `maxmemory-policy` CONFIG with byte-exact enum error;
+  `Engine.EvictSamples` = Redis maxmemory-samples default (5).
+
 ## Code Organization
 
 ```
@@ -175,12 +212,15 @@ lib/respserver/      shared RESP front-end wiring (§6.1, D3): builds the *resp.
                      cmd/ultima-server and both test harnesses
 lib/shard/           sharded keyspace engine, owner goroutines, routing, expiry heap,
                      WATCH dirty tracking (tombstones/epochs), EXEC pause (PauseAll),
-                     blocking-waiter FIFO registry
+                     blocking-waiter FIFO registry; evict.go (M5b maxmemory: per-shard
+                     accounting, LRU/LFU/ttl/random eviction loops, policy enum)
 lib/types/           collection value types in Entry.Obj (M2): Hash (insertion-ordered
                      slice → slice+map past hash-max-listpack-*), List (pluto
-                     quicklist_ts, §5.3 #10), Set (sorted int64 slice intset → map past
+                     quicklist_ts wrapped with a byte counter, §5.3 #10), Set (sorted
+                     int64 slice intset → map past
                      set-max-intset-entries), ZSet (skip_list_ts + member→score map,
-                     §5.3 #1). Promotion is one-way, like Redis.
+                     §5.3 #1). Promotion is one-way, like Redis. memusage.go (M5b):
+                     O(1) per-type memory estimators fed by tracked content bytes.
 lib/pubsub/          classic pub/sub broker (M3): channel/pattern subscription maps,
                      delivery on the publisher's goroutine into per-conn push queues
 lib/commands/        front-end-agnostic command engine; table.go is the command registry

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pschlump/ultima/lib/resp"
+	"github.com/pschlump/ultima/lib/shard"
 )
 
 // --- connection ---------------------------------------------------------------
@@ -203,9 +204,13 @@ func cmdInfo(e *Engine, _ *ConnState, args [][]byte) resp.Value {
 	writeSection("memory", func() {
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-		fmt.Fprintf(&sb, "used_memory:%d\r\n", ms.Alloc)
-		fmt.Fprintf(&sb, "maxmemory:%d\r\n", e.maxMemory.Load())
-		sb.WriteString("maxmemory_policy:noeviction\r\n")
+		// used_memory is the keyspace estimate (M5b) — the number the
+		// maxmemory gate enforces; Go's heap total is reported separately
+		// (no Redis equivalent; absolute values diverge by design, D10).
+		fmt.Fprintf(&sb, "used_memory:%d\r\n", e.Shards.UsedBytes())
+		fmt.Fprintf(&sb, "used_memory_process:%d\r\n", ms.Alloc)
+		fmt.Fprintf(&sb, "maxmemory:%d\r\n", e.MaxMemory())
+		fmt.Fprintf(&sb, "maxmemory_policy:%s\r\n", e.Shards.Policy())
 	})
 	writeSection("persistence", func() {
 		sb.WriteString("loading:0\r\n")
@@ -214,6 +219,7 @@ func cmdInfo(e *Engine, _ *ConnState, args [][]byte) resp.Value {
 		fmt.Fprintf(&sb, "total_connections_received:%d\r\n", e.totalConns.Load())
 		fmt.Fprintf(&sb, "total_commands_processed:%d\r\n", e.totalCmds.Load())
 		fmt.Fprintf(&sb, "expired_keys:%d\r\n", e.Shards.ExpiredKeys.Load())
+		fmt.Fprintf(&sb, "evicted_keys:%d\r\n", e.Shards.EvictedKeys.Load())
 		fmt.Fprintf(&sb, "pubsub_channels:%d\r\n", e.PubSub.NumChannels())
 		fmt.Fprintf(&sb, "pubsub_patterns:%d\r\n", e.PubSub.NumPat())
 	})
@@ -317,13 +323,23 @@ var configParams = []configParam{
 		get: func(e *Engine) string { return fmt.Sprintf("%d", e.Shards.MaxDBs()) },
 		set: nil},
 	{name: "maxmemory",
-		get: func(e *Engine) string { return fmt.Sprintf("%d", e.maxMemory.Load()) },
+		get: func(e *Engine) string { return fmt.Sprintf("%d", e.MaxMemory()) },
 		set: func(e *Engine, v string) (resp.Value, bool) {
 			n, ok := parseMemBytes([]byte(v))
 			if !ok {
 				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'maxmemory') - argument must be a memory value"), true
 			}
-			e.maxMemory.Store(n)
+			e.SetMaxMemory(n)
+			return resp.Value{}, false
+		}},
+	{name: "maxmemory-policy",
+		get: func(e *Engine) string { return e.Shards.Policy().String() },
+		set: func(e *Engine, v string) (resp.Value, bool) {
+			p, ok := shard.ParseEvictPolicy(v)
+			if !ok {
+				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'maxmemory-policy') - argument(s) must be one of the following: " + strings.Join(shard.EvictPolicyNames, ", ")), true
+			}
+			e.Shards.SetPolicy(p)
 			return resp.Value{}, false
 		}},
 	{name: "notify-keyspace-events",

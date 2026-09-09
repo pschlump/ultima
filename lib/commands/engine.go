@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,7 +104,6 @@ type Engine struct {
 	RespPort int
 
 	requirePass atomic.Value // string
-	maxMemory   atomic.Int64
 	save        atomic.Value // string
 	appendOnly  atomic.Bool
 
@@ -170,10 +170,11 @@ func (e *Engine) RequirePass() string { return e.requirePass.Load().(string) }
 func (e *Engine) SetRequirePass(pw string) { e.requirePass.Store(pw) }
 
 // MaxMemory returns the configured maxmemory in bytes (0 = unlimited).
-func (e *Engine) MaxMemory() int64 { return e.maxMemory.Load() }
+// The value lives on the shard engine, which enforces it (M5b eviction).
+func (e *Engine) MaxMemory() int64 { return e.Shards.MaxMemory() }
 
 // SetMaxMemory updates maxmemory (config file, CONFIG SET).
-func (e *Engine) SetMaxMemory(n int64) { e.maxMemory.Store(n) }
+func (e *Engine) SetMaxMemory(n int64) { e.Shards.SetMaxMemory(n) }
 
 // NewConnState registers a connection and returns its state.
 func (e *Engine) NewConnState(addr string) *ConnState {
@@ -297,6 +298,35 @@ func (e *Engine) Execute(cs *ConnState, args [][]byte) resp.Value {
 		}
 	}
 
+	// OOM gate (Redis processCommand's maxmemory block, verified against
+	// 7.2.7): while over maxmemory, a denyoom command is rejected with the
+	// OOM error; a command QUEUED inside MULTI is rejected whatever its
+	// flags (the queue-time error dirties the transaction, so EXEC aborts
+	// with "previous errors"); and EXEC of a transaction containing a
+	// denyoom command aborts with the OOM reason embedded. With an
+	// eviction policy active the gate first attempts eviction
+	// (EvictNow — the performEvictions analogue) and rejects only when
+	// eviction cannot get back under the limit; noeviction rejects
+	// outright. EXEC/DISCARD/MULTI/WATCH/QUIT/RESET are never gated.
+	if e.Shards.OverMemory() {
+		outOfMem := true
+		if e.Shards.Policy() != shard.PolicyNoEviction {
+			outOfMem = e.Shards.EvictNow(cs.tok)
+		}
+		if outOfMem {
+			switch {
+			case name == "exec" && cs.queueHasDenyOOM():
+				cs.clearTx()
+				return resp.Err("EXECABORT Transaction discarded because of: " + errOOMText)
+			case queueable:
+				cs.QueueErr = true
+				return errOOM
+			case slices.Contains(def.Flags, "denyoom"):
+				return errOOM
+			}
+		}
+	}
+
 	if queueable {
 		cs.Queue = append(cs.Queue, cloneArgs(args))
 		return replyQueued
@@ -304,6 +334,21 @@ func (e *Engine) Execute(cs *ConnState, args [][]byte) resp.Value {
 	v := def.Handler(e, cs, args)
 	e.notifyMonitors(cs, args)
 	return v
+}
+
+// queueHasDenyOOM reports whether any command queued in the current
+// transaction carries the denyoom flag — the EXEC half of the OOM gate
+// (Redis's `c->mstate.cmd_flags & CMD_DENYOOM` check).
+func (cs *ConnState) queueHasDenyOOM() bool {
+	for _, q := range cs.Queue {
+		if len(q) == 0 {
+			continue
+		}
+		if def, ok := table[lowerASCII(q[0])]; ok && slices.Contains(def.Flags, "denyoom") {
+			return true
+		}
+	}
+	return false
 }
 
 // MonitorEvent is one executed command as reported to MONITOR streams
@@ -423,6 +468,11 @@ var (
 	errDecrOvf   = resp.Err("ERR decrement would overflow")
 	errWrongType = resp.Err("WRONGTYPE Operation against a key holding the wrong kind of value")
 	replyOK      = resp.Simple("OK")
+
+	// errOOMText is Redis 7.2.7's shared.oomerr message; errOOM is the
+	// denyoom rejection of the maxmemory gate.
+	errOOMText = "OOM command not allowed when used memory > 'maxmemory'."
+	errOOM     = resp.Err(errOOMText)
 )
 
 // errUnknownCommand matches Redis: name as given (≤128 bytes), up to 19
