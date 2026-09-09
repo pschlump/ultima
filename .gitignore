@@ -2,3 +2,4 @@ note
 /bin/ultima-server
 /ultima-server
 tests/ts-roundtrip/node_modules/
+/keys/
