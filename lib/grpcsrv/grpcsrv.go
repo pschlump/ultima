@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	ultimav1 "github.com/pschlump/ultima/gen/go/ultima/v1"
+	"github.com/pschlump/ultima/lib/auth"
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/envelope"
 	"github.com/pschlump/ultima/lib/resp"
@@ -33,12 +34,31 @@ type Server struct {
 
 // New returns a *grpc.Server with the Ultima service registered against
 // the shared command engine. Server reflection is enabled so grpcurl and
-// similar tooling work unconfigured.
-func New(eng *commands.Engine) *grpc.Server {
-	s := grpc.NewServer()
+// similar tooling work unconfigured. When authSvc is non-nil (M6a,
+// auth.enabled), unary and stream interceptors demand a valid
+// `authorization: bearer …` access token (§9.3) and the verified identity
+// lands on each ConnState (Authed/User).
+func New(eng *commands.Engine, authSvc *auth.Service) *grpc.Server {
+	var opts []grpc.ServerOption
+	if authSvc != nil {
+		opts = append(opts,
+			grpc.UnaryInterceptor(authSvc.UnaryInterceptor()),
+			grpc.StreamInterceptor(authSvc.StreamInterceptor()),
+		)
+	}
+	s := grpc.NewServer(opts...)
 	ultimav1.RegisterUltimaServer(s, &Server{eng: eng})
 	reflection.Register(s)
 	return s
+}
+
+// applyIdentity copies the interceptor-verified identity (M6a) onto the
+// connection state; a no-op when auth is disabled.
+func applyIdentity(ctx context.Context, cs *commands.ConnState) {
+	if id, ok := auth.IdentityFrom(ctx); ok {
+		cs.Authed = true
+		cs.User = id.Username
+	}
 }
 
 // Ping echoes the request message, answering "PONG" when none was sent —
@@ -59,6 +79,7 @@ func (s *Server) Ping(_ context.Context, req *ultimav1.PingRequest) (*ultimav1.P
 func (s *Server) Exec(stream ultimav1.Ultima_ExecServer) error {
 	cs := s.eng.NewConnState(addrOf(stream.Context()))
 	cs.Proto = 3 // binary clients get full RESP3-grade fidelity
+	applyIdentity(stream.Context(), cs)
 	defer s.eng.CloseConn(cs)
 	for {
 		cmd, err := stream.Recv()
@@ -85,6 +106,7 @@ func (s *Server) Exec(stream ultimav1.Ultima_ExecServer) error {
 func (s *Server) ExecBatch(ctx context.Context, req *ultimav1.BatchRequest) (*ultimav1.BatchResponse, error) {
 	cs := s.eng.NewConnState(addrOf(ctx))
 	cs.Proto = 3
+	applyIdentity(ctx, cs)
 	defer s.eng.CloseConn(cs)
 	out := &ultimav1.BatchResponse{
 		Responses: make([]*ultimav1.CommandResponse, 0, len(req.Commands)),
@@ -100,6 +122,7 @@ func (s *Server) ExecBatch(ctx context.Context, req *ultimav1.BatchRequest) (*ul
 func (s *Server) ExecGeneric(ctx context.Context, req *ultimav1.CommandRequest) (*ultimav1.CommandResponse, error) {
 	cs := s.eng.NewConnState(addrOf(ctx))
 	cs.Proto = 3
+	applyIdentity(ctx, cs)
 	defer s.eng.CloseConn(cs)
 	cmd := &ultimav1.Command{Cmd: &ultimav1.Command_Generic{Generic: req}}
 	rs := envelope.Execute(s.eng, cs, cmd)
@@ -126,6 +149,7 @@ func (s *Server) Subscribe(req *ultimav1.SubscribeRequest, stream ultimav1.Ultim
 	defer cancel()
 	cs := s.eng.NewConnState(addrOf(ctx))
 	cs.Proto = 3
+	applyIdentity(ctx, cs)
 	defer s.eng.CloseConn(cs) // drops this stream's subscriptions
 
 	events := make(chan *ultimav1.PushEvent, pushQueueCap)

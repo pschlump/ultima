@@ -21,6 +21,7 @@ import (
 type Config struct {
 	Server  ServerConfig  `json:"server"`
 	Persist PersistConfig `json:"persist"`
+	Auth    AuthConfig    `json:"auth"`
 	Debug   DebugConfig   `json:"debug"`
 }
 
@@ -59,6 +60,31 @@ type ServerConfig struct {
 // DebugConfig holds feature flags (§8 debug.enabled map).
 type DebugConfig struct {
 	Enabled map[string]bool `json:"enabled"`
+}
+
+// AuthConfig is the M6a account/login section (design doc §8/§9, D20).
+// When Enabled is false every surface stays open and none of the other
+// fields are consulted. Durations are strings parsed with
+// time.ParseDuration at startup (SetDefaults has no duration kind).
+type AuthConfig struct {
+	Enabled bool `json:"enabled" default:"false"`
+	// Ed25519 key pair (PEM: PKCS#8 private, PKIX/SPKI public), generated
+	// by bin/gen-jwt-keys.sh. Both must exist and parse when Enabled.
+	JwtPrivateKeyFile string `json:"jwt_private_key_file" default:"./keys/ultima-jwt.pem"`
+	JwtPublicKeyFile  string `json:"jwt_public_key_file" default:"./keys/ultima-jwt.pub"`
+	AccessTokenTTL    string `json:"access_token_ttl" default:"15m"`
+	RefreshTokenTTL   string `json:"refresh_token_ttl" default:"720h"`
+	TotpIssuer        string `json:"totp_issuer" default:"Ultima"`
+	TotpSkew          int    `json:"totp_skew" default:"1"`
+	// AccountsFile defaults to <persist.dir>/accounts.json when empty.
+	AccountsFile string `json:"accounts_file" default:""`
+	// BootstrapAdminPassword seeds the built-in admin account on first
+	// boot (no accounts file yet); empty = generate a random password and
+	// log it once. Carries "$ENV$NAME" via the usual substitution.
+	BootstrapAdminPassword string `json:"bootstrap_admin_password" default:""`
+	// WS session replay-buffer bounds (§9.4) — consumed by M6b.
+	WSReplayBufferMs      int `json:"ws_replay_buffer_ms" default:"30000"`
+	WSReplayBufferMaxMsgs int `json:"ws_replay_buffer_max_msgs" default:"10000"`
 }
 
 var envRefRe = regexp.MustCompile(`\$ENV\$([A-Za-z_][A-Za-z0-9_]*)`)

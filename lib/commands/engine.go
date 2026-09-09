@@ -37,6 +37,11 @@ type ConnState struct {
 	Created time.Time
 	Quit    bool // set by QUIT; the front-end closes the connection
 
+	// User is the authenticated identity on the JWT-gated surfaces (M6a,
+	// §9.3): the account username from the verified access token. Empty on
+	// RESP (whose requirepass AUTH stays identity-less, §10.1).
+	User string
+
 	// Multi-mode transaction state (M3, §4.2): Multi marks the connection
 	// between MULTI and EXEC/DISCARD; Queue holds the queued commands
 	// (deep copies of the client's args); QueueErr records a queue-time

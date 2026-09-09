@@ -13,6 +13,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/pschlump/ultima/lib/auth"
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/config"
 	"github.com/pschlump/ultima/lib/grpcsrv"
@@ -98,6 +99,17 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 		return nil, err
 	}
 
+	// Auth (M6a, §9): when auth.enabled, build the account/JWT/TOTP
+	// service — a missing or unparseable Ed25519 key pair or accounts file
+	// fails startup (D20, no auto-generation).
+	var authSvc *auth.Service
+	if cfg.Auth.Enabled {
+		authSvc, err = auth.NewService(cfg.Auth, cfg.Persist.Dir, logger)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	s.respSrv = respserver.New(cfg.Server.RespAddr, eng)
 	go func() {
 		if err := s.respSrv.Serve(s.respLis); err != nil {
@@ -105,7 +117,7 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 		}
 	}()
 
-	grpcServer := grpcsrv.New(eng)
+	grpcServer := grpcsrv.New(eng, authSvc)
 	s.grpcSrv = grpcServer
 	go func() {
 		if err := grpcServer.Serve(s.grpcLis); err != nil {
@@ -114,7 +126,7 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 	}()
 
 	s.httpSrv = &http.Server{
-		Handler:           newRouter(logger, eng, s.persist),
+		Handler:           newRouter(logger, eng, s.persist, authSvc),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

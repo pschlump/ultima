@@ -155,7 +155,7 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 
 	// --- gRPC surface ---
 	grpcLis := listen(t, cfg.Server.GrpcAddr)
-	grpcSrv := grpcsrv.New(eng)
+	grpcSrv := grpcsrv.New(eng, nil)
 	go func() {
 		if err := grpcSrv.Serve(grpcLis); err != nil {
 			t.Errorf("grpc serve: %v", err)
@@ -191,8 +191,8 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(handler.RequestLogger(logger))
-	handler.Register(r, nil) // no persistence manager in the surface test
-	r.Get("/ws/v1", wssrv.Handler(eng, logger))
+	handler.Register(r, nil, nil) // no persistence manager in the surface test
+	r.Get("/ws/v1", wssrv.Handler(eng, nil, logger))
 	httpSrv := &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		if err := httpSrv.Serve(httpLis); err != nil && err != http.ErrServerClosed {

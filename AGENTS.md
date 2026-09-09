@@ -14,7 +14,7 @@ architecture.
 
 The authoritative reference is the design document `docs/ULTIMA-DESIGN.md`
 (sections are cited throughout the code as `§N.N`, e.g. `design doc §5.2`).
-Follow it — it records settled decisions (§15, D1–D19) that must not be
+Follow it — it records settled decisions (§15, D1–D20) that must not be
 silently reversed. Milestones M0–M9 are defined in §14.4.
 
 **Current status**: M0 (skeleton, three listeners), M1 (shard engine,
@@ -47,10 +47,21 @@ AOF's PEXPIREAT rewrite). **M5d is done** — the maxmemory soak
 oversubscription against a bounded maxmemory under all 8 eviction
 policies, gating on bounded `used_memory`, advancing `evicted_keys`, and
 the byte-exact OOM/probe behavior; report in `docs/benchmarks/M5-<date>.md`;
-memo in `note/M5-implemented.md`. Later
+memo in `note/M5-implemented.md`. M6 is under way per
+`docs/m6-detailed-plan.md`: **M6a is done** — the auth core (§9):
+`lib/auth` (bcrypt account store with atomic JSON persistence, Ed25519
+EdDSA JWT access tokens per D20 via `golang-jwt/jwt/v5`, rotating
+refresh-token families with theft detection, TOTP 2FA via
+`pschlump/htotp`), the `/api/v1/auth/*` + `/api/v1/admin/users*`
+endpoints (`lib/handler/auth.go`), Bearer gating of `/api/v1/*`, gRPC
+interceptors (`authorization: bearer` metadata), and WS upgrade auth
+(`?access_token=` or `Sec-WebSocket-Protocol: bearer, <token>`), all
+behind the `auth.enabled` config gate (off = pre-M6 behavior). M6b (WS
+resumable sessions, §9.4), M6c (OpenAPI/oapi-codegen management API,
+§10.1) and M6d (web UI, §10.2) are pending. Later
 milestones from the
 design layout
-(§14.1: `lib/persist`, `clients/`, `web/`, `api/`, extra CLIs under
+(§14.1: `clients/`, `web/`, `api/`, extra CLIs under
 `cmd/`) do **not** exist yet.
 
 ## Technology Stack
@@ -69,6 +80,11 @@ design layout
   - `github.com/gorilla/websocket` — WebSocket endpoint.
   - `google.golang.org/grpc` + `protobuf` — gRPC front-end.
   - `go.uber.org/goleak` — goroutine-leak detection in tests.
+  - `github.com/golang-jwt/jwt/v5` + `golang.org/x/crypto` (bcrypt) — M6a
+    JWT (Ed25519/EdDSA, D20) and password hashing.
+  - `github.com/pschlump/htotp` — TOTP 2FA (D17). **Pulled in via `replace`
+    to the sibling checkout `../htotp`**, like pluto — that directory must
+    exist for the module to build.
 - **No CGo**, no Docker/CI config currently in the repo.
 - `note/redis/` (gitignored) holds a Redis source checkout used as a
   reference; `note/` is scratch material, excluded from lint.
@@ -349,7 +365,20 @@ lib/wssrv/           WebSocket front-end (M4, §6.3): binary protobuf Command fr
                      pushes as unsolicited seq-0 frames over a bounded queue (slow
                      consumer → close, as in lib/respserver)
 lib/handler/         HTTP routes (/health, /ready, /api/v1/ping, POST
-                     /api/v1/save|bgsave|bgrewriteaof) + RequestLogger
+                     /api/v1/save|bgsave|bgrewriteaof) + RequestLogger;
+                     auth.go (M6a, §9.3/§9.5): /api/v1/auth/* (login,
+                     refresh, logout, password, TOTP enroll/confirm/
+                     regenerate/disable) and /api/v1/admin/users*; with
+                     auth.enabled on, all other /api/v1/* sit behind
+                     RequireAuth, /health+//ready stay public (§10.1)
+lib/auth/            M6a auth core (§9, D17/D20): keys.go (Ed25519 PKCS#8/
+                     PKIX PEM load, both files required), accounts.go
+                     (bcrypt account store + refresh-token families with
+                     rotation/theft detection, atomic JSON write-through,
+                     last-admin/bootstrap-admin guards), tokens.go (EdDSA
+                     JWT issue/verify), service.go (login/refresh/logout/
+                     password/TOTP/CRUD facade), middleware.go (RequireAuth/
+                     RequireAdmin, gRPC unary+stream interceptors)
 lib/persist/         persistence (M5c, §13.1, D9 own formats): format.go
                      (snapshot codec, CRC-64/XZ, LZW payloads), snapshot.go
                      (per-(db,shard) segments via Shard.DumpDB; WriteSnapshot[Tok]
@@ -365,14 +394,17 @@ tests/               integration_test.go (three surfaces, ephemeral ports), m3_t
                      m4_grpc_test.go / m4_ws_test.go (M4 front-ends), m4_parity_test.go
                      (RESP↔gRPC wire-byte diff), m4_ts_test.go (TS round-trip driver),
                      m5_test.go (M5c crash recovery: subprocess + SIGKILL,
-                     snapshot/AOF/AOF-rewrite variants)
+                     snapshot/AOF/AOF-rewrite variants), m6_test.go (M6a auth
+                     flows: HTTP login/refresh/TOTP/admin, gRPC + WS JWT
+                     enforcement)
 tests/ts-roundtrip/  protobuf-es TS client script (bun; `bun install` first) — the M4
                      go+ts round-trip exit criterion; strict tsc typecheck via tsconfig
 tests/differential/  harness diffs replies against a real redis-server (the parity gate);
                      multi-connection scripts, push frames and blocking wakeups supported
 bin/                 gen.sh (protoc), gen-build-stamp.sh (ldflags), bench.sh (M1 sweep,
                      chains into bench-pubsub.sh for the M3 pub/sub benchmark and
-                     bench-m5.sh for the M5 maxmemory soak)
+                     bench-m5.sh for the M5 maxmemory soak), gen-jwt-keys.sh
+                     (M6a Ed25519 JWT key pair into ./keys, gitignored)
 docs/                ULTIMA-DESIGN.md, pluto/ structure specs, benchmarks/ reports
 note/                scratch/reference (Redis checkout, benchmarks); gitignored, lint-excluded
 ```
@@ -473,9 +505,15 @@ Running `go test ./...` also compiles `note/grpc-vs-text-benchmark` and
 - Command renaming (Redis's `rename-command`) is deliberately **excluded**
   as security by obscurity (design doc §1.2); protection comes from auth
   and, later, ACLs.
-- The M4 WebSocket endpoint (`lib/wssrv`) has no origin policy
-  (`CheckOrigin: true`) and no upgrade-time auth yet; real auth (JWT +
-  TOTP 2FA via `pschlump/htotp`) is scheduled for M6 (§9).
+- M6a auth (`lib/auth`, `auth.enabled`): JWT access/refresh tokens signed
+  Ed25519 (EdDSA, `golang-jwt/jwt/v5`) with the key pair read from config
+  file paths (D20 — no shared-secret mode, no auto-generated keys;
+  `bin/gen-jwt-keys.sh` writes `./keys/`, gitignored), TOTP 2FA via
+  `pschlump/htotp`. When enabled, `/api/v1/*` (except login/refresh) and
+  the gRPC surface require a Bearer access token, and the `/ws/v1` upgrade
+  requires `?access_token=` or the `bearer, <token>` subprotocol. When
+  disabled (default), the WebSocket endpoint still has no origin policy
+  (`CheckOrigin: true`) and no upgrade-time auth.
   `note/redis-security-overview.md` is the security reference.
 - Command execution must never panic on client input; all errors are reply
   values (`Engine.Execute` contract).

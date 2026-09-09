@@ -15,15 +15,32 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/pschlump/ultima/lib/auth"
 	"github.com/pschlump/ultima/lib/commands"
 )
 
 // Register wires the HTTP routes onto r. p is the M5c persistence
 // manager (commands.Persister) behind the /api/v1/save family of
-// triggers (§13.1); nil disables them (bare test servers).
-func Register(r chi.Router, p commands.Persister) {
+// triggers (§13.1); nil disables them (bare test servers). svc is the
+// M6a auth service (§9): when non-nil, /api/v1/* is Bearer-gated
+// (except the public /api/v1/auth/login and /api/v1/auth/refresh, which
+// RegisterAuth adds); /health and /ready stay public either way (§10.1).
+func Register(r chi.Router, p commands.Persister, svc *auth.Service) {
 	r.Get("/health", health)
 	r.Get("/ready", health)
+	if svc == nil {
+		registerAPI(r, p)
+		return
+	}
+	RegisterAuth(r, svc)
+	r.Group(func(r chi.Router) {
+		r.Use(svc.RequireAuth)
+		registerAPI(r, p)
+	})
+}
+
+// registerAPI mounts the management endpoints (ungated caller routes).
+func registerAPI(r chi.Router, p commands.Persister) {
 	r.Get("/api/v1/ping", ping)
 	if p != nil {
 		r.Post("/api/v1/save", saveTrigger(p, false))

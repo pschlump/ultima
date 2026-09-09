@@ -8,20 +8,24 @@
 // unsolicited CommandResponse frames with seq 0 carrying a RESP3 push
 // value — the same slow-consumer rule as the RESP surface applies: the
 // per-connection outbound queue is bounded and a full queue closes the
-// connection. JWT auth at upgrade and resumable sessions (§9.3/§9.4)
-// arrive with M6; until then the endpoint accepts any origin, as the M0
-// stub did.
+// connection. JWT auth at upgrade (§9.3) landed with M6a — when the auth
+// service is enabled the client presents its access token as the
+// `access_token` query parameter or as `Sec-WebSocket-Protocol: bearer,
+// <token>` (browsers cannot set arbitrary headers on a WebSocket). There
+// is still no origin policy; resumable sessions (§9.4) arrive with M6b.
 package wssrv
 
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/protobuf/proto"
 
 	ultimav1 "github.com/pschlump/ultima/gen/go/ultima/v1"
+	"github.com/pschlump/ultima/lib/auth"
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/envelope"
 	"github.com/pschlump/ultima/lib/resp"
@@ -32,20 +36,54 @@ import (
 // connection is closed, matching lib/respserver.
 const pushQueueCap = 4096
 
+// bearerSubprotocol is the WebSocket subprotocol name a client offers to
+// carry its access token: `Sec-WebSocket-Protocol: bearer, <token>`.
+// When selected, the server echoes `bearer` as the negotiated
+// subprotocol.
+const bearerSubprotocol = "bearer"
+
 // Handler returns the /ws/v1 handler wired to the shared command engine.
-func Handler(eng *commands.Engine, logger *slog.Logger) http.HandlerFunc {
+// authSvc is the M6a auth service; nil leaves the endpoint open (the
+// pre-M6 behavior, used when auth.enabled is false).
+func Handler(eng *commands.Engine, authSvc *auth.Service, logger *slog.Logger) http.HandlerFunc {
 	upgrader := websocket.Upgrader{
-		// No origin policy until the auth milestone (M6) lands.
+		// No origin policy yet; the web UI milestone (M6d) revisits this.
 		CheckOrigin: func(*http.Request) bool { return true },
 	}
+	if authSvc != nil {
+		upgrader.Subprotocols = []string{bearerSubprotocol}
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		var id auth.Identity
+		if authSvc != nil {
+			var err error
+			id, err = upgradeIdentity(authSvc, r)
+			if err != nil {
+				http.Error(w, `{"status":"error","error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			logger.Warn("ws: upgrade failed", "err", err)
 			return
 		}
-		serve(eng, conn, r.RemoteAddr)
+		serve(eng, conn, r.RemoteAddr, id)
 	}
+}
+
+// upgradeIdentity extracts and verifies the access token presented at
+// upgrade time (§9.3): the access_token query parameter wins, then the
+// bearer subprotocol form.
+func upgradeIdentity(authSvc *auth.Service, r *http.Request) (auth.Identity, error) {
+	tok := r.URL.Query().Get("access_token")
+	if tok == "" {
+		parts := strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",")
+		if len(parts) == 2 && strings.TrimSpace(parts[0]) == bearerSubprotocol {
+			tok = strings.TrimSpace(parts[1])
+		}
+	}
+	return authSvc.VerifyAccess(tok)
 }
 
 // wsConn serializes all writes to the websocket through one writer
@@ -58,7 +96,7 @@ type wsConn struct {
 	once sync.Once
 }
 
-func serve(eng *commands.Engine, conn *websocket.Conn, addr string) {
+func serve(eng *commands.Engine, conn *websocket.Conn, addr string, id auth.Identity) {
 	ws := &wsConn{
 		conn: conn,
 		send: make(chan []byte, pushQueueCap),
@@ -69,6 +107,10 @@ func serve(eng *commands.Engine, conn *websocket.Conn, addr string) {
 
 	cs := eng.NewConnState(addr)
 	cs.Proto = 3 // binary clients get full RESP3-grade fidelity
+	if id.Username != "" {
+		cs.Authed = true
+		cs.User = id.Username
+	}
 	cs.StartPush = func() func(resp.Value) {
 		return func(v resp.Value) {
 			// Unsolicited push: seq 0, RESP3 push value (§6.3).

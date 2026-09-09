@@ -38,7 +38,7 @@ func newTestServer(t *testing.T) (*commands.Engine, string) {
 	t.Cleanup(shards.Close)
 	eng := commands.NewEngine(shards, "test", 0)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws/v1", Handler(eng, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	mux.HandleFunc("/ws/v1", Handler(eng, nil, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return eng, "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/v1"

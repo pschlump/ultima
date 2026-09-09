@@ -94,7 +94,7 @@ func TestGRPCParityWithRESP(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = grpcLis.Close() })
-	grpcSrv := grpcsrv.New(eng)
+	grpcSrv := grpcsrv.New(eng, nil)
 	go func() { _ = grpcSrv.Serve(grpcLis) }()
 	t.Cleanup(grpcSrv.GracefulStop)
 	gconn, err := grpc.NewClient(grpcLis.Addr().String(),

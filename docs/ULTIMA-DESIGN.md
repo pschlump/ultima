@@ -413,8 +413,9 @@ Modeled directly on exsms `lib/config/config.go`:
   reflection *before* unmarshal (file overrides defaults); `$ENV$NAME`
   substitution (and `$ETCD$/key` if we want it later) via `substituteEnvRefs`.
 - `Config` struct groups: `server` (ports, TLS, shard count, limits, eviction
-  policy, persistence paths), `auth` (JWT signing keys/secrets, token TTLs,
-  TOTP issuer name, WS session replay-buffer bounds), `debug` (`enabled
+  policy, persistence paths), `auth` (`enabled` gate, JWT Ed25519 key-pair
+  file paths, token TTLs, TOTP issuer/skew, accounts-file location, bootstrap
+  admin password, WS session replay-buffer bounds), `debug` (`enabled
   map[string]bool` feature flags).
 - Build stamping via `bin/gen-build-stamp.sh` → `-ldflags -X
   main.GitCommit/Version/BuildDate/GitBranchName/BuildTarget`, placeholder vars
@@ -452,10 +453,15 @@ so CONFIG GET replies diff byte-exact against Redis):
     "snapshot_compress": false
   },
   "auth": {
-    "jwt_secret": "$ENV$ultima_jwt_secret",
+    "enabled": false,
+    "jwt_private_key_file": "./keys/ultima-jwt.pem",
+    "jwt_public_key_file": "./keys/ultima-jwt.pub",
     "access_token_ttl": "15m",
     "refresh_token_ttl": "720h",
     "totp_issuer": "Ultima",
+    "totp_skew": 1,
+    "accounts_file": "",
+    "bootstrap_admin_password": "$ENV$ultima_admin_password",
     "ws_replay_buffer_ms": 30000,
     "ws_replay_buffer_max_msgs": 10000
   },
@@ -516,8 +522,15 @@ bearer tokens with refresh.
   revokes the whole token family).
 - `POST /api/v1/auth/logout` revokes the refresh-token family; administrators
   can revoke all sessions of any account.
-- Signing keys come from config (`auth.jwt_secret`, §8); algorithm HS256 by
-  default, RS256/ES256 supported via configured key files.
+- Signing: **Ed25519 (EdDSA)** via `github.com/golang-jwt/jwt/v5`. The key
+  pair comes from config file paths (§8): `auth.jwt_private_key_file`
+  (PKCS#8 PEM, used to sign at login/refresh) and `auth.jwt_public_key_file`
+  (PKIX/SPKI PEM, used to verify). **Both paths are required** when the auth
+  system is enabled — startup fails with a clear error if either file is
+  missing or unparseable; there is no shared-secret mode and no
+  auto-generation (an accidentally regenerated key pair would silently
+  invalidate every outstanding token). Key rotation is an operator action:
+  generate a new pair, roll the files out, restart.
 
 ### 9.4 WebSocket connection recovery (no message loss on reconnect)
 
@@ -843,18 +856,18 @@ Key dependencies: `go-chi/chi/v5`, `go-playground/validator/v10`,
 
 ### 14.4 Milestones
 
-| MS     | Deliverable                                                                                     | Exit criteria                                                                                       |
-|--------|-------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------|
-| **M0** | Skeleton: config, logging, three listeners (stub), Makefile, lint, CI-local                     | `make build test lint` green; PING on all three surfaces                                            |
-| **M1** | Shard engine + RESP front-end + P0 commands; redcon fork w/ RESP3                               | redis-cli fully works for P0; differential harness green on P0; first benchmark report vs Redis     |
-| **M2** | P1 collections (pluto zset range/rank + quicklist, §5.3 #1/#10)                                 | differential green on H/L/S/Z                                                                       |
-| **M3** | P2 transactions + classic pub/sub + blocking list/zset ops (SSUBSCRIBE → M8; keyspace notifications → M5)   | MULTI/EXEC + WATCH stress green; redis-benchmark pub/sub                                            |
-| **M4** | gRPC + WS front-ends; proto IDL stable                                                          | go + ts clients round-trip; parity with RESP replies                                                |
-| **M5** | Expiry hardening, eviction, persistence (snapshot + AOF), keyspace notifications (notify-keyspace-events; deferred from P2) | crash-recovery tests; maxmemory soak                                                |
-| **M6** | Auth system (§9) + HTTP API + web UI v1                                                         | login/refresh/TOTP green; multi-admin accounts; WS recovery tests pass; dashboard + console live    |
-| **M7** | Client libraries (§11) + example applications                                                   | Go + TS + JS packages build; CLIs run on the Go client; leaderboard + chat examples run end-to-end  |
-| **M8** | P3/P4 parity tail (streams, Lua-lite, bitfield, geo, PF\*), sharded pub/sub SSUBSCRIBE/SPUBLISH (deferred from P2) | differential green on covered tail                                                                 |
-| **M9** | Superset features (§12) + performance campaign                                                  | ≥4× Redis on target workload; final report                                                          |
+| MS     | Deliverable                                                                                                                 | Exit criteria                                                                                      |
+|--------|-----------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------|
+| **M0** | Skeleton: config, logging, three listeners (stub), Makefile, lint, CI-local                                                 | `make build test lint` green; PING on all three surfaces                                           |
+| **M1** | Shard engine + RESP front-end + P0 commands; redcon fork w/ RESP3                                                           | redis-cli fully works for P0; differential harness green on P0; first benchmark report vs Redis    |
+| **M2** | P1 collections (pluto zset range/rank + quicklist, §5.3 #1/#10)                                                             | differential green on H/L/S/Z                                                                      |
+| **M3** | P2 transactions + classic pub/sub + blocking list/zset ops (SSUBSCRIBE → M8; keyspace notifications → M5)                   | MULTI/EXEC + WATCH stress green; redis-benchmark pub/sub                                           |
+| **M4** | gRPC + WS front-ends; proto IDL stable                                                                                      | go + ts clients round-trip; parity with RESP replies                                               |
+| **M5** | Expiry hardening, eviction, persistence (snapshot + AOF), keyspace notifications (notify-keyspace-events; deferred from P2) | crash-recovery tests; maxmemory soak                                                               |
+| **M6** | Auth system (§9) + HTTP API + web UI v1. **M6a done** (accounts, Ed25519 JWT, TOTP, auth on HTTP/gRPC/WS — `docs/m6-detailed-plan.md`) | login/refresh/TOTP green; multi-admin accounts; WS recovery tests pass; dashboard + console live   |
+| **M7** | Client libraries (§11) + example applications                                                                               | Go + TS + JS packages build; CLIs run on the Go client; leaderboard + chat examples run end-to-end |
+| **M8** | P3/P4 parity tail (streams, Lua-lite, bitfield, geo, PF\*), sharded pub/sub SSUBSCRIBE/SPUBLISH (deferred from P2)          | differential green on covered tail                                                                 |
+| **M9** | Superset features (§12) + performance campaign                                                                              | ≥4× Redis on target workload; final report                                                         |
 
 Status: M0–M5 are done (M5 completed via the M5a–M5d phases of
 `docs/m5-detailed-plan.md`; soak report in `docs/benchmarks/M5-*.md`,
@@ -885,6 +898,7 @@ implementation memo in `note/M5-implemented.md`).
 | D17 | Multiple administrative accounts on the user/ACL base; optional TOTP 2FA via `pschlump/htotp` | Single built-in admin is not operable; htotp gives RFC-tested TOTP, provisioning URIs, and QR enrollment with zero new deps    |
 | D18 | Resumable WebSocket sessions: per-session replay buffer + `push_seq` handshake        | Browser/mobile WS connections drop routinely; replay-on-reconnect guarantees no lost pushes without client-visible gaps                  |
 | D19 | Official Go + TypeScript + JavaScript client libraries with full example applications   | The access surfaces need first-class client support; the Go library is the shared basis of the operator CLIs; examples (leaderboard, chat, …) are the documentation that proves the API |
+| D20 | JWT signing is Ed25519 (EdDSA) via `golang-jwt/jwt/v5`; key pair read from config file paths (`jwt_private_key_file` + `jwt_public_key_file`, both required) | Asymmetric keys keep any shared secret out of config; verification needs only the public key; no auto-generation — a regenerated pair silently invalidates all tokens; rotation = file rollout + restart |
 
 ## 16. Open Questions — Resolved
 
