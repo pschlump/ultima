@@ -2,10 +2,13 @@
 
 LDFLAGS := $(shell sh bin/gen-build-stamp.sh)
 
-.PHONY: gen_proto build test lint tidy clean run bench bench-m5
+.PHONY: gen_proto gen_api build test lint tidy clean run bench bench-m5
 
 gen_proto:
 	sh bin/gen.sh
+
+gen_api:
+	sh bin/gen-api.sh
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o ./ultima-server ./cmd/ultima-server

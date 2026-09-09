@@ -425,6 +425,34 @@ var configParams = []configParam{
 			}
 			return resp.Value{}, false
 		}},
+	{name: "slowlog-log-slower-than",
+		get: func(e *Engine) string { return fmt.Sprintf("%d", e.SlowlogSlowerThan()) },
+		set: func(e *Engine, v string) (resp.Value, bool) {
+			// Byte-exact against 7.2.7 (probed): bad integer → "couldn't
+			// be parsed into an integer"; below -1 → the range error.
+			n, ok := parseIntStrict([]byte(v))
+			if !ok {
+				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'slowlog-log-slower-than') - argument couldn't be parsed into an integer"), true
+			}
+			if n < -1 {
+				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'slowlog-log-slower-than') - argument must be between -1 and 9223372036854775807 inclusive"), true
+			}
+			e.SetSlowlogSlowerThan(n)
+			return resp.Value{}, false
+		}},
+	{name: "slowlog-max-len",
+		get: func(e *Engine) string { return fmt.Sprintf("%d", e.SlowlogMaxLen()) },
+		set: func(e *Engine, v string) (resp.Value, bool) {
+			n, ok := parseIntStrict([]byte(v))
+			if !ok {
+				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'slowlog-max-len') - argument couldn't be parsed into an integer"), true
+			}
+			if n < 0 {
+				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'slowlog-max-len') - argument must be between 0 and 9223372036854775807 inclusive"), true
+			}
+			e.SetSlowlogMaxLen(n)
+			return resp.Value{}, false
+		}},
 }
 
 // validSaveParam accepts "" or whitespace-separated "seconds changes" pairs.

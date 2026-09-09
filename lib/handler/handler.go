@@ -1,96 +1,19 @@
-// Package handler holds the HTTP surface (design doc §3): health endpoints
-// and the M0 /api/v1/ping stub. The /ws/v1 WebSocket command endpoint
-// lives in lib/wssrv (§6.3, M4); cmd/ultima-server/router.go mounts both
-// onto the chi mux.
+// Package handler holds the shared HTTP middleware helpers (design doc
+// §3): the slog request logger and its status recorder. The management
+// API itself lives in lib/httpapi (§10.1, M6c: generated chi-server
+// bindings from api/openapi.yaml); the /ws/v1 WebSocket command endpoint
+// lives in lib/wssrv (§6.3, M4); cmd/ultima-server/router.go mounts all
+// of them onto the chi mux.
 package handler
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
 	"net/http"
 	"time"
-
-	"github.com/go-chi/chi/v5"
-
-	"github.com/pschlump/ultima/lib/auth"
-	"github.com/pschlump/ultima/lib/commands"
 )
-
-// Register wires the HTTP routes onto r. p is the M5c persistence
-// manager (commands.Persister) behind the /api/v1/save family of
-// triggers (§13.1); nil disables them (bare test servers). svc is the
-// M6a auth service (§9): when non-nil, /api/v1/* is Bearer-gated
-// (except the public /api/v1/auth/login and /api/v1/auth/refresh, which
-// RegisterAuth adds); /health and /ready stay public either way (§10.1).
-func Register(r chi.Router, p commands.Persister, svc *auth.Service) {
-	r.Get("/health", health)
-	r.Get("/ready", health)
-	if svc == nil {
-		registerAPI(r, p)
-		return
-	}
-	RegisterAuth(r, svc)
-	r.Group(func(r chi.Router) {
-		r.Use(svc.RequireAuth)
-		registerAPI(r, p)
-	})
-}
-
-// registerAPI mounts the management endpoints (ungated caller routes).
-func registerAPI(r chi.Router, p commands.Persister) {
-	r.Get("/api/v1/ping", ping)
-	if p != nil {
-		r.Post("/api/v1/save", saveTrigger(p, false))
-		r.Post("/api/v1/bgsave", saveTrigger(p, true))
-		r.Post("/api/v1/bgrewriteaof", rewriteTrigger(p))
-	}
-}
-
-// saveTrigger runs SAVE (block=false: synchronous whole-server dump) or
-// BGSAVE (block=true: per-shard staggered background dump).
-func saveTrigger(p commands.Persister, background bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		var err error
-		if background {
-			err = p.BGSave()
-		} else {
-			err = p.Save()
-		}
-		if err != nil {
-			writeJSON(w, http.StatusConflict, map[string]string{"status": "error", "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	}
-}
-
-// rewriteTrigger runs BGREWRITEAOF.
-func rewriteTrigger(p commands.Persister) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		if err := p.BGRewriteAOF(); err != nil {
-			writeJSON(w, http.StatusConflict, map[string]string{"status": "error", "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	}
-}
-
-func health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func ping(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"message": "PONG"})
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
 
 // statusRecorder captures the response status for request logging.
 type statusRecorder struct {

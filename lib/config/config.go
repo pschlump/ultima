@@ -55,6 +55,10 @@ type ServerConfig struct {
 	// MaxMemoryPolicy mirrors Redis's maxmemory-policy (M5b): one of the
 	// eight Redis policy names; validated at startup.
 	MaxMemoryPolicy string `json:"maxmemory_policy" default:"noeviction"`
+	// MetricsAllow is the comma-separated CIDR/IP allowlist guarding
+	// GET /metrics (M6c, §10.1); parsed into []*net.IPNet at startup,
+	// bare IPs become /32 or /128.
+	MetricsAllow string `json:"metrics_allow" default:"127.0.0.0/8,::1"`
 }
 
 // DebugConfig holds feature flags (§8 debug.enabled map).

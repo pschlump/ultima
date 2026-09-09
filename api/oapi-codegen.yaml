@@ -1,0 +1,10 @@
+# oapi-codegen configuration for the Ultima management API (design doc
+# §10.1, D7/D11). Consumed by bin/gen-api.sh; regenerates gen/httpapi/.
+package: httpapi
+output: gen/httpapi/httpapi.gen.go
+generate:
+  chi-server: true
+  models: true
+output-options:
+  skip-fmt: false
+  skip-prune: false

@@ -13,7 +13,7 @@ file paths, both required, no auto-generation). Do not reverse these.
 Execution is phased M6a → M6d, each phase independently green
 (`go test ./...`, `make lint`).
 
-**Status: M6a and M6b done. M6c–M6d not started.**
+**Status: M6a, M6b and M6c done. M6d not started.**
 
 ---
 
@@ -117,7 +117,7 @@ the full API surface lands.
   no duplicates), `tests/m6_test.go` (auth-enabled session user
   binding).
 
-## M6c — HTTP management API (§10.1, D7/D11)
+## M6c — HTTP management API (§10.1, D7/D11) — **done**
 
 - `api/openapi.yaml` as contract source of truth, embedded and served at
   `/api/openapi.yaml` + Swagger UI (`lib/httpapi`); oapi-codegen
@@ -131,6 +131,71 @@ the full API surface lands.
 - Middleware chain per §10.1: request-id → logging → real-IP → Recoverer
   → Timeout → Prometheus → JWT (already have logging/Recoverer/JWT; add
   the rest). Preserve the `Unwrap`/`Hijack` contract for `/ws/v1`.
+
+Implementation notes:
+
+- **Contract/codegen**: `api/openapi.yaml` → `sh bin/gen-api.sh`
+  (`make gen_api`; oapi-codegen v2 chi-server + models) → `gen/httpapi/`,
+  never hand-edited. The script also syncs the embed copy
+  `lib/httpapi/openapi.yaml`; a doc-drift test pins the two copies.
+  Request validation tags ride the contract as
+  `x-oapi-codegen-extra-tags` (`validate:"required"` etc.).
+- **lib/httpapi**: `Server` implements the generated `ServerInterface`
+  (compile-time guard); `Server.Register` is the single wiring point for
+  cmd and tests: root chain request-id → `handler.RequestLogger` →
+  Recoverer, then the API group under Timeout(60s) → PromMiddleware →
+  path-aware auth gate (public: /health, /ready, /metrics, login,
+  refresh, spec, docs; `/api/v1/admin/` → RequireAdmin; else
+  RequireAuth; auth disabled → all open). chi's RealIP is omitted:
+  deprecated for IP spoofing, and rewriting RemoteAddr from client
+  headers would defeat the /metrics allowlist (divergence from §10.1's
+  "trusted proxies only" — there is no trusted-proxy config yet).
+- **JsonBody**: decode (empty body lenient) → `config.SetDefaults`
+  (`default:` tags) → validator/v10 over the generated `validate:` tags;
+  failure → 400 Error JSON. oapi-codegen param-binding failures render
+  the same Error shape via `ChiServerOptions.ErrorHandlerFunc`.
+- **Engine introspection** (lib/commands/clients.go, slowlog.go):
+  `NewConnState`/`CloseConn` maintain a client registry; `ConnState`
+  carries mutex-guarded meta snapshots (last command, db, name, user,
+  sub counts — refreshed post-command in `Execute`, so SELECT/SETNAME/
+  AUTH effects show immediately) plus a front-end kill hook
+  (`SetKillFunc`) and surface label. Kill is wired for RESP
+  (`conn.Close`) and WS (underlying net.Conn close — sessioned
+  connections detach per §9.4); gRPC server streams cannot be
+  force-closed, so gRPC clients are listed but kill returns 409.
+  `Execute` measures every command: latency stats always
+  (`LatencyStats`, per-command count/total/max/avg), slowlog ring when
+  duration ≥ `slowlog-log-slower-than` (new byte-exact CONFIG params
+  incl. `-1`=disabled and `slowlog-max-len`, probed against 7.2.7; args
+  truncated to 32×128 like Redis). `shard.Engine.ShardStats()` reports
+  per-shard keys/expires (O(keys) stripe walks), mem bytes, task-queue
+  depth, expiry-heap size. Synthetic API conns are built directly
+  (`syntheticConn`, like AOF replay) so they never appear in /clients.
+- **Data endpoints** run through `Execute` (D3): SCAN with cursor/match/
+  count/db; typed key preview (TYPE→404, PTTL, 100-element previews —
+  hash/set via first HSCAN/SSCAN page, zset ZRANGE WITHSCORES with the
+  wire score string); DEL; CONFIG GET * flattened to a map / PUT applied
+  via CONFIG SET in sorted key order with the Redis error verbatim in
+  the 400; FLUSHDB/FLUSHALL; INFO bulk parsed into sections (values stay
+  strings as on the wire).
+- **/metrics**: dedicated `prometheus.Registry` — PromMiddleware
+  (`ultima_http_requests_total`, `ultima_http_request_duration_seconds`
+  labeled by chi route pattern, /metrics + /ws/v1 skipped) plus a
+  scrape-time engine collector (uptime, clients, connections, commands,
+  blocked, per-db keys/expires, used bytes, expired/evicted totals,
+  slowlog len). Guarded by `server.metrics_allow` (comma-separated
+  CIDR/IPs, default `127.0.0.0/8,::1`, bare IPs → /32 or /128), JWT-exempt.
+- **Swagger UI**: `flowchartsman/swaggerui` (embedded assets) at
+  `/api/docs`, wrapped in `http.StripPrefix` (chi v5.3 Mount does not
+  strip for plain handlers); spec at `/api/openapi.yaml`. Both public.
+- `lib/handler` shrinks to RequestLogger + statusRecorder
+  (Unwrap/Hijack); the auth handlers moved to lib/httpapi with
+  byte-identical shapes (tests/m6_test.go passes unchanged). The /save
+  family moved with it (nil persister → 503 `persistence not
+  configured`).
+- Known follow-ups unchanged from M6a: no login rate-limiting; no WS
+  origin policy (M6d); token TTLs startup-only. gRPC client kill noted
+  above.
 
 ## M6d — Web UI v1 (§10.2)
 

@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -35,7 +34,7 @@ import (
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/config"
 	"github.com/pschlump/ultima/lib/grpcsrv"
-	"github.com/pschlump/ultima/lib/handler"
+	"github.com/pschlump/ultima/lib/httpapi"
 	"github.com/pschlump/ultima/lib/respserver"
 	"github.com/pschlump/ultima/lib/shard"
 	"github.com/pschlump/ultima/lib/wssession"
@@ -190,9 +189,9 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 	// --- HTTP/WS surface ---
 	httpLis := listen(t, cfg.Server.HTTPAddr)
 	r := chi.NewRouter()
-	r.Use(middleware.Recoverer)
-	r.Use(handler.RequestLogger(logger))
-	handler.Register(r, nil, nil) // no persistence manager in the surface test
+	// No persistence manager or auth service in the surface test; the
+	// management API mounts its own middleware chain (§10.1).
+	httpapi.NewServer(eng, nil, nil, logger, nil).Register(r)
 	reg := wssession.NewRegistry(eng, 0, 0, logger)
 	t.Cleanup(reg.Close)
 	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, logger))

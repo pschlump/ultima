@@ -84,6 +84,22 @@ type ConnState struct {
 	// layer can drain every post-mutation/pre-capture command before an
 	// AOF rewrite cuts over (M5c, §13.1).
 	trackPersist bool
+
+	// Client introspection (M6c, §10.1): metaMu guards the fields the
+	// client registry serves cross-goroutine (snapshot copies of the
+	// conn-goroutine-owned Name/DB/User plus the last-command name), the
+	// front-end kill hook, and the surface label. lastActivityUnix is an
+	// atomic so idle time reads never block on the mutex.
+	metaMu           sync.Mutex
+	lastCmd          string
+	metaDB           int
+	metaName         string
+	metaUser         string
+	metaSubs         int
+	metaPsubs        int
+	surface          string
+	onKill           func()
+	lastActivityUnix atomic.Int64
 }
 
 // WatchRef is one WATCHed key's dirty-check state: the logical DB, the
@@ -165,6 +181,21 @@ type Engine struct {
 	monitorSeq atomic.Uint64
 	monitorMu  sync.Mutex
 	monitors   map[uint64]func(MonitorEvent)
+
+	// Client registry (M6c, §10.1 /clients): every ConnState made by
+	// NewConnState is registered until CloseConn. Synthetic connections
+	// (AOF replay, HTTP key preview) build ConnState directly and never
+	// appear here.
+	clientsMu sync.Mutex
+	clients   map[uint64]*ConnState
+
+	// Slowlog ring and per-command latency stats (M6c, §10.1
+	// /slowlog, /latency); slowlogSlowerThan/slowlogMaxLen are the
+	// CONFIG-visible knobs (Redis defaults 10000 µs / 128 entries).
+	slowlog           slowlogRing
+	latency           latencyTable
+	slowlogSlowerThan atomic.Int64
+	slowlogMaxLen     atomic.Int64
 }
 
 // NewEngine wraps sh with the command layer. respPort feeds INFO.
@@ -176,6 +207,10 @@ func NewEngine(sh *shard.Engine, version string, respPort int) *Engine {
 		RunID:    genRunID(),
 		RespPort: respPort,
 	}
+	e.clients = make(map[uint64]*ConnState)
+	e.latency.m = make(map[string]*latencyStat)
+	e.slowlogSlowerThan.Store(10000) // Redis slowlog-log-slower-than default
+	e.slowlogMaxLen.Store(128)       // Redis slowlog-max-len default
 	e.PubSub = pubsub.New(func(pattern, s string) bool {
 		return GlobMatch([]byte(pattern), []byte(s))
 	})
@@ -231,12 +266,18 @@ func (e *Engine) NewConnState(addr string) *ConnState {
 	id := e.clientID.Add(1) + 2 // Redis IDs start at 3 (0-2 are internal)
 	e.conns.Add(1)
 	e.totalConns.Add(1)
-	return &ConnState{Proto: 2, ID: id, Addr: addr, Created: time.Now()}
+	cs := &ConnState{Proto: 2, ID: id, Addr: addr, Created: time.Now()}
+	cs.lastActivityUnix.Store(cs.Created.Unix())
+	e.clientsMu.Lock()
+	e.clients[id] = cs
+	e.clientsMu.Unlock()
+	return cs
 }
 
 // CloseConn deregisters a connection: its pub/sub subscriptions are
-// dropped from the broker, transaction/watch state is cleared, and the
-// client counter is decremented.
+// dropped from the broker, transaction/watch state is cleared, the
+// client-registry entry (M6c) is removed, and the client counter is
+// decremented.
 func (e *Engine) CloseConn(cs *ConnState) {
 	if cs == nil {
 		return
@@ -245,6 +286,9 @@ func (e *Engine) CloseConn(cs *ConnState) {
 	cs.subs, cs.psubs = nil, nil
 	cs.clearTx()
 	e.conns.Add(-1)
+	e.clientsMu.Lock()
+	delete(e.clients, cs.ID)
+	e.clientsMu.Unlock()
 }
 
 // DrainOutbox returns and clears the extra reply frames accumulated by
@@ -306,6 +350,7 @@ func (e *Engine) Execute(cs *ConnState, args [][]byte) resp.Value {
 		return errUnknownCommand("", nil)
 	}
 	e.totalCmds.Add(1)
+	cs.lastActivityUnix.Store(time.Now().Unix()) // M6c idle-time tracking
 	name := lowerASCII(args[0])
 	def, ok := table[name]
 
@@ -412,13 +457,16 @@ func (e *Engine) Execute(cs *ConnState, args [][]byte) resp.Value {
 		cs.trackPersist = true
 		e.persistInFlight.Add(1)
 	}
+	start := time.Now() // M6c slowlog/latency measurement (§10.1)
 	v := def.Handler(e, cs, args)
+	e.noteDuration(cs, name, args, start)
 	e.capturePersist(cs, def, name, args, v)
 	if track {
 		e.persistInFlight.Add(-1)
 		cs.trackPersist = false
 	}
 	e.notifyMonitors(cs, args)
+	cs.noteCommand(name)
 	return v
 }
 

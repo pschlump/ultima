@@ -33,7 +33,7 @@ import (
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/config"
 	"github.com/pschlump/ultima/lib/grpcsrv"
-	"github.com/pschlump/ultima/lib/handler"
+	"github.com/pschlump/ultima/lib/httpapi"
 	"github.com/pschlump/ultima/lib/shard"
 	"github.com/pschlump/ultima/lib/wssession"
 	"github.com/pschlump/ultima/lib/wssrv"
@@ -92,7 +92,7 @@ func newM6Env(t *testing.T) *m6Env {
 	eng := commands.NewEngine(shards, "test", 0)
 
 	r := chi.NewRouter()
-	handler.Register(r, nil, svc)
+	httpapi.NewServer(eng, nil, svc, testLogger(), nil).Register(r)
 	reg := wssession.NewRegistry(eng, 0, 0, testLogger())
 	t.Cleanup(reg.Close)
 	r.Get("/ws/v1", wssrv.Handler(eng, svc, reg, testLogger()))

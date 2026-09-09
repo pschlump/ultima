@@ -78,7 +78,8 @@ func (s *Server) Ping(_ context.Context, req *ultimav1.PingRequest) (*ultimav1.P
 // stream ends when the client half-closes it or sends QUIT.
 func (s *Server) Exec(stream ultimav1.Ultima_ExecServer) error {
 	cs := s.eng.NewConnState(addrOf(stream.Context()))
-	cs.Proto = 3 // binary clients get full RESP3-grade fidelity
+	cs.Proto = 3          // binary clients get full RESP3-grade fidelity
+	cs.SetSurface("grpc") // M6c client introspection (§10.1)
 	applyIdentity(stream.Context(), cs)
 	defer s.eng.CloseConn(cs)
 	for {
@@ -106,6 +107,7 @@ func (s *Server) Exec(stream ultimav1.Ultima_ExecServer) error {
 func (s *Server) ExecBatch(ctx context.Context, req *ultimav1.BatchRequest) (*ultimav1.BatchResponse, error) {
 	cs := s.eng.NewConnState(addrOf(ctx))
 	cs.Proto = 3
+	cs.SetSurface("grpc") // M6c client introspection (§10.1); no kill hook: a server stream cannot be force-closed
 	applyIdentity(ctx, cs)
 	defer s.eng.CloseConn(cs)
 	out := &ultimav1.BatchResponse{
@@ -122,6 +124,7 @@ func (s *Server) ExecBatch(ctx context.Context, req *ultimav1.BatchRequest) (*ul
 func (s *Server) ExecGeneric(ctx context.Context, req *ultimav1.CommandRequest) (*ultimav1.CommandResponse, error) {
 	cs := s.eng.NewConnState(addrOf(ctx))
 	cs.Proto = 3
+	cs.SetSurface("grpc") // M6c client introspection (§10.1); no kill hook: a server stream cannot be force-closed
 	applyIdentity(ctx, cs)
 	defer s.eng.CloseConn(cs)
 	cmd := &ultimav1.Command{Cmd: &ultimav1.Command_Generic{Generic: req}}
@@ -149,6 +152,7 @@ func (s *Server) Subscribe(req *ultimav1.SubscribeRequest, stream ultimav1.Ultim
 	defer cancel()
 	cs := s.eng.NewConnState(addrOf(ctx))
 	cs.Proto = 3
+	cs.SetSurface("grpc") // M6c client introspection (§10.1); no kill hook: a server stream cannot be force-closed
 	applyIdentity(ctx, cs)
 	defer s.eng.CloseConn(cs) // drops this stream's subscriptions
 

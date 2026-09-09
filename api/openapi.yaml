@@ -1,0 +1,1037 @@
+# Ultima management HTTP API (design doc §10.1, decisions D7/D11).
+#
+# This file is the contract source of truth. The chi-server bindings in
+# gen/httpapi/ are generated from it by bin/gen-api.sh (make gen_api) —
+# never hand-edit the generated code. The spec is embedded into the binary
+# and served at /api/openapi.yaml; Swagger UI at /api/docs/.
+openapi: 3.0.3
+info:
+  title: Ultima Management API
+  version: 0.6.0
+  description: |
+    Management surface of the Ultima server (a Redis superset clone).
+    JWT bearer auth (§9.3) applies to every /api/v1 route except
+    /auth/login and /auth/refresh when auth.enabled is set. /metrics is
+    guarded by an IP allowlist instead of JWT.
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Liveness probe (public)
+      security: []
+      tags: [system]
+      responses:
+        '200':
+          description: Server is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+  /ready:
+    get:
+      operationId: getReady
+      summary: Readiness probe (public)
+      security: []
+      tags: [system]
+      responses:
+        '200':
+          description: Server is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus metrics (IP-allowlist guarded, not JWT)
+      security: []
+      tags: [system]
+      responses:
+        '200':
+          description: Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+        '403':
+          description: Caller IP not in the metrics allowlist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/ping:
+    get:
+      operationId: getPing
+      summary: Ping the server
+      tags: [system]
+      responses:
+        '200':
+          description: PONG
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ping'
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      summary: Password (+ optional TOTP) login (public)
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Token pair
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/refresh:
+    post:
+      operationId: refresh
+      summary: Rotate a refresh token (public)
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: New token pair (old refresh token is consumed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke a refresh-token family
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/v1/auth/password:
+    post:
+      operationId: changePassword
+      summary: Change own password (revokes existing sessions)
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+      responses:
+        '200':
+          description: Password changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/totp/enable:
+    post:
+      operationId: totpEnable
+      summary: Stage a TOTP secret for enrollment
+      tags: [auth]
+      responses:
+        '200':
+          description: Enrollment material (confirm with a valid code)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TOTPEnrollment'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/auth/totp/regenerate:
+    post:
+      operationId: totpRegenerate
+      summary: Replace an enabled TOTP secret (stages a new one)
+      tags: [auth]
+      responses:
+        '200':
+          description: Enrollment material (confirm with a valid code)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TOTPEnrollment'
+  /api/v1/auth/totp/confirm:
+    post:
+      operationId: totpConfirm
+      summary: Confirm a staged TOTP secret with a valid code
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TOTPCodeRequest'
+      responses:
+        '200':
+          description: TOTP enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/auth/totp/disable:
+    post:
+      operationId: totpDisable
+      summary: Disable TOTP (password, plus current code when enabled)
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TOTPDisableRequest'
+      responses:
+        '200':
+          description: TOTP disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/admin/users:
+    get:
+      operationId: usersList
+      summary: List accounts (admin only)
+      tags: [admin]
+      responses:
+        '200':
+          description: All accounts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserList'
+    post:
+      operationId: usersCreate
+      summary: Create an account (admin only)
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreateRequest'
+      responses:
+        '201':
+          description: Created account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/users/{name}:
+    put:
+      operationId: usersUpdate
+      summary: Update an account's class/disabled flag (admin only)
+      tags: [admin]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+      responses:
+        '200':
+          description: Updated account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      operationId: usersDelete
+      summary: Delete an account (admin only)
+      tags: [admin]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/users/{name}/revoke-sessions:
+    post:
+      operationId: usersRevokeSessions
+      summary: Revoke every session of an account (admin only)
+      tags: [admin]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/info:
+    get:
+      operationId: getInfo
+      summary: INFO rendered as structured JSON (sections → fields)
+      tags: [server]
+      responses:
+        '200':
+          description: INFO sections; values mirror the RESP INFO strings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Info'
+  /api/v1/shards:
+    get:
+      operationId: getShards
+      summary: Per-shard key counts, queue depth, expiry heap, memory
+      tags: [server]
+      responses:
+        '200':
+          description: One entry per shard
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShardList'
+  /api/v1/clients:
+    get:
+      operationId: getClients
+      summary: Live client connections across all front-ends
+      tags: [server]
+      responses:
+        '200':
+          description: Connected clients
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientList'
+  /api/v1/clients/{id}/kill:
+    post:
+      operationId: killClient
+      summary: Close a client connection
+      tags: [server]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: uint64
+      responses:
+        '200':
+          description: Connection closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The client cannot be killed from this front-end
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/slowlog:
+    get:
+      operationId: getSlowlog
+      summary: Recent commands slower than slowlog-log-slower-than
+      tags: [server]
+      parameters:
+        - name: count
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+          description: Maximum entries to return (default slowlog-max-len)
+      responses:
+        '200':
+          description: Slowlog entries, newest first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SlowlogList'
+    delete:
+      operationId: resetSlowlog
+      summary: Clear the slowlog (SLOWLOG RESET)
+      tags: [server]
+      responses:
+        '200':
+          description: Cleared
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+  /api/v1/latency:
+    get:
+      operationId: getLatency
+      summary: Per-command cumulative latency statistics
+      tags: [server]
+      responses:
+        '200':
+          description: Latency stats per command name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LatencyStats'
+  /api/v1/config:
+    get:
+      operationId: getConfig
+      summary: Runtime configuration (CONFIG GET * equivalent)
+      tags: [server]
+      responses:
+        '200':
+          description: Parameter name → value map
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigMap'
+    put:
+      operationId: putConfig
+      summary: Update runtime configuration (CONFIG SET equivalent)
+      tags: [server]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigUpdateRequest'
+      responses:
+        '200':
+          description: All entries applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '400':
+          description: Bad body, unknown parameter, or rejected value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/flushdb:
+    post:
+      operationId: flushdb
+      summary: Flush one logical DB (or all)
+      tags: [data]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FlushRequest'
+      responses:
+        '200':
+          description: Flushed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/v1/save:
+    post:
+      operationId: save
+      summary: Synchronous snapshot (SAVE)
+      tags: [persistence]
+      responses:
+        '200':
+          description: Snapshot written
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '409':
+          description: Another background job is active
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/bgsave:
+    post:
+      operationId: bgsave
+      summary: Background snapshot (BGSAVE)
+      tags: [persistence]
+      responses:
+        '200':
+          description: Snapshot started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '409':
+          description: Another background job is active
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/bgrewriteaof:
+    post:
+      operationId: bgrewriteaof
+      summary: Rewrite the AOF (BGREWRITEAOF)
+      tags: [persistence]
+      responses:
+        '200':
+          description: Rewrite started (or scheduled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '409':
+          description: Another background job is active
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/keys/scan:
+    get:
+      operationId: scanKeys
+      summary: Incremental keyspace scan (SCAN)
+      tags: [data]
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            default: '0'
+        - name: match
+          in: query
+          schema:
+            type: string
+          description: Glob pattern (MATCH)
+        - name: count
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+          description: Hint for keys per step (COUNT)
+        - name: db
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Batch of keys plus the next cursor ("0" = done)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/v1/key/{key}:
+    get:
+      operationId: getKey
+      summary: Typed value preview of one key
+      tags: [data]
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: db
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Key type, TTL and a bounded value preview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeyPreview'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      operationId: deleteKey
+      summary: Delete one key (DEL)
+      tags: [data]
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: db
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeyDeleted'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    BadRequest:
+      description: Malformed request body or parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing/invalid token, bad credentials, or TOTP required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: State conflict (duplicate account, last admin, job active)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Status:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+    Error:
+      type: object
+      required: [status, error]
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: string
+    Ping:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          example: PONG
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          x-oapi-codegen-extra-tags:
+            validate: required
+        password:
+          type: string
+          minLength: 1
+          x-oapi-codegen-extra-tags:
+            validate: required
+        totp:
+          type: string
+          description: Current 6-digit code; required when the account has TOTP on
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          minLength: 1
+          x-oapi-codegen-extra-tags:
+            validate: required
+    PasswordChangeRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+          minLength: 1
+          x-oapi-codegen-extra-tags:
+            validate: required
+        new_password:
+          type: string
+          minLength: 1
+          x-oapi-codegen-extra-tags:
+            validate: required
+        totp:
+          type: string
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, expires_in]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expires_in:
+          type: integer
+          format: int64
+          description: Access-token lifetime in seconds
+    TOTPCodeRequest:
+      type: object
+      required: [totp]
+      properties:
+        totp:
+          type: string
+          minLength: 6
+          x-oapi-codegen-extra-tags:
+            validate: required
+    TOTPDisableRequest:
+      type: object
+      required: [password]
+      properties:
+        password:
+          type: string
+          minLength: 1
+        totp:
+          type: string
+    TOTPEnrollment:
+      type: object
+      required: [secret, provisioning_uri, qr_code_png_base64]
+      properties:
+        secret:
+          type: string
+        provisioning_uri:
+          type: string
+        qr_code_png_base64:
+          type: string
+    UserCreateRequest:
+      type: object
+      required: [username, password, class]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          x-oapi-codegen-extra-tags:
+            validate: required
+        password:
+          type: string
+          minLength: 1
+          x-oapi-codegen-extra-tags:
+            validate: required
+        class:
+          $ref: '#/components/schemas/AccountClass'
+          x-oapi-codegen-extra-tags:
+            validate: required,oneof=admin data
+    UserUpdateRequest:
+      type: object
+      properties:
+        class:
+          $ref: '#/components/schemas/AccountClass'
+          x-oapi-codegen-extra-tags:
+            validate: "omitempty,oneof=admin data"
+        disabled:
+          type: boolean
+    AccountClass:
+      type: string
+      enum: [admin, data]
+    AccountView:
+      type: object
+      required: [username, class, totp_enabled, disabled, created_at, updated_at]
+      properties:
+        username:
+          type: string
+        class:
+          $ref: '#/components/schemas/AccountClass'
+        totp_enabled:
+          type: boolean
+        disabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    UserList:
+      type: object
+      required: [users]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccountView'
+    Info:
+      type: object
+      required: [sections]
+      properties:
+        sections:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: string
+    ShardStat:
+      type: object
+      required: [index, keys, expires, mem_bytes, queue_depth, expiry_heap]
+      properties:
+        index:
+          type: integer
+        keys:
+          type: integer
+        expires:
+          type: integer
+        mem_bytes:
+          type: integer
+          format: int64
+        queue_depth:
+          type: integer
+        expiry_heap:
+          type: integer
+    ShardList:
+      type: object
+      required: [shards]
+      properties:
+        shards:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShardStat'
+    ClientInfo:
+      type: object
+      required: [id, addr, name, user, db, proto, age_seconds, idle_seconds, last_command, subscriptions, patterns, surface]
+      properties:
+        id:
+          type: integer
+          format: uint64
+        addr:
+          type: string
+        name:
+          type: string
+        user:
+          type: string
+          description: JWT identity on the gated surfaces; empty on RESP
+        db:
+          type: integer
+        proto:
+          type: integer
+          description: Negotiated RESP version (2 or 3); 0 on binary surfaces
+        age_seconds:
+          type: integer
+          format: int64
+        idle_seconds:
+          type: integer
+          format: int64
+        last_command:
+          type: string
+        subscriptions:
+          type: integer
+        patterns:
+          type: integer
+        surface:
+          type: string
+          enum: [resp, grpc, ws]
+    ClientList:
+      type: object
+      required: [clients]
+      properties:
+        clients:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClientInfo'
+    SlowlogEntry:
+      type: object
+      required: [id, timestamp, duration_us, args, client_addr, client_name]
+      properties:
+        id:
+          type: integer
+          format: int64
+        timestamp:
+          type: integer
+          format: int64
+          description: Unix seconds
+        duration_us:
+          type: integer
+          format: int64
+        args:
+          type: array
+          items:
+            type: string
+        client_addr:
+          type: string
+        client_name:
+          type: string
+    SlowlogList:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/SlowlogEntry'
+    CommandLatency:
+      type: object
+      required: [command, count, total_us, max_us, avg_us]
+      properties:
+        command:
+          type: string
+        count:
+          type: integer
+          format: int64
+        total_us:
+          type: integer
+          format: int64
+        max_us:
+          type: integer
+          format: int64
+        avg_us:
+          type: integer
+          format: int64
+    LatencyStats:
+      type: object
+      required: [commands]
+      properties:
+        commands:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommandLatency'
+    ConfigMap:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: object
+          additionalProperties:
+            type: string
+    ConfigUpdateRequest:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: object
+          additionalProperties:
+            type: string
+          minProperties: 1
+    FlushRequest:
+      type: object
+      properties:
+        db:
+          type: integer
+          minimum: 0
+          default: 0
+        all:
+          type: boolean
+          default: false
+          description: Flush every logical DB (FLUSHALL)
+    ScanResult:
+      type: object
+      required: [cursor, keys]
+      properties:
+        cursor:
+          type: string
+        keys:
+          type: array
+          items:
+            type: string
+    ZSetMember:
+      type: object
+      required: [member, score]
+      properties:
+        member:
+          type: string
+        score:
+          type: string
+          description: Score rendered string2d-exact, as on the wire
+    KeyPreview:
+      type: object
+      required: [key, type, ttl_ms, value]
+      properties:
+        key:
+          type: string
+        type:
+          type: string
+          enum: [string, hash, list, set, zset]
+        ttl_ms:
+          type: integer
+          format: int64
+          description: -1 no TTL, -2 no key (never returned; 404 instead)
+        value:
+          description: >-
+            Type-shaped preview, bounded to the first 100 elements for
+            collections: string → string, hash → object, list/set → array
+            of strings, zset → array of ZSetMember.
+    KeyDeleted:
+      type: object
+      required: [deleted]
+      properties:
+        deleted:
+          type: boolean
+security:
+  - bearerAuth: []

@@ -144,7 +144,11 @@ func serve(eng *commands.Engine, reg *wssession.Registry, conn *websocket.Conn, 
 	go ws.writer()
 
 	cs := eng.NewConnState(addr)
-	cs.Proto = 3 // binary clients get full RESP3-grade fidelity
+	cs.Proto = 3        // binary clients get full RESP3-grade fidelity
+	cs.SetSurface("ws") // M6c client introspection (§10.1)
+	// Kill closes the underlying net.Conn, which fails the read loop and
+	// runs the normal teardown (sessioned connections detach per §9.4).
+	cs.SetKillFunc(func() { _ = conn.Close() })
 	if id.Username != "" {
 		cs.Authed = true
 		cs.User = id.Username

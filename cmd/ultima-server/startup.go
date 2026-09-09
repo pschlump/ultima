@@ -49,6 +49,36 @@ func respPortOf(lis net.Listener) int {
 	return p
 }
 
+// parseIPNets parses a comma-separated CIDR/IP list (the
+// server.metrics_allow config value); bare IPs become /32 or /128.
+func parseIPNets(list string) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for _, part := range strings.Split(list, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "/") {
+			_, n, err := net.ParseCIDR(part)
+			if err != nil {
+				return nil, fmt.Errorf("%q: %w", part, err)
+			}
+			out = append(out, n)
+			continue
+		}
+		ip := net.ParseIP(part)
+		if ip == nil {
+			return nil, fmt.Errorf("%q: not a CIDR or IP", part)
+		}
+		bits := 32
+		if ip.To4() == nil {
+			bits = 128
+		}
+		out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+	}
+	return out, nil
+}
+
 func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 	s := &servers{}
 
@@ -133,8 +163,15 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 		time.Duration(cfg.Auth.WSReplayBufferMs)*time.Millisecond,
 		cfg.Auth.WSReplayBufferMaxMsgs, logger)
 
+	// /metrics IP allowlist (M6c, §10.1): comma-separated CIDRs, bare IPs
+	// become /32 or /128.
+	metricsAllow, err := parseIPNets(cfg.Server.MetricsAllow)
+	if err != nil {
+		return nil, fmt.Errorf("invalid metrics_allow: %w", err)
+	}
+
 	s.httpSrv = &http.Server{
-		Handler:           newRouter(logger, eng, s.persist, authSvc, s.wssess),
+		Handler:           newRouter(logger, eng, s.persist, authSvc, s.wssess, metricsAllow),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

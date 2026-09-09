@@ -461,6 +461,54 @@ func (e *Engine) DBStats() [][3]int {
 	return out
 }
 
+// ShardStat is the per-shard introspection snapshot for the M6c
+// management API (design doc §10.1 GET /api/v1/shards).
+//
+//nolint:revive // the name pairs with Engine.ShardStats; Stat would stutter less but read worse at call sites
+type ShardStat struct {
+	Index      int
+	Keys       int   // keys owned by this shard, all DBs
+	Expires    int   // keys with a TTL (future expiry only)
+	MemBytes   int64 // this shard's share of the keyspace estimate (M5b)
+	QueueDepth int   // pending tasks in the shard goroutine's queue
+	ExpiryHeap int   // pending expiry-heap entries (includes stale gens)
+}
+
+// ShardStats snapshots every shard by running a report task on each shard
+// goroutine (consistent with the rest of the engine: the shard goroutine
+// is the only reader of its tables). Keys/Expires walk the stripes, so
+// this is O(keys) — a management-endpoint call, not a hot path.
+func (e *Engine) ShardStats() []ShardStat {
+	out := make([]ShardStat, e.n)
+	var wg sync.WaitGroup
+	now := e.NowMs()
+	for i := range e.shard {
+		wg.Add(1)
+		e.DoShard(i, func(s *Shard) {
+			defer wg.Done()
+			st := ShardStat{
+				Index:      s.id,
+				MemBytes:   s.usedTotal.Load(),
+				QueueDepth: len(s.queue),
+				ExpiryHeap: s.exp.Len(),
+			}
+			for d := range e.dbs {
+				tab := s.tab(d)
+				st.Keys += tab.StripeLen(s.id)
+				tab.StripeWalk(s.id, func(_ int, it item) bool {
+					if it.E.ExpireAtMs > now {
+						st.Expires++
+					}
+					return true
+				})
+			}
+			out[s.id] = st
+		})
+	}
+	wg.Wait()
+	return out
+}
+
 // Shard is one keyspace shard: an owner goroutine draining a command
 // queue, plus the shard's expiry min-heap.
 type Shard struct {

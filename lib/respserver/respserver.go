@@ -117,6 +117,8 @@ func New(addr string, eng *commands.Engine) *resp.Server {
 	var writers sync.Map // resp.Conn -> *pushWriter
 
 	attach := func(conn resp.Conn, cs *commands.ConnState) {
+		cs.SetSurface("resp") // M6c client introspection (§10.1)
+		cs.SetKillFunc(func() { _ = conn.Close() })
 		cs.StartPush = func() func(resp.Value) {
 			// Called only from the connection's own goroutine (inside
 			// Execute), so load-then-store needs no CAS.

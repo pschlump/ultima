@@ -53,18 +53,30 @@ memo in `note/M5-implemented.md`. M6 is under way per
 EdDSA JWT access tokens per D20 via `golang-jwt/jwt/v5`, rotating
 refresh-token families with theft detection, TOTP 2FA via
 `pschlump/htotp`), the `/api/v1/auth/*` + `/api/v1/admin/users*`
-endpoints (`lib/handler/auth.go`), Bearer gating of `/api/v1/*`, gRPC
+endpoints (now in `lib/httpapi/auth_handlers.go`), Bearer gating of
+`/api/v1/*`, gRPC
 interceptors (`authorization: bearer` metadata), and WS upgrade auth
 (`?access_token=` or `Sec-WebSocket-Protocol: bearer, <token>`), all
 behind the `auth.enabled` config gate (off = pre-M6 behavior). **M6b is
 done** — resumable WS sessions (§9.4, D18): `lib/wssession` (per-session
 replay buffer + `push_seq` handshake; subscription retention across
-drops; SESSION_EXPIRED/ABORTED frames), wired into `lib/wssrv`. M6c
-(OpenAPI/oapi-codegen management API,
-§10.1) and M6d (web UI, §10.2) are pending. Later
+drops; SESSION_EXPIRED/ABORTED frames), wired into `lib/wssrv`. **M6c is
+done** — the HTTP management API (§10.1, D7/D11): `api/openapi.yaml` is
+the contract source of truth, regenerated into `gen/httpapi/` by
+`sh bin/gen-api.sh` (`make gen_api`; also syncs the embed copy
+`lib/httpapi/openapi.yaml`); `lib/httpapi` implements the generated
+chi-server bindings (auth routes migrated from the deleted
+`lib/handler/auth.go`, plus /info, /shards, /clients+kill, /slowlog,
+/latency, /config GET|PUT, /flushdb, /save family, /keys/scan,
+/key/{key}, /metrics with the `server.metrics_allow` IP allowlist), the
+spec is served at `/api/openapi.yaml` with Swagger UI at `/api/docs`,
+and the middleware chain is request-id → logging → Recoverer → Timeout →
+Prometheus → JWT gate (chi's deprecated RealIP deliberately omitted — it
+would defeat the /metrics allowlist). M6d (web UI, §10.2) is pending.
+Later
 milestones from the
 design layout
-(§14.1: `clients/`, `web/`, `api/`, extra CLIs under
+(§14.1: `clients/`, `web/`, extra CLIs under
 `cmd/`) do **not** exist yet.
 
 ## Technology Stack
@@ -101,7 +113,7 @@ One binary (`ultima-server`), one process, **three network surfaces**
 |----------------|--------------|------------------------------------------|
 | RESP (Redis protocol) | `:6379` | `lib/resp` (vendored redcon fork) → `lib/commands.Engine` |
 | gRPC           | `:6380`      | `lib/grpcsrv` on generated `gen/go/ultima/v1` code; server reflection on |
-| HTTP/WebSocket | `:6381`      | `lib/handler` + `lib/wssrv` mounted on a chi mux (`cmd/ultima-server/router.go`) |
+| HTTP/WebSocket | `:6381`      | `lib/httpapi` (M6c management API) + `lib/wssrv` mounted on a chi mux (`cmd/ultima-server/router.go`) |
 
 Request flow: each front-end parses its wire format, calls
 `commands.Engine.Execute(ConnState, args)`, and renders the returned
@@ -345,6 +357,26 @@ M6 architecture notes (detail in `docs/m6-detailed-plan.md`):
   (queued/refused/write-failed at drop) come back as `ABORTED` error
   frames by seq. Sessions bind to the creating account; a foreign resume
   is SESSION_EXPIRED. Sessionless WS connections behave exactly as M4.
+- **M6c HTTP management API** (`lib/httpapi`, §10.1, D7/D11):
+  `api/openapi.yaml` is the contract; `lib/httpapi` implements the
+  oapi-codegen chi-server bindings (`gen/httpapi`). Handlers run engine
+  commands through `Execute` on synthetic, unregistered ConnStates
+  (`syntheticConn` — never `NewConnState`, which would list them as
+  clients). `JsonBody` = decode (empty body lenient) →
+  `config.SetDefaults` → validator/v10 over the generated `validate:`
+  tags. Auth replies keep the M6a sentinel→status mapping byte-identical.
+  The embedded spec copy (`lib/httpapi/openapi.yaml`, synced by
+  `bin/gen-api.sh`) is served at `/api/openapi.yaml` + Swagger UI at
+  `/api/docs` (both public; chi v5.3 Mount does not strip prefixes, so
+  swagger.go uses http.StripPrefix); a doc-drift test pins the copies.
+  `/metrics` uses a dedicated `prometheus.Registry` (PromMiddleware +
+  scrape-time engine collector) guarded by the `server.metrics_allow`
+  CIDR list (parsed in cmd; empty = loopback-only) — JWT-exempt.
+  Middleware: request-id → logging → Recoverer → Timeout(60s) →
+  Prometheus → path-aware JWT gate (admin prefix → RequireAdmin);
+  chi's RealIP is deliberately omitted (deprecated, IP spoofing — and it
+  would defeat the metrics allowlist). `/ws/v1` stays outside the
+  Timeout/Prometheus group to preserve Unwrap/Hijack.
 
 ## Code Organization
 
@@ -393,13 +425,21 @@ lib/wssession/       WS resumable sessions (M6b, §9.4, D18): session registry,
                      bounded per-session replay buffer (ws_replay_buffer_ms/
                      max_msgs), atomic attach/takeover with replay, retention
                      expiry releasing the retained ConnState
-lib/handler/         HTTP routes (/health, /ready, /api/v1/ping, POST
-                     /api/v1/save|bgsave|bgrewriteaof) + RequestLogger;
-                     auth.go (M6a, §9.3/§9.5): /api/v1/auth/* (login,
-                     refresh, logout, password, TOTP enroll/confirm/
-                     regenerate/disable) and /api/v1/admin/users*; with
-                     auth.enabled on, all other /api/v1/* sit behind
-                     RequireAuth, /health+//ready stay public (§10.1)
+lib/handler/         shared HTTP middleware: RequestLogger (slog) +
+                     statusRecorder (Unwrap/Hijack — the /ws/v1 upgrader
+                     contract). The API routes moved to lib/httpapi in M6c
+lib/httpapi/         HTTP management API (M6c, §10.1, D7/D11): implements
+                     the generated httpapi.ServerInterface from gen/httpapi
+                     (auth routes, /info, /shards, /clients+kill, /slowlog,
+                     /latency, /config GET|PUT, /flushdb, /save family,
+                     /keys/scan, /key/{key}, /metrics); jsonbody.go (decode
+                     → config.SetDefaults → validator/v10 over the
+                     generated validate: tags); metrics.go (dedicated
+                     prometheus.Registry, PromMiddleware, scrape-time
+                     engine collector, metrics_allow IP guard); swagger.go
+                     (embedded openapi.yaml at /api/openapi.yaml, Swagger
+                     UI at /api/docs); Server.Register mounts the §10.1
+                     middleware chain (used by cmd and tests alike)
 lib/auth/            M6a auth core (§9, D17/D20): keys.go (Ed25519 PKCS#8/
                      PKIX PEM load, both files required), accounts.go
                      (bcrypt account store + refresh-token families with
@@ -418,6 +458,8 @@ lib/persist/         persistence (M5c, §13.1, D9 own formats): format.go
 proto/ultima/v1/     protobuf IDL
 gen/go/ultima/v1/    generated protobuf Go bindings (do not hand-edit)
 gen/ts/ultima/v1/    generated protobuf TypeScript bindings (protobuf-es; do not hand-edit)
+gen/httpapi/         generated oapi-codegen chi-server bindings + models for the
+                     management API (do not hand-edit; source is api/openapi.yaml)
 tests/               integration_test.go (three surfaces, ephemeral ports), m3_test.go
                      (M3 real-socket pub/sub + blocking + WATCH/EXEC stress tests),
                      m4_grpc_test.go / m4_ws_test.go (M4 front-ends), m4_parity_test.go
@@ -430,7 +472,8 @@ tests/ts-roundtrip/  protobuf-es TS client script (bun; `bun install` first) —
                      go+ts round-trip exit criterion; strict tsc typecheck via tsconfig
 tests/differential/  harness diffs replies against a real redis-server (the parity gate);
                      multi-connection scripts, push frames and blocking wakeups supported
-bin/                 gen.sh (protoc), gen-build-stamp.sh (ldflags), bench.sh (M1 sweep,
+bin/                 gen.sh (protoc), gen-api.sh (oapi-codegen + spec embed sync),
+                     gen-build-stamp.sh (ldflags), bench.sh (M1 sweep,
                      chains into bench-pubsub.sh for the M3 pub/sub benchmark and
                      bench-m5.sh for the M5 maxmemory soak), gen-jwt-keys.sh
                      (M6a Ed25519 JWT key pair into ./keys, gitignored)
@@ -458,6 +501,9 @@ All via the Makefile (default goal is `build`):
   Also emits `gen/ts` (protobuf-es) via `bin/gen-ts.sh`, which no-ops with
   a hint if the TS plugin isn't installed (`bun install` in
   `tests/ts-roundtrip` provides it).
+- `make gen_api` — regenerate the management-API chi-server bindings from
+  `api/openapi.yaml` into `gen/httpapi` and sync the embed copy
+  `lib/httpapi/openapi.yaml` (requires oapi-codegen v2).
 - `make bench` — `bin/bench.sh`: Ultima vs local `redis-server` via
   `redis-benchmark`; writes a report to `docs/benchmarks/M1-<date>.md`,
   then runs `bin/bench-pubsub.sh` (M3 pub/sub sweep, subscribers are the
