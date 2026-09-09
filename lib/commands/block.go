@@ -195,6 +195,10 @@ func bpopCmd(e *Engine, cs *ConnState, args [][]byte, head bool) resp.Value {
 		return errV
 	}
 	keys := args[1 : len(args)-1]
+	ev := "rpop"
+	if head {
+		ev = "lpop"
+	}
 	return e.block(cs, keys, timeout, func(w *shard.Waiter) (resp.Value, bool) {
 		return e.blockTry(cs, keys, w, func(s *shard.Shard, key string) (resp.Value, bool) {
 			ent, wt := getColl(s, cs.DB, key, shard.TypeList)
@@ -207,8 +211,13 @@ func bpopCmd(e *Engine, cs *ConnState, args [][]byte, head bool) resp.Value {
 			l := ent.Obj.(*types.List)
 			v, _ := popOne(l, head)
 			s.Touch(ent)
+			// Publish our own events before signaling the next waiter:
+			// Redis's single-threaded order guarantees this pop's events
+			// precede the next woken waiter's.
+			e.notifyKeyspace(cs.DB, key, ev)
 			if l.Len() == 0 {
 				s.Delete(cs.DB, key)
+				e.notifyKeyspace(cs.DB, key, "del")
 			} else {
 				// Serve the next queued waiter while elements remain.
 				s.WakeWaiter(cs.DB, key)
@@ -335,6 +344,10 @@ func cmdBLMPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	if failed {
 		return errV2
 	}
+	ev := "rpop"
+	if head {
+		ev = "lpop"
+	}
 	return e.block(cs, keys, timeout, func(w *shard.Waiter) (resp.Value, bool) {
 		return e.blockTry(cs, keys, w, func(s *shard.Shard, key string) (resp.Value, bool) {
 			ent, wt := getColl(s, cs.DB, key, shard.TypeList)
@@ -352,8 +365,10 @@ func cmdBLMPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				out = append(out, resp.BlobString(v))
 			}
 			s.Touch(ent)
+			e.notifyKeyspace(cs.DB, key, ev) // before the wake: see bpopCmd
 			if l.Len() == 0 {
 				s.Delete(cs.DB, key)
+				e.notifyKeyspace(cs.DB, key, "del")
 			} else {
 				s.WakeWaiter(cs.DB, key) // serve the next waiter while elements remain
 			}
@@ -387,6 +402,10 @@ func bzpopCmd(e *Engine, cs *ConnState, args [][]byte, fromMin bool) resp.Value 
 		return errV
 	}
 	keys := args[1 : len(args)-1]
+	ev := "zpopmax"
+	if fromMin {
+		ev = "zpopmin"
+	}
 	return e.block(cs, keys, timeout, func(w *shard.Waiter) (resp.Value, bool) {
 		return e.blockTry(cs, keys, w, func(s *shard.Shard, key string) (resp.Value, bool) {
 			ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
@@ -404,8 +423,10 @@ func bzpopCmd(e *Engine, cs *ConnState, args [][]byte, fromMin bool) resp.Value 
 			el, _ := z.At(i)
 			z.Remove(el.Member)
 			s.Touch(ent)
+			e.notifyKeyspace(cs.DB, key, ev) // before the wake: see bpopCmd
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)
+				e.notifyKeyspace(cs.DB, key, "del")
 			} else {
 				s.WakeWaiter(cs.DB, key) // serve the next waiter while elements remain
 			}
@@ -425,6 +446,10 @@ func cmdBZMPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	keys, fromMin, count, errV2, failed := parseMpopTail(args, 2, [2]string{"min", "max"})
 	if failed {
 		return errV2
+	}
+	ev := "zpopmax"
+	if fromMin {
+		ev = "zpopmin"
 	}
 	return e.block(cs, keys, timeout, func(w *shard.Waiter) (resp.Value, bool) {
 		return e.blockTry(cs, keys, w, func(s *shard.Shard, key string) (resp.Value, bool) {
@@ -448,8 +473,10 @@ func cmdBZMPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				z.Remove(el.Member)
 			}
 			s.Touch(ent)
+			e.notifyKeyspace(cs.DB, key, ev) // before the wake: see bpopCmd
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)
+				e.notifyKeyspace(cs.DB, key, "del")
 			} else {
 				s.WakeWaiter(cs.DB, key) // serve the next waiter while elements remain
 			}

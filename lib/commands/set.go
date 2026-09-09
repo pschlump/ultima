@@ -14,6 +14,7 @@ import (
 func cmdSAdd(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
+	var n int64
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeSet)
 		if wt {
@@ -27,7 +28,6 @@ func cmdSAdd(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		} else {
 			st = ent.Obj.(*types.Set)
 		}
-		var n int64
 		for _, m := range args[2:] {
 			if st.Add(string(m)) {
 				n++
@@ -38,12 +38,19 @@ func cmdSAdd(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		}
 		reply = resp.Int(n)
 	})
+	if n > 0 {
+		// Redis's saddCommand notifies only when a member was added —
+		// verified live against 7.2.7 (a 0-added SADD emits nothing).
+		e.notifyKeyspace(cs.DB, key, "sadd")
+	}
 	return reply
 }
 
 func cmdSRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
+	var n int64
+	var deleted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeSet)
 		switch {
@@ -53,7 +60,6 @@ func cmdSRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			reply = resp.Int(0)
 		default:
 			st := ent.Obj.(*types.Set)
-			var n int64
 			for _, m := range args[2:] {
 				if st.Remove(string(m)) {
 					n++
@@ -64,10 +70,17 @@ func cmdSRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			}
 			if st.Len() == 0 {
 				s.Delete(cs.DB, key)
+				deleted = true
 			}
 			reply = resp.Int(n)
 		}
 	})
+	if n > 0 {
+		e.notifyKeyspace(cs.DB, key, "srem")
+		if deleted {
+			e.notifyKeyspace(cs.DB, key, "del")
+		}
+	}
 	return reply
 }
 
@@ -164,6 +177,7 @@ func cmdSPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
+	var popped, deleted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeSet)
 		if wt {
@@ -183,8 +197,10 @@ func cmdSPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			m := st.Members()[rand.IntN(st.Len())]
 			st.Remove(m)
 			s.Touch(ent)
+			popped = true
 			if st.Len() == 0 {
 				s.Delete(cs.DB, key)
+				deleted = true
 			}
 			reply = resp.BlobStr(m)
 			return
@@ -198,6 +214,8 @@ func cmdSPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 					out = append(out, resp.BlobStr(m))
 				}
 				s.Delete(cs.DB, key)
+				popped = true
+				deleted = true
 			} else {
 				out = make([]resp.Value, 0, count)
 				for _, i := range rand.Perm(len(members))[:count] {
@@ -206,10 +224,17 @@ func cmdSPop(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 					out = append(out, resp.BlobStr(m))
 				}
 				s.Touch(ent)
+				popped = true
 			}
 		}
 		reply = resp.Set(out...)
 	})
+	if popped {
+		e.notifyKeyspace(cs.DB, key, "spop")
+		if deleted {
+			e.notifyKeyspace(cs.DB, key, "del")
+		}
+	}
 	return reply
 }
 
@@ -327,6 +352,9 @@ func cmdSMove(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	if dstWT {
 		return errWrongType
 	}
+	// Phase 2 writes: i==0 and i==1 land in disjoint fan-out groups, so
+	// these flags need no synchronization.
+	var srcDeleted, dstAdded bool
 	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			if i == 0 {
@@ -339,6 +367,7 @@ func cmdSMove(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				s.Touch(ent)
 				if st.Len() == 0 {
 					s.Delete(cs.DB, src)
+					srcDeleted = true
 				}
 			} else {
 				ent, _ := getColl(s, cs.DB, dst, shard.TypeSet)
@@ -349,13 +378,22 @@ func cmdSMove(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				} else {
 					st = ent.Obj.(*types.Set)
 				}
-				st.Add(member)
+				dstAdded = st.Add(member)
 				if ent != nil {
 					s.Touch(ent)
 				}
 			}
 		}
 	})
+	// Redis smoveCommand order: srem on src, del if src emptied, then sadd
+	// on dst (only when the member was newly added there).
+	e.notifyKeyspace(cs.DB, src, "srem")
+	if srcDeleted {
+		e.notifyKeyspace(cs.DB, src, "del")
+	}
+	if dstAdded {
+		e.notifyKeyspace(cs.DB, dst, "sadd")
+	}
 	return resp.Int(1)
 }
 
@@ -502,12 +540,15 @@ func cmdSDiff(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 
 // storeSetResult writes the algebra result to dest: an empty result
 // deletes dest (Redis semantics), a non-empty one replaces it wholesale
-// (dropping any prior value and TTL).
-func storeSetResult(e *Engine, cs *ConnState, dest []byte, members []string) resp.Value {
+// (dropping any prior value and TTL). Redis's *storeGenericCommand emits
+// the <op>store event on dest when the result is stored, and "del"
+// instead when an empty result removed an existing dest.
+func storeSetResult(e *Engine, cs *ConnState, dest []byte, members []string, event string) resp.Value {
 	var n int64
+	var deleted bool
 	e.do(cs, dest, func(s *shard.Shard) {
 		if len(members) == 0 {
-			s.Delete(cs.DB, string(dest))
+			deleted = s.Delete(cs.DB, string(dest))
 			n = 0
 			return
 		}
@@ -518,6 +559,11 @@ func storeSetResult(e *Engine, cs *ConnState, dest []byte, members []string) res
 		storeColl(s, cs.DB, string(dest), shard.TypeSet, st)
 		n = int64(len(members))
 	})
+	if len(members) > 0 {
+		e.notifyKeyspace(cs.DB, string(dest), event)
+	} else if deleted {
+		e.notifyKeyspace(cs.DB, string(dest), "del")
+	}
 	return resp.Int(n)
 }
 
@@ -526,7 +572,7 @@ func cmdSInterStore(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	if failed {
 		return errV
 	}
-	return storeSetResult(e, cs, args[1], intersect(snaps))
+	return storeSetResult(e, cs, args[1], intersect(snaps), "sinterstore")
 }
 
 func cmdSUnionStore(e *Engine, cs *ConnState, args [][]byte) resp.Value {
@@ -534,7 +580,7 @@ func cmdSUnionStore(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	if failed {
 		return errV
 	}
-	return storeSetResult(e, cs, args[1], unionAll(snaps))
+	return storeSetResult(e, cs, args[1], unionAll(snaps), "sunionstore")
 }
 
 func cmdSDiffStore(e *Engine, cs *ConnState, args [][]byte) resp.Value {
@@ -542,7 +588,7 @@ func cmdSDiffStore(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	if failed {
 		return errV
 	}
-	return storeSetResult(e, cs, args[1], diffAll(snaps))
+	return storeSetResult(e, cs, args[1], diffAll(snaps), "sdiffstore")
 }
 
 func cmdSInterCard(e *Engine, cs *ConnState, args [][]byte) resp.Value {

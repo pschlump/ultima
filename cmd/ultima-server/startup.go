@@ -63,6 +63,9 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 	eng := commands.NewEngine(s.shards, Version, respPortOf(s.respLis))
 	eng.SetRequirePass(cfg.Server.RequirePass)
 	eng.SetMaxMemory(int64(cfg.Server.MaxMemoryMB) << 20)
+	if !eng.SetNotifyKeyspaceEvents(cfg.Server.NotifyKeyspaceEvents) {
+		return nil, fmt.Errorf("invalid notify_keyspace_events %q: use characters from 'Ag$lshzxeKEtmdn'", cfg.Server.NotifyKeyspaceEvents)
+	}
 
 	s.respSrv = respserver.New(cfg.Server.RespAddr, eng)
 	go func() {

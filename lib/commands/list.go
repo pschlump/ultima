@@ -31,6 +31,10 @@ func cmdRPushX(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 
 func pushCmd(e *Engine, cs *ConnState, args [][]byte, head, onlyIfExists bool) resp.Value {
 	key := string(args[1])
+	ev := "rpush"
+	if head {
+		ev = "lpush"
+	}
 	var reply resp.Value
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
@@ -59,6 +63,10 @@ func pushCmd(e *Engine, cs *ConnState, args [][]byte, head, onlyIfExists bool) r
 		if ent != nil {
 			s.Touch(ent)
 		}
+		// Publish BEFORE waking: a woken BLPOP/BLMOVE/BLMPOP pops on its
+		// own goroutine and publishes lpop — Redis's single-threaded order
+		// guarantees the push event precedes any woken waiter's pop event.
+		e.notifyKeyspace(cs.DB, key, ev)
 		s.WakeWaiter(cs.DB, key) // serve parked BLPOP/BLMOVE/BLMPOP waiters
 		reply = resp.Int(int64(l.Len()))
 	})
@@ -88,6 +96,7 @@ func popCmd(e *Engine, cs *ConnState, args [][]byte, head bool) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
+	var popped, deleted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
@@ -106,7 +115,9 @@ func popCmd(e *Engine, cs *ConnState, args [][]byte, head bool) resp.Value {
 				s.Touch(ent)
 				if l.Len() == 0 {
 					s.Delete(cs.DB, key)
+					deleted = true
 				}
+				popped = true
 				reply = resp.BlobString(v)
 				return
 			}
@@ -123,10 +134,22 @@ func popCmd(e *Engine, cs *ConnState, args [][]byte, head bool) resp.Value {
 			s.Touch(ent)
 			if l.Len() == 0 {
 				s.Delete(cs.DB, key)
+				deleted = true
 			}
+			popped = true
 			reply = resp.Arr(out...)
 		}
 	})
+	if popped {
+		if head {
+			e.notifyKeyspace(cs.DB, key, "lpop")
+		} else {
+			e.notifyKeyspace(cs.DB, key, "rpop")
+		}
+		if deleted {
+			e.notifyKeyspace(cs.DB, key, "del")
+		}
+	}
 	return reply
 }
 
@@ -208,6 +231,7 @@ func cmdLRange(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdLSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
+	var done bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
@@ -225,10 +249,14 @@ func cmdLSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				reply = resp.Err("ERR index out of range")
 			} else {
 				s.Touch(ent)
+				done = true
 				reply = replyOK
 			}
 		}
 	})
+	if done {
+		e.notifyKeyspace(cs.DB, key, "lset")
+	}
 	return reply
 }
 
@@ -244,6 +272,7 @@ func cmdLInsert(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	pivot := args[3]
 	var reply resp.Value
+	var inserted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
@@ -270,9 +299,13 @@ func cmdLInsert(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				l.InsertAfter(idx, dupBytes(args[4]))
 			}
 			s.Touch(ent)
+			inserted = true
 			reply = resp.Int(int64(l.Len()))
 		}
 	})
+	if inserted {
+		e.notifyKeyspace(cs.DB, key, "linsert")
+	}
 	return reply
 }
 
@@ -284,6 +317,8 @@ func cmdLRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	val := args[3]
 	var reply resp.Value
+	var n int
+	var deleted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
@@ -329,10 +364,18 @@ func cmdLRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			}
 			if l.Len() == 0 {
 				s.Delete(cs.DB, key)
+				deleted = true
 			}
+			n = len(idxs)
 			reply = resp.Int(int64(len(idxs)))
 		}
 	})
+	if n > 0 {
+		e.notifyKeyspace(cs.DB, key, "lrem")
+		if deleted {
+			e.notifyKeyspace(cs.DB, key, "del")
+		}
+	}
 	return reply
 }
 
@@ -344,6 +387,7 @@ func cmdLTrim(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
+	var exists, deleted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeList)
 		switch {
@@ -355,12 +399,20 @@ func cmdLTrim(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			l := ent.Obj.(*types.List)
 			l.Trim(int(start), int(stop))
 			s.Touch(ent)
+			exists = true // Redis emits ltrim even when nothing was trimmed
 			if l.Len() == 0 {
 				s.Delete(cs.DB, key)
+				deleted = true
 			}
 			reply = replyOK
 		}
 	})
+	if exists {
+		e.notifyKeyspace(cs.DB, key, "ltrim")
+		if deleted {
+			e.notifyKeyspace(cs.DB, key, "del")
+		}
+	}
 	return reply
 }
 
@@ -388,12 +440,22 @@ func cmdLMove(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 }
 
 // lmoveCmd implements RPOPLPUSH/LMOVE: pop from one end of src, push to
-// one end of dst. Same-shard (incl. same-key) runs as one atomic task;
-// cross-shard validates both keys first, then applies the pop and the
-// push in a second fan-out (§4.2 fast-path: per-shard atomicity).
+// one end of dst. Same-key runs as one atomic task; cross-key validates
+// both keys first, then applies the dst push and the src pop as two
+// sequential tasks (keyspace-notification ordering, see phase 2 below;
+// §4.2 fast-path: per-shard atomicity).
 func lmoveCmd(e *Engine, cs *ConnState, srcB, dstB []byte, srcHead, dstHead bool) resp.Value {
 	src, dst := string(srcB), string(dstB)
 	keys := [][]byte{srcB, dstB}
+	// Redis event order: the destination push, then the source pop, then
+	// the source's del when it emptied.
+	pushEv, popEv := "rpush", "rpop"
+	if dstHead {
+		pushEv = "lpush"
+	}
+	if srcHead {
+		popEv = "lpop"
+	}
 	if src == dst {
 		var reply resp.Value
 		e.do(cs, srcB, func(s *shard.Shard) {
@@ -412,6 +474,10 @@ func lmoveCmd(e *Engine, cs *ConnState, srcB, dstB []byte, srcHead, dstHead bool
 					l.PushTail(v)
 				}
 				s.Touch(ent)
+				// Publish before waking (see pushCmd): the element stays in
+				// the list, so a woken waiter can pop it immediately.
+				e.notifyKeyspace(cs.DB, src, pushEv)
+				e.notifyKeyspace(cs.DB, src, popEv)
 				s.WakeWaiter(cs.DB, src) // dst == src: parked waiters can proceed
 				reply = resp.BlobString(v)
 			}
@@ -460,42 +526,50 @@ func lmoveCmd(e *Engine, cs *ConnState, srcB, dstB []byte, srcHead, dstHead bool
 	if dstWT {
 		return errWrongType
 	}
-	// Phase 2: apply.
-	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
-		for _, i := range idxs {
-			if i == 0 {
-				ent, ok := s.Lookup(cs.DB, src)
-				if !ok || ent.Type != shard.TypeList {
-					continue
-				}
-				l := ent.Obj.(*types.List)
-				popOne(l, srcHead)
-				s.Touch(ent)
-				if l.Len() == 0 {
-					s.Delete(cs.DB, src)
-				} else {
-					// Serve the next parked waiter while elements remain.
-					s.WakeWaiter(cs.DB, src)
-				}
-			} else {
-				ent, _ := getColl(s, cs.DB, dst, shard.TypeList)
-				var l *types.List
-				if ent == nil {
-					l = types.NewList()
-					storeColl(s, cs.DB, dst, shard.TypeList, l)
-				} else {
-					l = ent.Obj.(*types.List)
-				}
-				if dstHead {
-					l.PushHead(dupBytes(val))
-				} else {
-					l.PushTail(dupBytes(val))
-				}
-				if ent != nil {
-					s.Touch(ent)
-				}
-				s.WakeWaiter(cs.DB, dst) // a BLMOVE/BLPOP on dst can proceed
-			}
+	// Phase 2: apply — dst first, then src, as two sequential shard tasks.
+	// Redis's event order (dst push, src pop, del) plus the
+	// publish-before-wake rule (see pushCmd) both demand this sequencing: a
+	// concurrent fan-out could publish src's pop before dst's push, and a
+	// post-task publish could lose the race against the woken waiter's own
+	// pop event. The phase-1 peek guarantees src was non-empty, so the dst
+	// push is unconditional; the src pop re-checks (a racing DEL may have
+	// won between phases — the reply still carries the peeked value, as
+	// before).
+	e.do(cs, dstB, func(s *shard.Shard) {
+		ent, _ := getColl(s, cs.DB, dst, shard.TypeList)
+		var l *types.List
+		if ent == nil {
+			l = types.NewList()
+			storeColl(s, cs.DB, dst, shard.TypeList, l)
+		} else {
+			l = ent.Obj.(*types.List)
+		}
+		if dstHead {
+			l.PushHead(dupBytes(val))
+		} else {
+			l.PushTail(dupBytes(val))
+		}
+		if ent != nil {
+			s.Touch(ent)
+		}
+		e.notifyKeyspace(cs.DB, dst, pushEv)
+		s.WakeWaiter(cs.DB, dst) // a BLMOVE/BLPOP on dst can proceed
+	})
+	e.do(cs, srcB, func(s *shard.Shard) {
+		ent, ok := s.Lookup(cs.DB, src)
+		if !ok || ent.Type != shard.TypeList {
+			return
+		}
+		l := ent.Obj.(*types.List)
+		popOne(l, srcHead)
+		s.Touch(ent)
+		e.notifyKeyspace(cs.DB, src, popEv)
+		if l.Len() == 0 {
+			s.Delete(cs.DB, src)
+			e.notifyKeyspace(cs.DB, src, "del")
+		} else {
+			// Serve the next parked waiter while elements remain.
+			s.WakeWaiter(cs.DB, src)
 		}
 	})
 	return resp.BlobString(val)

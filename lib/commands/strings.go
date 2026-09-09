@@ -111,9 +111,11 @@ func cmdSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key, val := string(args[1]), args[2]
 	var reply resp.Value
+	var applied bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		old, found := s.Lookup(cs.DB, key)
 		blocked := (o.nx && found) || (o.xx && !found)
+		applied = !blocked
 		if !blocked {
 			switch {
 			case o.hasExpire && o.expireAtMs <= e.Shards.NowMs():
@@ -146,6 +148,12 @@ func cmdSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			reply = replyOK
 		}
 	})
+	if applied {
+		e.notifyKeyspace(cs.DB, key, "set")
+		if o.hasExpire {
+			e.notifyKeyspace(cs.DB, key, "expire")
+		}
+	}
 	return reply
 }
 
@@ -171,6 +179,7 @@ func cmdGet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdGetSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
+	var stored bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		old, found := s.Lookup(cs.DB, key)
 		if found && old.Type != shard.TypeString {
@@ -178,18 +187,23 @@ func cmdGetSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			return
 		}
 		s.Store(cs.DB, key, &shard.Entry{Type: shard.TypeString, Str: dupBytes(args[2])})
+		stored = true
 		if found {
 			reply = resp.BlobString(old.Str)
 		} else {
 			reply = resp.Null()
 		}
 	})
+	if stored {
+		e.notifyKeyspace(cs.DB, key, "set")
+	}
 	return reply
 }
 
 func cmdGetDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
+	var deleted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		if ent, ok := s.Lookup(cs.DB, key); ok {
 			if ent.Type != shard.TypeString {
@@ -197,11 +211,15 @@ func cmdGetDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 				return
 			}
 			s.Delete(cs.DB, key)
+			deleted = true
 			reply = resp.BlobString(ent.Str)
 		} else {
 			reply = resp.Null()
 		}
 	})
+	if deleted {
+		e.notifyKeyspace(cs.DB, key, "del")
+	}
 	return reply
 }
 
@@ -234,6 +252,7 @@ func cmdGetEx(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
+	var persisted, expireSet, deleted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, found := s.Lookup(cs.DB, key)
 		if !found {
@@ -248,6 +267,7 @@ func cmdGetEx(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		now := e.Shards.NowMs()
 		switch {
 		case persist:
+			persisted = ent.ExpireAtMs != 0
 			ent.ExpireAtMs = 0
 			s.Touch(ent)
 		case expKind != "":
@@ -279,15 +299,28 @@ func cmdGetEx(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			case "pxat":
 				at = expVal
 			}
-			ent.ExpireAtMs = at
-			s.Touch(ent)
 			if at <= now {
-				s.Delete(cs.DB, key) // expiry in the past: return value, drop key
+				// Return the value, drop the key. Delete the live entry
+				// directly (see expireCommon): a pre-set past ExpireAtMs
+				// would surface as a spurious "expired", Redis emits "del".
+				s.Delete(cs.DB, key)
+				deleted = true
 			} else {
+				ent.ExpireAtMs = at
+				s.Touch(ent)
 				s.PushExpire(cs.DB, key, ent)
+				expireSet = true
 			}
 		}
 	})
+	switch {
+	case persisted:
+		e.notifyKeyspace(cs.DB, key, "persist")
+	case deleted:
+		e.notifyKeyspace(cs.DB, key, "del")
+	case expireSet:
+		e.notifyKeyspace(cs.DB, key, "expire")
+	}
 	return reply
 }
 
@@ -323,6 +356,7 @@ func cmdDecrBy(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func incrBy(e *Engine, cs *ConnState, keyB []byte, delta int64) resp.Value {
 	key := string(keyB)
 	var reply resp.Value
+	var done bool
 	e.do(cs, keyB, func(s *shard.Shard) {
 		var cur int64
 		ent, found := s.Lookup(cs.DB, key)
@@ -353,7 +387,13 @@ func incrBy(e *Engine, cs *ConnState, keyB []byte, delta int64) resp.Value {
 			})
 		}
 		reply = resp.Int(cur)
+		done = true
 	})
+	if done {
+		// Redis routes DECR/DECRBY through incrDecrCommand too: the event
+		// is always "incrby".
+		e.notifyKeyspace(cs.DB, key, "incrby")
+	}
 	return reply
 }
 
@@ -369,6 +409,7 @@ func cmdIncrByFloat(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
+	var done bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		var cur float64
 		ent, found := s.Lookup(cs.DB, key)
@@ -400,7 +441,11 @@ func cmdIncrByFloat(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			})
 		}
 		reply = resp.BlobStr(out)
+		done = true
 	})
+	if done {
+		e.notifyKeyspace(cs.DB, key, "incrbyfloat")
+	}
 	return reply
 }
 
@@ -409,6 +454,7 @@ func cmdIncrByFloat(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdAppend(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
+	var done bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, found := s.Lookup(cs.DB, key)
 		if found {
@@ -419,6 +465,7 @@ func cmdAppend(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			ent.Str = append(ent.Str, args[2]...)
 			s.Touch(ent)
 			reply = resp.Int(int64(len(ent.Str)))
+			done = true
 			return
 		}
 		s.Store(cs.DB, key, &shard.Entry{
@@ -426,7 +473,11 @@ func cmdAppend(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			Str:  dupBytes(args[2]),
 		})
 		reply = resp.Int(int64(len(args[2])))
+		done = true
 	})
+	if done {
+		e.notifyKeyspace(cs.DB, key, "append")
+	}
 	return reply
 }
 
@@ -478,6 +529,11 @@ func cmdMSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			})
 		}
 	})
+	// One "set" per key in argument order; doMulti fans out concurrently,
+	// so emission happens here on the connection goroutine.
+	for _, k := range keys {
+		e.notifyKeyspace(cs.DB, string(k), "set")
+	}
 	return replyOK
 }
 
@@ -507,6 +563,9 @@ func cmdMSetNX(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			})
 		}
 	})
+	for _, k := range keys {
+		e.notifyKeyspace(cs.DB, string(k), "set")
+	}
 	return resp.Int(1)
 }
 

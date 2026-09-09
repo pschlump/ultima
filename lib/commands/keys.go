@@ -13,14 +13,21 @@ import (
 
 func cmdDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	keys := args[1:]
-	var n atomic.Int64 // fn runs concurrently on several shard goroutines
+	var n atomic.Int64                 // fn runs concurrently on several shard goroutines
+	deleted := make([]bool, len(keys)) // slot-indexed, same reason
 	e.doMulti(cs, keys, func(s *shard.Shard, idxs []int) {
 		for _, i := range idxs {
 			if s.Delete(cs.DB, string(keys[i])) {
+				deleted[i] = true
 				n.Add(1)
 			}
 		}
 	})
+	for i, k := range keys {
+		if deleted[i] {
+			e.notifyKeyspace(cs.DB, string(k), "del")
+		}
+	}
 	return resp.Int(n.Load())
 }
 
@@ -105,7 +112,9 @@ func expireCommon(e *Engine, cs *ConnState, args [][]byte, ms bool) resp.Value {
 		}
 	}
 	key := string(args[1])
+	past := at <= now // an already-past expiry deletes instead of expiring
 	var reply resp.Value
+	var applied bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, found := s.Lookup(cs.DB, key)
 		if !found {
@@ -128,15 +137,26 @@ func expireCommon(e *Engine, cs *ConnState, args [][]byte, ms bool) resp.Value {
 			reply = resp.Int(0)
 			return
 		}
-		ent.ExpireAtMs = at
-		s.Touch(ent)
 		if at <= now {
-			s.Delete(cs.DB, key) // expiry in the past deletes the key
+			// Expiry in the past deletes the key. Delete the live entry
+			// directly: pre-setting ExpireAtMs would make Delete's passive-
+			// expiry Lookup report it as "expired", but Redis emits "del".
+			s.Delete(cs.DB, key)
 		} else {
+			ent.ExpireAtMs = at
+			s.Touch(ent)
 			s.PushExpire(cs.DB, key, ent)
 		}
+		applied = true
 		reply = resp.Int(1)
 	})
+	if applied {
+		if past {
+			e.notifyKeyspace(cs.DB, key, "del")
+		} else {
+			e.notifyKeyspace(cs.DB, key, "expire")
+		}
+	}
 	return reply
 }
 
@@ -185,6 +205,7 @@ func cmdPTTL(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdPersist(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
+	var removed bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, found := s.Lookup(cs.DB, key)
 		if !found || ent.ExpireAtMs == 0 {
@@ -193,8 +214,12 @@ func cmdPersist(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		}
 		ent.ExpireAtMs = 0
 		s.Touch(ent)
+		removed = true
 		reply = resp.Int(1)
 	})
+	if removed {
+		e.notifyKeyspace(cs.DB, key, "persist")
+	}
 	return reply
 }
 

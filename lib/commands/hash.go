@@ -20,6 +20,7 @@ func cmdHSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
+	var done bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
@@ -42,8 +43,12 @@ func cmdHSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		if ent != nil {
 			s.Touch(ent) // field set/overwrite mutates the live hash
 		}
+		done = true // Redis emits hset even when no field was new
 		reply = resp.Int(added)
 	})
+	if done {
+		e.notifyKeyspace(cs.DB, key, "hset")
+	}
 	return reply
 }
 
@@ -134,6 +139,8 @@ func cmdHGetAll(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdHDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
+	var n int64
+	var deleted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		switch {
@@ -143,7 +150,6 @@ func cmdHDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			reply = resp.Int(0)
 		default:
 			h := ent.Obj.(*types.Hash)
-			var n int64
 			for _, f := range args[2:] {
 				if h.Del(string(f)) {
 					n++
@@ -154,10 +160,17 @@ func cmdHDel(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			}
 			if h.Len() == 0 {
 				s.Delete(cs.DB, key)
+				deleted = true
 			}
 			reply = resp.Int(n)
 		}
 	})
+	if n > 0 {
+		e.notifyKeyspace(cs.DB, key, "hdel")
+		if deleted {
+			e.notifyKeyspace(cs.DB, key, "del")
+		}
+	}
 	return reply
 }
 
@@ -252,6 +265,7 @@ func cmdHStrLen(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdHSetNX(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key, field, val := string(args[1]), string(args[2]), string(args[3])
 	var reply resp.Value
+	var set bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
@@ -274,8 +288,12 @@ func cmdHSetNX(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		} else {
 			s.Touch(ent)
 		}
+		set = true
 		reply = resp.Int(1)
 	})
+	if set {
+		e.notifyKeyspace(cs.DB, key, "hset")
+	}
 	return reply
 }
 
@@ -286,6 +304,7 @@ func cmdHIncrBy(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key, field := string(args[1]), string(args[2])
 	var reply resp.Value
+	var done bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
@@ -318,8 +337,12 @@ func cmdHIncrBy(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		} else {
 			s.Touch(ent)
 		}
+		done = true
 		reply = resp.Int(cur)
 	})
+	if done {
+		e.notifyKeyspace(cs.DB, key, "hincrby")
+	}
 	return reply
 }
 
@@ -333,6 +356,7 @@ func cmdHIncrByFloat(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key, field := string(args[1]), string(args[2])
 	var reply resp.Value
+	var done bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeHash)
 		if wt {
@@ -366,8 +390,12 @@ func cmdHIncrByFloat(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		} else {
 			s.Touch(ent)
 		}
+		done = true
 		reply = resp.BlobStr(out)
 	})
+	if done {
+		e.notifyKeyspace(cs.DB, key, "hincrbyfloat")
+	}
 	return reply
 }
 

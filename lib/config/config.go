@@ -34,6 +34,9 @@ type ServerConfig struct {
 	LogLevel    string `json:"log_level" default:"info"`
 	RequirePass string `json:"requirepass" default:""`
 	RespTLS     bool   `json:"resp_tls_enabled" default:"false"`
+	// NotifyKeyspaceEvents mirrors Redis's notify-keyspace-events (M5a);
+	// "" = off. Validated at startup against the Redis class letters.
+	NotifyKeyspaceEvents string `json:"notify_keyspace_events" default:""`
 }
 
 // DebugConfig holds feature flags (§8 debug.enabled map).

@@ -35,6 +35,17 @@ func TestDifferentialM3(t *testing.T) {
 	runScripts(t, m3Scripts, "")
 }
 
+// TestDifferentialM5 runs the M5a keyspace-notification script table
+// (CONFIG parity, __keyevent/__keyspace streams, class gating, edge
+// no-event cases, expired, blocking wakes) against Ultima and a real
+// redis-server and diffs every reply and push frame.
+func TestDifferentialM5(t *testing.T) {
+	if testing.Short() || os.Getenv("DIFFERENTIAL") == "0" {
+		t.Skip("differential harness disabled (-short or DIFFERENTIAL=0)")
+	}
+	runScripts(t, m5Scripts, "")
+}
+
 // TestDifferentialAuth runs the requirepass script table against a
 // password-protected pair of servers.
 func TestDifferentialAuth(t *testing.T) {

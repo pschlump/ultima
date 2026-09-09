@@ -241,6 +241,14 @@ func (e *Engine) Close() {
 // shards may already be gone), so they skip deregistration.
 func (e *Engine) Closing() <-chan struct{} { return e.closing }
 
+// SetOnKeyGone installs fn as every shard's key-gone hook (expiry today,
+// eviction in M5b). Call once at engine construction, before serving.
+func (e *Engine) SetOnKeyGone(fn func(db int, key, reason string)) {
+	for _, s := range e.shard {
+		s.OnKeyGone = fn
+	}
+}
+
 // task is one unit of work for a shard goroutine. tok carries the pause
 // token of the transaction the task belongs to (0 = normal task). A nil
 // fn is a park/unpark control message from PauseAll, not work: a park
@@ -399,7 +407,7 @@ func (e *Engine) DBSize(db int) int {
 		go func(i int) {
 			defer wg.Done()
 			e.DoShard(i, func(s *Shard) {
-				s.sweep(e.NowMs(), -1)
+				s.sweep(e.NowMs(), -1, time.Time{})
 				ks := e.dbs[db].ks.Load()
 				total.Add(int64(ks.tab.StripeLen(i)))
 			})
@@ -463,10 +471,22 @@ type Shard struct {
 	// pushes into the key signal the first waiter). Shard-goroutine only.
 	waiters map[tombKey][]*Waiter
 
-	// SweepInterval is the active-expiry period; SweepMax bounds pops per
-	// periodic sweep (time-boxed active expiry, §5.2).
+	// SweepInterval is the base active-expiry period (the cadence relaxes
+	// up to this when sweeps find nothing due); SweepMax bounds pops per
+	// periodic sweep; SweepTimeBox bounds wall-clock time per sweep;
+	// SweepFloor is the fastest cadence under expiry pressure (time-boxed
+	// adaptive active expiry, §5.2 — the active_expire_effort analogue).
 	SweepInterval time.Duration
 	SweepMax      int
+	SweepTimeBox  time.Duration
+	SweepFloor    time.Duration
+
+	// OnKeyGone, when non-nil, is invoked after the shard deletes a key
+	// for a non-command reason — passive expiry in Lookup, active expiry
+	// in sweep (reason "expired"); M5b eviction will reuse it ("evicted").
+	// Runs on the shard goroutine, so the hook must be cheap and
+	// non-blocking. Install once via Engine.SetOnKeyGone before serving.
+	OnKeyGone func(db int, key, reason string)
 
 	// TombCap bounds the tombstone map; shrunk by tests.
 	TombCap int
@@ -485,6 +505,8 @@ func newShard(eng *Engine, id int) *Shard {
 		waiters:       make(map[tombKey][]*Waiter),
 		SweepInterval: 100 * time.Millisecond,
 		SweepMax:      1000,
+		SweepTimeBox:  time.Millisecond,
+		SweepFloor:    10 * time.Millisecond,
 		TombCap:       65536,
 	}
 }
@@ -500,8 +522,9 @@ func (s *Shard) stop() {
 
 func (s *Shard) run() {
 	defer close(s.done)
-	tick := time.NewTicker(s.SweepInterval)
-	defer tick.Stop()
+	interval := s.SweepInterval
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	for {
 		select {
 		case t := <-s.queue:
@@ -514,11 +537,34 @@ func (s *Shard) run() {
 				t.fn(s)
 				close(t.done)
 			}
-		case <-tick.C:
-			s.sweep(s.eng.NowMs(), s.SweepMax)
+		case <-timer.C:
+			expired, more := s.sweep(s.eng.NowMs(), s.SweepMax, time.Now().Add(s.SweepTimeBox))
+			interval = s.nextSweepInterval(interval, expired, more)
+			timer.Reset(interval)
 		case <-s.quit:
 			return
 		}
+	}
+}
+
+// nextSweepInterval adapts the sweep cadence (§5.2): while a sweep stops
+// short with due keys still in the heap (more), halve toward SweepFloor;
+// when a sweep finds nothing due, relax back toward SweepInterval.
+// Call only from run.
+func (s *Shard) nextSweepInterval(cur time.Duration, expired int, more bool) time.Duration {
+	switch {
+	case more:
+		if cur/2 > s.SweepFloor {
+			return cur / 2
+		}
+		return s.SweepFloor
+	case expired == 0:
+		if cur*2 < s.SweepInterval {
+			return cur * 2
+		}
+		return s.SweepInterval
+	default:
+		return cur
 	}
 }
 
@@ -578,6 +624,9 @@ func (s *Shard) Lookup(db int, key string) (*Entry, bool) {
 		s.tombstone(db, key, e.Version)
 		s.tab(db).Delete(item{Key: key})
 		s.eng.ExpiredKeys.Add(1)
+		if s.OnKeyGone != nil {
+			s.OnKeyGone(db, key, "expired")
+		}
 		return nil, false
 	}
 	return e, true
@@ -727,13 +776,21 @@ func (s *Shard) PushExpire(db int, key string, e *Entry) {
 }
 
 // sweep pops due expiry-heap entries and deletes their keys, discarding
-// stale entries. limit bounds pops (negative = unbounded).
-func (s *Shard) sweep(now int64, limit int) int {
+// stale entries. limit bounds pops (negative = unbounded); deadline
+// time-boxes the loop (zero value = no deadline) so a shard with a large
+// due backlog cannot stall its command queue (§5.2). It returns how many
+// keys actually expired and whether due work remained when the loop
+// stopped (cap or deadline hit with the heap top still due) — the
+// pressure signal for the adaptive cadence in run.
+func (s *Shard) sweep(now int64, limit int, deadline time.Time) (expired int, more bool) {
 	popped := 0
 	for limit < 0 || popped < limit {
 		top, ok := s.exp.Peek()
 		if !ok || top.At > now {
-			return popped
+			return expired, false
+		}
+		if !deadline.IsZero() && popped > 0 && time.Now().After(deadline) {
+			return expired, true // top is due; only the clock stopped us
 		}
 		s.exp.Pop()
 		popped++
@@ -746,7 +803,13 @@ func (s *Shard) sweep(now int64, limit int) int {
 			s.tombstone(top.DB, top.Key, e.Version)
 			s.tab(top.DB).Delete(item{Key: top.Key})
 			s.eng.ExpiredKeys.Add(1)
+			expired++
+			if s.OnKeyGone != nil {
+				s.OnKeyGone(top.DB, top.Key, "expired")
+			}
 		}
 	}
-	return popped
+	// Stopped on the pop cap: report pressure if the next entry is due.
+	top, ok := s.exp.Peek()
+	return expired, ok && top.At <= now
 }

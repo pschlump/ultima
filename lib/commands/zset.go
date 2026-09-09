@@ -127,6 +127,16 @@ pairs:
 		if ent != nil && (added > 0 || changed > 0) {
 			s.Touch(ent)
 		}
+		if added > 0 || changed > 0 {
+			// Publish before waking (see pushCmd in list.go): a woken
+			// BZPOPMIN/BZMPOP pops and publishes on its own goroutine.
+			// zaddGenericCommand: INCR mode notifies "zincr", plain "zadd".
+			ev := "zadd"
+			if incr {
+				ev = "zincr"
+			}
+			e.notifyKeyspace(cs.DB, key, ev)
+		}
 		if added > 0 || (incr && processed) {
 			// The key holds members now; a parked BZPOPMIN/BZMPOP waiter
 			// (registered while the key was missing) can proceed.
@@ -189,7 +199,8 @@ func cmdZIncrBy(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 		} else {
 			s.Touch(ent)
 		}
-		s.WakeWaiter(cs.DB, key) // serve parked BZPOPMIN/BZMPOP waiters
+		e.notifyKeyspace(cs.DB, key, "zincr") // before the wake: see pushCmd
+		s.WakeWaiter(cs.DB, key)              // serve parked BZPOPMIN/BZMPOP waiters
 		reply = resp.Double(score)
 	})
 	return reply
@@ -265,6 +276,8 @@ func cmdZCard(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 func cmdZRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	key := string(args[1])
 	var reply resp.Value
+	var n int64
+	var deleted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		switch {
@@ -274,7 +287,6 @@ func cmdZRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			reply = resp.Int(0)
 		default:
 			z := ent.Obj.(*types.ZSet)
-			var n int64
 			for _, m := range args[2:] {
 				if z.Remove(string(m)) {
 					n++
@@ -285,10 +297,17 @@ func cmdZRem(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			}
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)
+				deleted = true
 			}
 			reply = resp.Int(n)
 		}
 	})
+	if n > 0 {
+		e.notifyKeyspace(cs.DB, key, "zrem")
+		if deleted {
+			e.notifyKeyspace(cs.DB, key, "del")
+		}
+	}
 	return reply
 }
 
@@ -692,6 +711,8 @@ func cmdZRemRangeByRank(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
+	var n int
+	var deleted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		switch {
@@ -703,16 +724,23 @@ func cmdZRemRangeByRank(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			z := ent.Obj.(*types.ZSet)
 			req := zrangeReq{mode: byIndex, start: start, stop: stop}
 			lo, hi := req.window(z)
-			n := z.RemoveRankRange(lo, hi-1)
+			n = z.RemoveRankRange(lo, hi-1)
 			if n > 0 {
 				s.Touch(ent)
 			}
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)
+				deleted = true
 			}
 			reply = resp.Int(int64(n))
 		}
 	})
+	if n > 0 {
+		e.notifyKeyspace(cs.DB, key, "zremrangebyrank")
+		if deleted {
+			e.notifyKeyspace(cs.DB, key, "del")
+		}
+	}
 	return reply
 }
 
@@ -722,7 +750,7 @@ func cmdZRemRangeByScore(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	if !ok1 || !ok2 {
 		return errBadFloatRange
 	}
-	return zRemRange(e, cs, args[1], func(z *types.ZSet) (int, int) {
+	return zRemRange(e, cs, args[1], "zremrangebyscore", func(z *types.ZSet) (int, int) {
 		return z.ScoreRangeLoc(minB.val, maxB.val, minB.excl, maxB.excl)
 	})
 }
@@ -735,15 +763,17 @@ func cmdZRemRangeByLex(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	}
 	lk, lv := lexKind(minB)
 	hk, hv := lexKind(maxB)
-	return zRemRange(e, cs, args[1], func(z *types.ZSet) (int, int) {
+	return zRemRange(e, cs, args[1], "zremrangebylex", func(z *types.ZSet) (int, int) {
 		return z.LexRangeLoc(lk, lv, hk, hv)
 	})
 }
 
 // zRemRange deletes the window [lo, hi) and reports the count.
-func zRemRange(e *Engine, cs *ConnState, keyB []byte, loc func(*types.ZSet) (int, int)) resp.Value {
+func zRemRange(e *Engine, cs *ConnState, keyB []byte, event string, loc func(*types.ZSet) (int, int)) resp.Value {
 	key := string(keyB)
 	var reply resp.Value
+	var n int
+	var deleted bool
 	e.do(cs, keyB, func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		switch {
@@ -757,16 +787,23 @@ func zRemRange(e *Engine, cs *ConnState, keyB []byte, loc func(*types.ZSet) (int
 			if lo > hi {
 				lo, hi = 0, 0
 			}
-			n := z.RemoveRankRange(lo, hi-1)
+			n = z.RemoveRankRange(lo, hi-1)
 			if n > 0 {
 				s.Touch(ent)
 			}
 			if z.Len() == 0 {
 				s.Delete(cs.DB, key)
+				deleted = true
 			}
 			reply = resp.Int(int64(n))
 		}
 	})
+	if n > 0 {
+		e.notifyKeyspace(cs.DB, key, event)
+		if deleted {
+			e.notifyKeyspace(cs.DB, key, "del")
+		}
+	}
 	return reply
 }
 
@@ -845,6 +882,7 @@ func zPopCmd(e *Engine, cs *ConnState, args [][]byte, fromMin bool) resp.Value {
 	}
 	key := string(args[1])
 	var reply resp.Value
+	var didPop, deleted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		ent, wt := getColl(s, cs.DB, key, shard.TypeZSet)
 		if wt {
@@ -857,6 +895,7 @@ func zPopCmd(e *Engine, cs *ConnState, args [][]byte, fromMin bool) resp.Value {
 		}
 		z := ent.Obj.(*types.ZSet)
 		n := min(int(count), z.Len())
+		didPop = true
 		popped := make([]types.ZElem, 0, n)
 		for range n {
 			i := 0
@@ -870,6 +909,7 @@ func zPopCmd(e *Engine, cs *ConnState, args [][]byte, fromMin bool) resp.Value {
 		s.Touch(ent)
 		if z.Len() == 0 {
 			s.Delete(cs.DB, key)
+			deleted = true
 		}
 		if !hasCount {
 			el := popped[0]
@@ -894,6 +934,16 @@ func zPopCmd(e *Engine, cs *ConnState, args [][]byte, fromMin bool) resp.Value {
 		}
 		reply = resp.Arr(out...)
 	})
+	if didPop {
+		ev := "zpopmax"
+		if fromMin {
+			ev = "zpopmin"
+		}
+		e.notifyKeyspace(cs.DB, key, ev)
+		if deleted {
+			e.notifyKeyspace(cs.DB, key, "del")
+		}
+	}
 	return reply
 }
 
@@ -1257,9 +1307,10 @@ func zStoreCmd(e *Engine, cs *ConnState, args [][]byte, cmd string, intersect bo
 	acc := zAggregate(snaps, intersect, weights, aggregate)
 	dest := string(args[1])
 	var reply resp.Value
+	var deleted bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		if len(acc) == 0 {
-			s.Delete(cs.DB, dest)
+			deleted = s.Delete(cs.DB, dest)
 			reply = resp.Int(0)
 			return
 		}
@@ -1270,6 +1321,13 @@ func zStoreCmd(e *Engine, cs *ConnState, args [][]byte, cmd string, intersect bo
 		storeColl(s, cs.DB, dest, shard.TypeZSet, z)
 		reply = resp.Int(int64(len(acc)))
 	})
+	// zstoreGenericCommand: the store event name equals the command name;
+	// an empty result that removed an existing dest emits "del" instead.
+	if len(acc) > 0 {
+		e.notifyKeyspace(cs.DB, dest, cmd)
+	} else if deleted {
+		e.notifyKeyspace(cs.DB, dest, "del")
+	}
 	return reply
 }
 

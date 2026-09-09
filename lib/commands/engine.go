@@ -107,6 +107,12 @@ type Engine struct {
 	save        atomic.Value // string
 	appendOnly  atomic.Bool
 
+	// Keyspace notifications (M5): notifyFlags is the parsed
+	// notify-keyspace-events class bitmask (hot-path gate in
+	// notifyKeyspace); CONFIG GET renders it back to the canonical
+	// string (notifyFlagsToString), as Redis does.
+	notifyFlags atomic.Uint64
+
 	clientID   atomic.Uint64
 	conns      atomic.Int64
 	totalConns atomic.Int64
@@ -140,6 +146,11 @@ func NewEngine(sh *shard.Engine, version string, respPort int) *Engine {
 	e.monitors = map[uint64]func(MonitorEvent){}
 	e.requirePass.Store("")
 	e.save.Store("3600 1 300 100 60 10000")
+	// Expiry-driven keyspace notifications (M5): the shard engine reports
+	// passive/active expiry deletions; route them to the broker.
+	sh.SetOnKeyGone(func(db int, key, reason string) {
+		e.notifyKeyspace(db, key, reason)
+	})
 	return e
 }
 

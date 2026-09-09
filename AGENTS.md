@@ -30,8 +30,14 @@ both ride the shared `lib/envelope` bridge. Exit criteria met: Go client
 round-trip (tests use the generated gRPC client), TypeScript round-trip
 (`tests/ts-roundtrip`, protobuf-es over `/ws/v1`, strict `tsc` typecheck),
 and a RESP↔gRPC wire-byte parity gate (`tests/m4_parity_test.go`). The
-parity gate also smoked out a P0 gap closed in M4: INCRBYFLOAT. Later
-milestones from the design layout
+parity gate also smoked out a P0 gap closed in M4: INCRBYFLOAT. M5 is
+under way per `docs/m5-detailed-plan.md`: **M5a is done** — keyspace
+notifications (`notify-keyspace-events`, K/E classes on
+`__keyspace@<db>__`/`__keyevent@<db>__` channels over the M3 broker,
+differential-green incl. expiry events) and expiry hardening (time-boxed
+adaptive sweep). M5b (maxmemory eviction), M5c (`lib/persist` snapshot +
+AOF) and M5d (soak benchmark) are pending. Later milestones from the
+design layout
 (§14.1: `lib/persist`, `clients/`, `web/`, `api/`, extra CLIs under
 `cmd/`) do **not** exist yet.
 
@@ -102,9 +108,11 @@ ZRANGEBYLEX/ZREVRANGE/ZREVRANGEBYSCORE/ZREMRANGEBYRANK/ZREMRANGEBYSCORE/
 ZREMRANGEBYLEX/ZCARD/ZCOUNT/ZLEXCOUNT/ZREM/ZPOPMIN/ZPOPMAX/ZRANDMEMBER/
 ZDIFF/ZINTER/ZUNION/ZINTERSTORE/ZUNIONSTORE/ZSCAN). M3/P2 — transactions
 (MULTI/EXEC/DISCARD/WATCH/UNWATCH, RESET), pub/sub (SUBSCRIBE/UNSUBSCRIBE/
-PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH/PUBSUB; SSUBSCRIBE deferred to M8,
-keyspace notifications to M5) and blocking ops (BLPOP/BRPOP/BLMPOP/
-BLMOVE/BRPOPLPUSH, BZPOPMIN/BZPOPMAX/BZMPOP). Value types: strings
+PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH/PUBSUB; SSUBSCRIBE deferred to M8) and
+blocking ops (BLPOP/BRPOP/BLMPOP/
+BLMOVE/BRPOPLPUSH, BZPOPMIN/BZPOPMAX/BZMPOP). M5a adds
+`notify-keyspace-events` keyspace notifications (CONFIG key, off by
+default). Value types: strings
 plus the four collections (`lib/types`). Ultima reports Redis compatibility
 version 7.2.7 (`commands.CompatVersion`).
 
@@ -128,6 +136,32 @@ M3 architecture notes:
   call `Shard.WakeWaiter`; the connection goroutine parks on a channel
   — never a shard goroutine. `shard.Engine.Closing()` unparks everyone
   on shutdown.
+
+M5a architecture notes:
+
+- **Keyspace notifications** (`lib/commands/notify.go`): `notify-keyspace-events`
+  class bitmask on `commands.Engine` (parsed per Redis 7.2.7 letters
+  `Ag$lshzxeKEtmdn`; CONFIG GET re-renders from the bitmask like Redis —
+  `KEA` → `AKE`). Handlers call `Engine.notifyKeyspace(db, key, event)`
+  after their shard closures return (deterministic arg order), EXCEPT
+  commands whose mutation calls `Shard.WakeWaiter` (list pushes, LMOVE/BLMOVE
+  dest, ZADD/ZINCRBY, and the blocking pops themselves): those publish
+  inside the shard closure BEFORE waking, because the woken connection
+  goroutine can otherwise pop and publish its own event first (Redis's
+  single-threaded order guarantees pusher-event-before-woken-pop-event;
+  the publish itself is broker-mutex-guarded and non-blocking, safe from
+  a shard goroutine). It publishes over the M3 broker to
+  `__keyspace@<db>__:<key>` (K, payload = event; published first, like
+  Redis) and `__keyevent@<db>__:<event>` (E, payload = key). Expiry
+  deletions reach it via `Shard.OnKeyGone` (reason `expired`; M5b will
+  reuse it for `evicted`). Known divergence: `SET k v PXAT <past>` —
+  Ultima deletes inline at command time (no later lazy `expired` event;
+  replies match Redis).
+- **Expiry hardening**: `Shard.sweep` is time-boxed (`SweepTimeBox`, 1 ms)
+  in addition to the `SweepMax` pop cap, and the cadence is adaptive —
+  halving toward `SweepFloor` (10 ms) while sweeps stop with due work
+  left, relaxing back to `SweepInterval` (100 ms) when clean
+  (`nextSweepInterval`; the `active_expire_effort` analogue, §5.2).
 
 ## Code Organization
 
@@ -154,7 +188,9 @@ lib/commands/        front-end-agnostic command engine; table.go is the command 
                      hash.go/list.go/set.go/zset.go hold the P1 handlers, coll.go the
                      shared parsing helpers (string2d-exact floats, range bounds);
                      tx.go (M3 MULTI/EXEC/WATCH), pubsub.go (M3 subscriptions + gate),
-                     block.go (M3 blocking ops, park/wake engine)
+                     block.go (M3 blocking ops, park/wake engine),
+                     notify.go (M5a notify-keyspace-events: class parser,
+                     notifyKeyspace emission point)
 lib/envelope/        shared bridge (M4): protobuf Command → engine argv, resp.Value ↔
                      protobuf Value (RESP3 mirror; FromProto is the inverse, used by
                      the RESP↔gRPC wire-byte parity gate); used by grpcsrv and wssrv (D3/D15)
@@ -232,7 +268,9 @@ values are expanded from the environment (`lib/config/config.go`).
    Scripts live in `scripts.go` (P0), `scripts_p1.go` (P1), `scripts_m3.go`
    (P2: transactions, pub/sub, blocking — uses the multi-connection
    `cmdOn`/`sendOn`/`recvOn`/`expectPush` step constructors documented in
-   `compare.go`); extend the appropriate file when adding commands.
+   `compare.go`), `scripts_m5.go` (M5a: keyspace notifications — notify
+   scripts must reset `notify-keyspace-events ""` at the end; config
+   persists across scripts); extend the appropriate file when adding commands.
 
 Running `go test ./...` also compiles `note/grpc-vs-text-benchmark` and
 `note/crc-probe` (scratch modules kept for reference).

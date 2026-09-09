@@ -326,6 +326,14 @@ var configParams = []configParam{
 			e.maxMemory.Store(n)
 			return resp.Value{}, false
 		}},
+	{name: "notify-keyspace-events",
+		get: func(e *Engine) string { return e.NotifyKeyspaceEvents() },
+		set: func(e *Engine, v string) (resp.Value, bool) {
+			if !e.SetNotifyKeyspaceEvents(v) {
+				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'notify-keyspace-events') - Invalid event class character. Use '" + notifyClassChars + "'."), true
+			}
+			return resp.Value{}, false
+		}},
 	{name: "requirepass",
 		get: func(e *Engine) string { return e.RequirePass() }, // Redis 7.2 does not mask it
 		set: func(e *Engine, v string) (resp.Value, bool) {

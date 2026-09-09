@@ -150,7 +150,7 @@ func TestPassiveAndActiveExpiry(t *testing.T) {
 		s.PushExpire(0, "a", ent)
 	})
 	e.Do(0, []byte("a"), func(s *Shard) {
-		s.sweep(now, -1)
+		s.sweep(now, -1, time.Time{})
 		if _, ok := s.tab(0).Search(item{Key: "a"}); ok {
 			t.Error("active sweep: expired key not removed")
 		}
@@ -165,7 +165,7 @@ func TestPassiveAndActiveExpiry(t *testing.T) {
 		s.PushExpire(0, "r", ent) // ExpGen bumps; the past-due heap item is stale
 	})
 	e.Do(0, []byte("r"), func(s *Shard) {
-		s.sweep(now, -1)
+		s.sweep(now, -1, time.Time{})
 		if _, ok := s.Lookup(0, "r"); !ok {
 			t.Error("stale expiry heap entry deleted a renewed key")
 		}
@@ -349,7 +349,7 @@ func TestWatchDirtySweep(t *testing.T) {
 	epoch, ver := watchVersion(e, 0, "k")
 	cur += 2000
 	e.Do(0, []byte("k"), func(s *Shard) {
-		s.sweep(cur, -1)
+		s.sweep(cur, -1, time.Time{})
 	})
 	if !watchDirty(e, 0, "k", epoch, ver) {
 		t.Error("not dirty after sweep-driven expiry of watched key")
@@ -590,5 +590,84 @@ func TestPauseAllSerializes(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("concurrent PauseAll deadlocked")
+	}
+}
+
+// TestNextSweepInterval covers the adaptive sweep cadence (§5.2): under
+// pressure (more) the interval halves toward SweepFloor; an empty sweep
+// relaxes it back toward SweepInterval; a sweep that cleared something
+// without pressure leaves it unchanged.
+func TestNextSweepInterval(t *testing.T) {
+	s := &Shard{SweepInterval: 100 * time.Millisecond, SweepFloor: 10 * time.Millisecond}
+	cases := []struct {
+		cur     time.Duration
+		expired int
+		more    bool
+		want    time.Duration
+	}{
+		{100 * time.Millisecond, 5, true, 50 * time.Millisecond},  // halve
+		{20 * time.Millisecond, 5, true, 10 * time.Millisecond},   // at floor
+		{15 * time.Millisecond, 5, true, 10 * time.Millisecond},   // half under floor: clamp
+		{10 * time.Millisecond, 5, true, 10 * time.Millisecond},   // floor holds
+		{100 * time.Millisecond, 0, true, 50 * time.Millisecond},  // more beats expired==0
+		{50 * time.Millisecond, 0, false, 100 * time.Millisecond}, // relax doubles
+		{30 * time.Millisecond, 0, false, 60 * time.Millisecond},
+		{100 * time.Millisecond, 0, false, 100 * time.Millisecond}, // at ceiling
+		{200 * time.Millisecond, 0, false, 100 * time.Millisecond}, // clamp to ceiling
+		{37 * time.Millisecond, 3, false, 37 * time.Millisecond},   // cleared, no pressure: hold
+	}
+	for _, tc := range cases {
+		if got := s.nextSweepInterval(tc.cur, tc.expired, tc.more); got != tc.want {
+			t.Errorf("nextSweepInterval(%v, %d, %v) = %v, want %v",
+				tc.cur, tc.expired, tc.more, got, tc.want)
+		}
+	}
+}
+
+// TestSweepTimeBox stores 500 already-due keys on one shard and checks that
+// a sweep with an expired deadline stops short and reports pressure (more),
+// and that an unbounded sweep then clears the rest. Store and both sweeps
+// run inside a single shard task so the periodic sweep timer cannot
+// interleave.
+func TestSweepTimeBox(t *testing.T) {
+	e := NewEngine(4, 16)
+	defer e.Close()
+	const n = 500
+	keys := make([][]byte, 0, n)
+	for i := 0; len(keys) < n; i++ {
+		k := []byte(fmt.Sprintf("sweep:%d", i))
+		if e.ShardIndex(k) == 0 {
+			keys = append(keys, k)
+		}
+	}
+	var expired1, expired2 int
+	var more1, more2 bool
+	e.Do(0, keys[0], func(s *Shard) {
+		past := e.NowMs() - 1000
+		for _, k := range keys {
+			ent := &Entry{Type: TypeString, Str: []byte("v"), ExpireAtMs: past}
+			s.Store(0, string(k), ent)
+			s.PushExpire(0, string(k), ent)
+		}
+		// Deadline already in the past: exactly one pop, then the clock
+		// stops the loop with 499 due keys still queued.
+		expired1, more1 = s.sweep(past+2000, -1, time.Now().Add(-time.Second))
+		if !more1 {
+			t.Errorf("time-boxed sweep: more = false, want true (expired %d of %d)", expired1, n)
+		}
+		if expired1 <= 0 || expired1 >= n {
+			t.Errorf("time-boxed sweep: expired = %d, want in (0, %d)", expired1, n)
+		}
+		// No deadline, no cap: clears the rest.
+		expired2, more2 = s.sweep(past+2000, -1, time.Time{})
+	})
+	if more2 {
+		t.Errorf("unbounded sweep: more = true, want false")
+	}
+	if expired1+expired2 != n {
+		t.Errorf("total expired = %d + %d = %d, want %d", expired1, expired2, expired1+expired2, n)
+	}
+	if got := e.DBSize(0); got != 0 {
+		t.Errorf("DBSize after full sweep = %d, want 0", got)
 	}
 }
