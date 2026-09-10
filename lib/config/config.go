@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"reflect"
 	"regexp"
@@ -40,9 +41,17 @@ type PersistConfig struct {
 
 // ServerConfig holds the three listener addresses and server knobs.
 type ServerConfig struct {
-	RespAddr    string `json:"resp_addr" default:":6379"`
-	GrpcAddr    string `json:"grpc_addr" default:":6380"`
-	HTTPAddr    string `json:"http_addr" default:":6381"`
+	RespAddr string `json:"resp_addr" default:":6379"`
+	GrpcAddr string `json:"grpc_addr" default:":6380"`
+	HTTPAddr string `json:"http_addr" default:":6381"`
+	// HTTPAddrs is a comma-separated list of ADDITIONAL HTTP listen
+	// addresses bound alongside http_addr (the HTTP/WS surface listens on
+	// all of them at once). Entries may be full host:port ("[::1]:6381")
+	// or bare IPs/hostnames ("192.168.1.143", "::1"), which inherit
+	// http_addr's port. An entry whose IP is not on any local interface
+	// (e.g. a laptop that moved networks) is skipped with a startup
+	// warning; other bind failures are fatal.
+	HTTPAddrs   string `json:"http_addrs" default:""`
 	ShardCount  int    `json:"shard_count" default:"0"`   // 0 = 4×GOMAXPROCS, power of two
 	MaxDBs      int    `json:"max_dbs" default:"16"`      // logical DBs for SELECT (§13.3)
 	MaxMemoryMB int    `json:"max_memory_mb" default:"0"` // 0 = unlimited (CONFIG maxmemory)
@@ -59,6 +68,34 @@ type ServerConfig struct {
 	// GET /metrics (M6c, §10.1); parsed into []*net.IPNet at startup,
 	// bare IPs become /32 or /128.
 	MetricsAllow string `json:"metrics_allow" default:"127.0.0.0/8,::1"`
+}
+
+// HTTPListenAddrs resolves every address the HTTP surface binds: http_addr
+// first, then each http_addrs entry, with bare IPs/hostnames (no port)
+// inheriting http_addr's port.
+func (c ServerConfig) HTTPListenAddrs() ([]string, error) {
+	_, port, err := net.SplitHostPort(c.HTTPAddr)
+	if err != nil {
+		return nil, fmt.Errorf("http_addr %q: %w", c.HTTPAddr, err)
+	}
+	out := []string{c.HTTPAddr}
+	for _, part := range strings.Split(c.HTTPAddrs, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, _, err := net.SplitHostPort(part); err == nil {
+			out = append(out, part)
+			continue
+		}
+		host := strings.TrimPrefix(strings.TrimSuffix(part, "]"), "[")
+		if ip, err := netip.ParseAddr(host); err == nil {
+			out = append(out, net.JoinHostPort(ip.String(), port))
+			continue
+		}
+		out = append(out, net.JoinHostPort(host, port))
+	}
+	return out, nil
 }
 
 // DebugConfig holds feature flags (§8 debug.enabled map).

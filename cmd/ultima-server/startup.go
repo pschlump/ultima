@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -34,7 +35,7 @@ type servers struct {
 	grpcLis net.Listener
 	grpcSrv *grpc.Server
 	httpSrv *http.Server
-	httpLis net.Listener
+	httpLis []net.Listener
 	shards  *shard.Engine
 	persist *persist.Manager
 	wssess  *wssession.Registry
@@ -90,10 +91,36 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 		_ = s.respLis.Close()
 		return nil, fmt.Errorf("grpc listen %s: %w", cfg.Server.GrpcAddr, err)
 	}
-	if s.httpLis, err = net.Listen("tcp", cfg.Server.HTTPAddr); err != nil {
+	// The HTTP/WS surface binds http_addr plus every http_addrs entry.
+	httpAddrs, err := cfg.Server.HTTPListenAddrs()
+	if err != nil {
 		_ = s.respLis.Close()
 		_ = s.grpcLis.Close()
-		return nil, fmt.Errorf("http listen %s: %w", cfg.Server.HTTPAddr, err)
+		return nil, err
+	}
+	for _, addr := range httpAddrs {
+		lis, err := net.Listen("tcp", addr)
+		if err != nil {
+			// An address that isn't on any local interface (a laptop that
+			// moved networks) is skipped with a warning; real conflicts
+			// (port in use, bad address) stay fatal.
+			if errors.Is(err, syscall.EADDRNOTAVAIL) {
+				logger.Warn("http listen address not on this host, skipping", "addr", addr)
+				continue
+			}
+			_ = s.respLis.Close()
+			_ = s.grpcLis.Close()
+			for _, l := range s.httpLis {
+				_ = l.Close()
+			}
+			return nil, fmt.Errorf("http listen %s: %w", addr, err)
+		}
+		s.httpLis = append(s.httpLis, lis)
+	}
+	if len(s.httpLis) == 0 {
+		_ = s.respLis.Close()
+		_ = s.grpcLis.Close()
+		return nil, fmt.Errorf("http: no listen address available (all of %q unavailable)", strings.Join(httpAddrs, ", "))
 	}
 
 	s.shards = shard.NewEngine(cfg.Server.ShardCount, cfg.Server.MaxDBs)
@@ -174,16 +201,24 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 		Handler:           newRouter(logger, eng, s.persist, authSvc, s.wssess, metricsAllow),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	go func() {
-		if err := s.httpSrv.Serve(s.httpLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("http listener died", "err", err)
-		}
-	}()
+	// One http.Server over every bound listener; Shutdown(ctx) closes them
+	// all (Serve registers each listener with the server).
+	for _, lis := range s.httpLis {
+		go func() {
+			if err := s.httpSrv.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("http listener died", "addr", lis.Addr().String(), "err", err)
+			}
+		}()
+	}
 
+	httpBound := make([]string, 0, len(s.httpLis))
+	for _, lis := range s.httpLis {
+		httpBound = append(httpBound, lis.Addr().String())
+	}
 	logger.Info("ultima-server listening",
 		"resp_addr", s.respLis.Addr().String(),
 		"grpc_addr", s.grpcLis.Addr().String(),
-		"http_addr", s.httpLis.Addr().String(),
+		"http_addr", strings.Join(httpBound, ","),
 		"shards", s.shards.ShardCount(),
 		"dbs", s.shards.MaxDBs(),
 	)

@@ -437,6 +437,7 @@ so CONFIG GET replies diff byte-exact against Redis):
     "resp_addr": ":6379",
     "grpc_addr": ":6380",
     "http_addr": ":6381",
+    "http_addrs": "",
     "shard_count": 0,
     "max_memory_mb": 0,
     "maxmemory_policy": "noeviction",

@@ -92,6 +92,43 @@ func TestFromFileEnvSubstitutionUnsetVar(t *testing.T) {
 	}
 }
 
+func TestHTTPListenAddrs(t *testing.T) {
+	cfg := ServerConfig{HTTPAddr: "127.0.0.1:6381"}
+	addrs, err := cfg.HTTPListenAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addrs) != 1 || addrs[0] != "127.0.0.1:6381" {
+		t.Errorf("addrs = %v, want [127.0.0.1:6381]", addrs)
+	}
+
+	cfg.HTTPAddrs = "[::1]:6382, 192.168.1.143, ::1 , example.com"
+	addrs, err = cfg.HTTPListenAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"127.0.0.1:6381",
+		"[::1]:6382",         // explicit port kept
+		"192.168.1.143:6381", // bare IPv4 inherits the port
+		"[::1]:6381",         // bare IPv6 inherits the port, bracketed
+		"example.com:6381",   // bare hostname inherits the port
+	}
+	if len(addrs) != len(want) {
+		t.Fatalf("addrs = %v, want %v", addrs, want)
+	}
+	for i := range want {
+		if addrs[i] != want[i] {
+			t.Errorf("addrs[%d] = %q, want %q", i, addrs[i], want[i])
+		}
+	}
+
+	bad := ServerConfig{HTTPAddr: "no-port"}
+	if _, err := bad.HTTPListenAddrs(); err == nil {
+		t.Error("expected error for http_addr without a port")
+	}
+}
+
 func TestFromFileMissingFile(t *testing.T) {
 	var cfg Config
 	if err := FromFile(filepath.Join(t.TempDir(), "nope.json"), &cfg); err == nil {

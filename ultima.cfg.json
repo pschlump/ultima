@@ -2,7 +2,7 @@
   "server": {
     "resp_addr": ":6379",
     "grpc_addr": ":6380",
-    "http_addr": ":6381",
+    "http_addrs": "[::1], 192.168.1.143, 192.168.0.195",
     "shard_count": 0,
     "log_level": "info",
     "requirepass": "$ENV$ultima_password"
