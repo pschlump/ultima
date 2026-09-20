@@ -1,7 +1,7 @@
 // Keys: /keys/scan cursor pager with match/count inputs; click a key for a
 // typed KeyPreview (per-type value rendering + TTL); delete button.
 import { useCallback, useEffect, useState } from "react";
-import { api, ApiError, type KeyPreview, type ZSetMember } from "../lib/api";
+import { api, ApiError, type KeyPreview, type ZSetMember } from "../lib/client";
 
 function fmtTtl(ms: number): string {
   if (ms < 0) return "no TTL";

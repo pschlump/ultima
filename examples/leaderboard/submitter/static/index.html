@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ultima leaderboard demo</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #101418; color: #dde3ea; margin: 2rem; }
+  h1 { font-size: 1.3rem; }
+  #status { display: inline-block; padding: .15rem .6rem; border-radius: 1rem; font-size: .8rem; background: #555; }
+  #status.open { background: #1f7a3d; }
+  #status.reconnecting, #status.connecting { background: #8a6d1a; }
+  #status.closed { background: #8a1a1a; }
+  #note { color: #9aa7b4; font-size: .85rem; min-height: 1.2em; }
+  table { border-collapse: collapse; margin-top: 1rem; min-width: 22rem; }
+  td, th { border: 1px solid #2a323b; padding: .3rem .8rem; text-align: left; }
+  th { background: #1a2129; }
+  tr.flash td { background: #26415c; transition: background .1s; }
+  button { font: inherit; background: #26415c; color: inherit; border: 1px solid #3a5a7c; border-radius: .3rem; padding: .3rem .8rem; cursor: pointer; }
+  label { font-size: .85rem; color: #9aa7b4; }
+  input { font: inherit; background: #1a2129; color: inherit; border: 1px solid #2a323b; border-radius: .3rem; padding: .25rem .5rem; width: 12rem; }
+</style>
+</head>
+<body>
+<h1>Ultima live leaderboard</h1>
+<p>
+  <span id="status">connecting</span>
+  <button id="drop">simulate network drop</button>
+</p>
+<p id="note"></p>
+<p><label>Ultima server <input id="addr" value="127.0.0.1:6381"></label>
+   <button id="reconnect">connect</button></p>
+<table>
+  <thead><tr><th>#</th><th>player</th><th>score</th></tr></thead>
+  <tbody id="board"></tbody>
+</table>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

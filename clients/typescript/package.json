@@ -1,0 +1,31 @@
+{
+  "name": "@ultima/client",
+  "version": "0.7.0",
+  "description": "TypeScript client for Ultima: /ws/v1 WebSocket client with resumable sessions (design doc §9.4), REST management API client, and token management (§11.2)",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./react": "./src/react.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test/roundtrip.ts"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.0",
+    "@types/react": "^19.0.0",
+    "bun-types": "^1.4.2",
+    "typescript": "^5.9.0"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  }
+}

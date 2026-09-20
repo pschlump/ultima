@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rootDir": "../..",
+    "outDir": "dist/types",
+    "lib": ["es2022", "dom"],
+    "paths": {
+      "@bufbuild/protobuf": ["../typescript/node_modules/@bufbuild/protobuf/dist/esm/index.d.ts"],
+      "@bufbuild/protobuf/codegenv2": ["../typescript/node_modules/@bufbuild/protobuf/dist/esm/codegenv2/index.d.ts"]
+    }
+  },
+  "include": ["../typescript/src/index.ts"]
+}

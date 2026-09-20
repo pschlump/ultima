@@ -3,4 +3,10 @@ note
 /ultima-server
 tests/ts-roundtrip/node_modules/
 web/node_modules/
+clients/typescript/node_modules/
+clients/javascript/node_modules/
+clients/javascript/dist/
 /keys/
+/ultima-cli
+/ultima-ws-cli
+/ultima-grpc-cli

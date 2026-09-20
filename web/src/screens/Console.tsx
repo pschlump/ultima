@@ -5,9 +5,8 @@
 // SESSION_EXPIRED resets.
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { Value } from "../../../gen/ts/ultima/v1/command_pb";
-import { getTokens } from "../lib/api";
+import { newUltimaWS, UltimaWS, type WSState } from "../lib/client";
 import { parseLine } from "../lib/cmdline";
-import { UltimaWS, type WSState } from "../lib/ws";
 import { ValueView } from "../components/ValueView";
 
 interface Line {
@@ -36,9 +35,9 @@ export function Console() {
   }, []);
 
   useEffect(() => {
-    const ws = new UltimaWS(() => getTokens()?.accessToken ?? null, {
+    const ws = newUltimaWS({
       onPush: (value) => append({ kind: "push", value }),
-      onSessionReset: () => {
+      onGap: () => {
         setSessionExpired(true);
         append({ kind: "note", text: "SESSION_EXPIRED — the session was lost; re-issue SUBSCRIBE commands." });
       },
@@ -70,7 +69,7 @@ export function Console() {
     const ws = wsRef.current;
     if (!ws) return;
     try {
-      const value = await ws.exec(parsed.command, parsed.args);
+      const value = await ws.exec(parsed.command, ...parsed.args);
       append({ kind: "reply", value });
     } catch (err) {
       append({ kind: "error", text: String(err) });

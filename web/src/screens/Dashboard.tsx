@@ -3,7 +3,7 @@
 // maxmemory bar, expired/evicted counters, pubsub counts, and a per-shard
 // heatmap grid colored by keys (click a cell for the exact numbers).
 import { useEffect, useRef, useState } from "react";
-import { api, type Info, type ShardStat } from "../lib/api";
+import { api, type Info, type ShardStat } from "../lib/client";
 
 function num(s: string | undefined): number {
   const n = Number(s);

@@ -1,9 +1,11 @@
-// Auth context (design doc §9.3, §10.2). Boot probe: GET /api/v1/info with
-// any stored token — 200 enters the app (a 200 without a token means the
-// server runs with auth.enabled=false, pre-M6 posture); 401 tries one
-// refresh, else the login screen. The account class is read from the JWT
-// access-token payload (`class` and `sub` claims, lib/auth/tokens.go) —
-// decoded, not verified (the server verifies).
+// Auth context (design doc §9.3, §10.2) — a thin React wrapper over
+// @ultima/client's AuthManager (lib/client.ts): the boot probe asks whether
+// the server requires auth (GET /api/v1/info without a token — 200 means
+// auth.enabled=false, the pre-M6 posture), a stored token that still
+// verifies (or refreshes) enters the app, otherwise the login screen.
+// The account class is read from the JWT access-token payload (`class` and
+// `sub` claims, lib/auth/tokens.go) — decoded, not verified (the server
+// verifies).
 import {
   createContext,
   useCallback,
@@ -13,7 +15,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, getTokens, onSessionExpired, refreshSession, setTokens, type AccountClass } from "./api";
+import { auth, onSessionExpired, type AccountClass } from "./client";
 
 export interface Session {
   username: string;
@@ -32,34 +34,11 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-/** Decode the JWT payload segment without verifying (server-side verifies). */
-function decodeJwtClaims(token: string): { sub: string; class: AccountClass } | null {
-  const parts = token.split(".");
-  const payload = parts[1];
-  if (!payload) return null;
-  try {
-    const b64 = payload.replace(/-/g, "+").replace(/_/g, "/");
-    const json = JSON.parse(atob(b64)) as { sub?: unknown; class?: unknown };
-    if (typeof json.sub !== "string" || json.sub === "") return null;
-    const cls: AccountClass = json.class === "admin" ? "admin" : "data";
-    return { sub: json.sub, class: cls };
-  } catch {
-    return null;
-  }
-}
-
-function sessionFromToken(accessToken: string): Session | null {
-  const claims = decodeJwtClaims(accessToken);
-  if (!claims) return null;
-  return { username: claims.sub, accountClass: claims.class, authDisabled: false };
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
 
   const dropSession = useCallback(() => {
-    setTokens(null);
     setSession(null);
   }, []);
 
@@ -70,69 +49,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const stored = getTokens();
-      // Probe /info with whatever we have. On an auth-disabled server this
-      // returns 200 with no token at all.
-      const probe = async (): Promise<boolean> => {
-        try {
-          await api.info();
-          return true;
-        } catch {
-          return false;
-        }
-      };
-      if (await probe()) {
-        if (cancelled) return;
-        if (stored) {
-          setSession(sessionFromToken(stored.accessToken) ?? { username: "", accountClass: "data", authDisabled: true });
-        } else {
-          setSession({ username: "", accountClass: "admin", authDisabled: true });
-        }
+      const { authRequired } = await auth.probe();
+      if (cancelled) return;
+      if (!authRequired) {
+        // Pre-M6 posture: no token needed. A decodable stored token still
+        // supplies the user chip, as before.
+        const decoded = auth.session();
+        setSession(
+          decoded ?? {
+            username: "",
+            accountClass: auth.tokens ? "data" : "admin",
+            authDisabled: true,
+          },
+        );
         setReady(true);
         return;
       }
-      // 401: try the refresh token once before showing the login screen.
-      if (stored && (await refreshSession())) {
-        const t = getTokens();
-        if (!cancelled && t) {
-          setSession(sessionFromToken(t.accessToken));
-          setReady(true);
-          return;
-        }
-      }
+      // A usable stored token (proactively refreshed when near expiry, or
+      // rotated once via the refresh token) enters the app; otherwise the
+      // login screen. A failed refresh drops the tokens inside AuthManager
+      // and fires onSessionExpired.
+      const token = await auth.getAccessToken();
+      if (cancelled) return;
+      setSession(token ? auth.session() : null);
+      setReady(true);
+    })().catch(() => {
       if (!cancelled) {
-        setTokens(null);
         setSession(null);
         setReady(true);
       }
-    })();
+    });
     return () => {
       cancelled = true;
     };
   }, []);
 
   const login = useCallback(async (username: string, password: string, totp?: string) => {
-    const pair = await api.login(totp ? { username, password, totp } : { username, password });
-    setTokens({
-      accessToken: pair.access_token,
-      refreshToken: pair.refresh_token,
-      expiresIn: pair.expires_in,
-    });
-    const sess = sessionFromToken(pair.access_token);
+    await auth.login(totp ? { username, password, totp } : { username, password });
+    const sess = auth.session();
     if (!sess) throw new Error("server returned an unreadable access token");
     setSession(sess);
   }, []);
 
+
   const logout = useCallback(async () => {
-    const t = getTokens();
-    if (t) {
-      try {
-        await api.logout(t.refreshToken);
-      } catch {
-        // Best effort: a dead server must not trap the user on the screen.
-      }
-    }
-    setTokens(null);
+    await auth.logout();
     setSession(null);
   }, []);
 

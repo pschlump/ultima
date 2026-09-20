@@ -1,7 +1,7 @@
 // Config: GET /config editable table, PUT only the dirty rows; action
 // buttons for save/bgsave/bgrewriteaof/flushdb (with confirm).
 import { useCallback, useEffect, useState } from "react";
-import { api, ApiError } from "../lib/api";
+import { api, ApiError } from "../lib/client";
 
 export function Config() {
   const [original, setOriginal] = useState<Record<string, string>>({});

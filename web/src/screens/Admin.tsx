@@ -4,7 +4,7 @@
 // ask for a confirmation code; disable takes password + current code.
 // On auth-disabled servers the screen shows a notice instead of broken calls.
 import { Fragment, useCallback, useEffect, useState, type FormEvent } from "react";
-import { api, ApiError, type AccountClass, type AccountView, type TOTPEnrollment } from "../lib/api";
+import { api, ApiError, type AccountClass, type AccountView, type TOTPEnrollment } from "../lib/client";
 import { useAuth } from "../lib/auth";
 
 function Banner({ kind, text }: { kind: "error" | "info"; text: string }) {

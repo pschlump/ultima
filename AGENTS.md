@@ -84,12 +84,17 @@ session recovery. M6d also closed two follow-ups: the **MONITOR command**
 (`lib/commands/monitor.go` — push-feed of other connections' commands,
 needed by the web monitor screen) and the **WS origin policy**
 (`server.ws_origin_allow`; enforced only when auth is enabled —
-same-origin and no-Origin always pass).
-Later
-milestones from the
-design layout
-(§14.1: `clients/`, extra CLIs under
-`cmd/`) do **not** exist yet.
+same-origin and no-Origin always pass). **M7 is done** — client
+libraries + examples (§11, `docs/m7-detailed-plan.md`): the Go client
+`clients/go/ultima` (RESP/gRPC/WS/REST behind one umbrella client, typed
+helpers, §9.4 session recovery on WS, shared token manager) with the
+three operator CLIs (`cmd/ultima-cli`, `cmd/ultima-ws-cli`,
+`cmd/ultima-grpc-cli` — thin shells over it, §6.4), the TypeScript
+client `clients/typescript` (`@ultima/client` — the web UI was
+refactored onto it, making it the §11.2 first consumer), the plain-JS
+ESM/CJS distribution `clients/javascript`, and the leaderboard + chat
+example apps under `examples/` (§11.4, e2e-tested in
+`tests/m7_examples_test.go`).
 
 ## Technology Stack
 
@@ -394,6 +399,22 @@ M6 architecture notes (detail in `docs/m6-detailed-plan.md`):
 
 ```
 cmd/ultima-server/   main binary: main.go, startup.go (wiring), router.go (chi), version.go (build-stamp vars)
+cmd/ultima-cli/      operator CLIs (M7, §6.4) — RESP (redis-cli analogue),
+cmd/ultima-ws-cli/   WebSocket, and gRPC front-ends respectively; thin shells
+cmd/ultima-grpc-cli/ over clients/go/ultima (one-shot + REPL, push streaming)
+clients/go/ultima/   Go client library (M7, §11.1): RESP/gRPC/WS/REST behind
+                     one umbrella Client; typed helpers for the hot commands,
+                     §9.4 session recovery on WS, shared token manager,
+                     redis-cli-style render.go used by the CLIs
+clients/typescript/  @ultima/client (M7, §11.2): framework-agnostic TS client
+                     (WS with §9.4 recovery + REST + auth token manager, react
+                     hooks subpath); the web UI consumes it via a file: dep
+clients/javascript/  plain-JS ESM+CJS distribution of @ultima/client (M7,
+                     §11.3): bun build bundles + emitted .d.ts
+examples/            M7 example apps (§11.4): leaderboard (ZADD + pub/sub,
+                     Go score submitter serves the page) and chat (pub/sub
+                     topics, list history, keyspace-notification presence,
+                     Go bot serves the page); each with a README chapter
 lib/config/          JSON config: `default:"..."` struct tags via reflection + `$ENV$NAME` env substitution (D6)
 lib/resp/            vendored + extended fork of tidwall/redcon v1.6.4 (D2); adds RESP3 emitters,
                      per-connection protocol versioning; kept close to upstream — excluded from lint
@@ -518,7 +539,13 @@ All via the Makefile (default goal is `build`):
 - `make lint` — `golangci-lint run` (v2 config in `.golangci.yml`).
 - `make web` — build the M6d web UI (`cd web && bun install && bun run
   build` → `web/dist`); the next `make build` embeds it. `make test-web`
-  runs the UI's strict `tsc` typecheck.
+  runs the UI's strict `tsc` typecheck. Note: bun *copies* the
+  `file:../clients/typescript` dependency — after editing
+  `clients/typescript`, rerun `bun install` in `web/` before building.
+- `make build-cli` — build the three M7 operator CLIs (`./ultima-cli`,
+  `./ultima-ws-cli`, `./ultima-grpc-cli`; `make clean` removes them).
+  `make test-clients` runs the Go client tests and the TS client
+  typecheck/build + JS dist build.
 - `make gen_proto` — regenerate protobuf bindings from `proto/` into
   `gen/go`; requires `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`.
   Also emits `gen/ts` (protobuf-es) via `bin/gen-ts.sh`, which no-ops with

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ultima-client ESM smoke</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 42rem; }
+    code, pre { background: #f4f4f4; padding: 0.15em 0.35em; border-radius: 4px; }
+    pre { padding: 0.75em; }
+    button { font: inherit; padding: 0.4em 1em; }
+  </style>
+</head>
+<body>
+  <h1>ultima-client — no-build ESM smoke</h1>
+  <p>
+    This page imports <code>./dist/esm/index.js</code> directly with
+    <code>&lt;script type="module"&gt;</code> — no bundler. Serve this
+    directory over HTTP (e.g. <code>bunx serve</code> or any static server)
+    alongside a running <code>ultima-server</code>, then connect.
+  </p>
+  <p>
+    HTTP base URL: <input id="base" value="http://127.0.0.1:6381" size="24" />
+    <button id="go">Connect &amp; PING</button>
+  </p>
+  <pre id="out">idle</pre>
+  <script type="module">
+    import { UltimaClient } from "./dist/esm/index.js";
+
+    const out = document.getElementById("out");
+    const log = (line) => { out.textContent += "\n" + line; };
+
+    document.getElementById("go").addEventListener("click", async () => {
+      const baseUrl = document.getElementById("base").value;
+      out.textContent = `connecting to ${baseUrl} …`;
+      const client = new UltimaClient({
+        baseUrl,
+        ws: {
+          onStateChange: (s) => log(`ws state: ${s}`),
+          onResumed: () => log("session resumed (subscriptions retained)"),
+          onGap: (id) => log(`SESSION GAP — pushes lost for ${id}`),
+        },
+      });
+      try {
+        const probe = await client.auth.probe();
+        log(`auth required: ${probe.authRequired}`);
+        client.connect();
+        const pong = await client.ws.ping();
+        log(`PING → ${pong}`);
+        await client.ws.set("smoke:js", "hello from the browser");
+        log(`GET smoke:js → ${await client.ws.get("smoke:js")}`);
+      } catch (err) {
+        log(`error: ${err}`);
+      }
+    });
+  </script>
+</body>
+</html>

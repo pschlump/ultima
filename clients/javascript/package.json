@@ -1,0 +1,26 @@
+{
+  "name": "ultima-client",
+  "version": "0.7.0",
+  "description": "Bundled JavaScript distribution of @ultima/client (design doc §11.3): ESM + CJS builds of the TypeScript client with type declarations",
+  "type": "module",
+  "main": "./dist/cjs/index.cjs",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/clients/typescript/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/clients/typescript/src/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.cjs"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "bun build.ts",
+    "smoke": "bun smoke.mjs && bun smoke.cjs && node smoke.mjs && node smoke.cjs"
+  },
+  "devDependencies": {
+    "@bufbuild/protobuf": "^2.10.0",
+    "bun-types": "^1.4.2",
+    "typescript": "^5.9.0"
+  }
+}

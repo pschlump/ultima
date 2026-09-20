@@ -4,8 +4,7 @@
 // re-subscribed automatically on SESSION_EXPIRED).
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { Value } from "../../../gen/ts/ultima/v1/command_pb";
-import { getTokens } from "../lib/api";
-import { UltimaWS, type WSState } from "../lib/ws";
+import { newUltimaWS, UltimaWS, type WSState } from "../lib/client";
 import { valueToString } from "../components/ValueView";
 
 interface Msg {
@@ -75,12 +74,12 @@ export function PubSub() {
     const ws = wsRef.current;
     if (!ws) return;
     try {
-      const chans = await ws.exec("PUBSUB", ["CHANNELS"]);
+      const chans = await ws.exec("PUBSUB", "CHANNELS");
       const names: string[] =
         chans.kind.case === "array" ? chans.kind.value.elems.map((e) => valueToString(e)) : [];
       const stats: ChannelStat[] = [];
       if (names.length > 0) {
-        const numsub = await ws.exec("PUBSUB", ["NUMSUB", ...names]);
+        const numsub = await ws.exec("PUBSUB", "NUMSUB", ...names);
         if (numsub.kind.case === "map") {
           for (const p of numsub.kind.value.pairs) {
             stats.push({
@@ -101,7 +100,7 @@ export function PubSub() {
     async (command: "SUBSCRIBE" | "PSUBSCRIBE", name: string) => {
       const ws = wsRef.current;
       if (!ws || !name) return;
-      const res = await ws.exec(command, [name]);
+      const res = await ws.exec(command, name);
       if (res.kind.case === "error") {
         setError(res.kind.value);
         return;
@@ -118,7 +117,7 @@ export function PubSub() {
   const unsubscribe = useCallback(async (command: "UNSUBSCRIBE" | "PUNSUBSCRIBE", name: string) => {
     const ws = wsRef.current;
     if (!ws) return;
-    await ws.exec(command, [name]);
+    await ws.exec(command, name);
     setSubs((s) =>
       command === "UNSUBSCRIBE"
         ? { ...s, channels: s.channels.filter((c) => c !== name) }
@@ -127,16 +126,16 @@ export function PubSub() {
   }, []);
 
   useEffect(() => {
-    const ws = new UltimaWS(() => getTokens()?.accessToken ?? null, {
+    const ws = newUltimaWS({
       onPush: (value) => {
         const m = decodePush(value);
         if (m) pushMsg(m);
       },
-      onSessionReset: () => {
+      onGap: () => {
         // Subscriptions were lost with the session; re-subscribe.
         const s = subsRef.current;
-        for (const c of s.channels) void ws.exec("SUBSCRIBE", [c]);
-        for (const p of s.patterns) void ws.exec("PSUBSCRIBE", [p]);
+        for (const c of s.channels) void ws.exec("SUBSCRIBE", c);
+        for (const p of s.patterns) void ws.exec("PSUBSCRIBE", p);
         pushMsg({ kind: "note", channel: "", pattern: "", payload: "SESSION_EXPIRED — re-subscribed automatically" });
       },
       onStateChange: setState,

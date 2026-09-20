@@ -2,8 +2,7 @@
 // command to the command engine; events stream back as push frames),
 // streaming event list with pause/clear; reconnect notice on close.
 import { useEffect, useRef, useState } from "react";
-import { getTokens } from "../lib/api";
-import { UltimaWS, type WSState } from "../lib/ws";
+import { newUltimaWS, type WSState } from "../lib/client";
 import { valueToString } from "../components/ValueView";
 
 interface Event {
@@ -22,14 +21,14 @@ export function Monitor() {
   pausedRef.current = paused;
 
   useEffect(() => {
-    const ws = new UltimaWS(() => getTokens()?.accessToken ?? null, {
+    const ws = newUltimaWS({
       onPush: (value) => {
         if (pausedRef.current) return;
         idRef.current += 1;
         const ev: Event = { id: idRef.current, text: valueToString(value) };
         setEvents((es) => [...es.slice(-1999), ev]);
       },
-      onSessionReset: () => setNotice("Session expired — MONITOR stream restarted on a fresh session."),
+      onGap: () => setNotice("Session expired — MONITOR stream restarted on a fresh session."),
       onResumed: () => setNotice(null),
       onStateChange: (s) => {
         setState(s);
@@ -38,7 +37,7 @@ export function Monitor() {
       },
     });
     ws.connect();
-    ws.exec("monitor", [])
+    ws.exec("monitor")
       .then((v) => {
         if (v.kind.case === "error") setNotice(v.kind.value);
         else setNotice(null);

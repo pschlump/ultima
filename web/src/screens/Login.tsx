@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useAuth } from "../lib/auth";
-import { ApiError } from "../lib/api";
+import { ApiError } from "../lib/client";
 
 export function Login() {
   const { login } = useAuth();

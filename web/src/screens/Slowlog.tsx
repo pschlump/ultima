@@ -1,6 +1,6 @@
 // Slowlog: /slowlog (with reset) and /latency tables, refresh button.
 import { useCallback, useEffect, useState } from "react";
-import { api, ApiError, type CommandLatency, type SlowlogEntry } from "../lib/api";
+import { api, ApiError, type CommandLatency, type SlowlogEntry } from "../lib/client";
 
 function fmtUs(us: number): string {
   if (us >= 1_000_000) return `${(us / 1_000_000).toFixed(2)} s`;
