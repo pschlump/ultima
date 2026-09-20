@@ -10,3 +10,6 @@ clients/javascript/dist/
 /ultima-cli
 /ultima-ws-cli
 /ultima-grpc-cli
+cmd/ultima-cli/ultima-cli
+cmd/ultima-ws-cli/ultima-ws-cli
+cmd/ultima-grpc-cli/ultima-grpc-cli
