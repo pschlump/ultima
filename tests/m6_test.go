@@ -95,7 +95,7 @@ func newM6Env(t *testing.T) *m6Env {
 	httpapi.NewServer(eng, nil, svc, testLogger(), nil).Register(r)
 	reg := wssession.NewRegistry(eng, 0, 0, testLogger())
 	t.Cleanup(reg.Close)
-	r.Get("/ws/v1", wssrv.Handler(eng, svc, reg, testLogger()))
+	r.Get("/ws/v1", wssrv.Handler(eng, svc, reg, testLogger(), nil))
 	httpSrv := httptest.NewServer(r)
 	t.Cleanup(httpSrv.Close)
 

@@ -194,7 +194,7 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 	httpapi.NewServer(eng, nil, nil, logger, nil).Register(r)
 	reg := wssession.NewRegistry(eng, 0, 0, logger)
 	t.Cleanup(reg.Close)
-	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, logger))
+	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, logger, nil))
 	httpSrv := &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		if err := httpSrv.Serve(httpLis); err != nil && err != http.ErrServerClosed {

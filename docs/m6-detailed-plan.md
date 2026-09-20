@@ -13,7 +13,7 @@ file paths, both required, no auto-generation). Do not reverse these.
 Execution is phased M6a → M6d, each phase independently green
 (`go test ./...`, `make lint`).
 
-**Status: M6a, M6b and M6c done. M6d not started.**
+**Status: M6a, M6b, M6c and M6d done. M6 complete.**
 
 ---
 
@@ -197,11 +197,51 @@ Implementation notes:
   origin policy (M6d); token TTLs startup-only. gRPC client kill noted
   above.
 
-## M6d — Web UI v1 (§10.2)
+## M6d — Web UI v1 (§10.2) — **done**
 
-- `web/` React + TypeScript + vite, bun-managed; `web/dist` embedded via
-  `//go:embed`; login screen with TOTP, automatic token refresh.
-- Screens: dashboard, key browser, live monitor (WS), slowlog, config
-  editor, pub/sub inspector, account administration with QR enrollment.
-- Interactive console over `/ws/v1` with push-mode rendering and session
-  recovery (needs M6b).
+- `web/` React + TypeScript + vite, bun-managed (`make web` →
+  `bun install && bun run build` → `web/dist`); `web/dist` embedded via
+  `//go:embed` in `web/embed.go` (a committed placeholder dist keeps plain
+  `make build`/`make test` compiling without bun); served from the HTTP
+  port by `web.Handler()` with SPA fallback — mounted as the chi `/*`
+  catch-all in `cmd/ultima-server/router.go` (exact API/WS routes win;
+  unmatched machine paths under `/api/`, `/ws/`, `/metrics`, `/health`,
+  `/ready` 404 rather than returning the SPA). index.html is no-cache,
+  hashed `/assets/*` immutable. `make test-web` runs strict `tsc`.
+- Login screen with TOTP against `/api/v1/auth/login`; automatic token
+  refresh (single-flight `/auth/refresh` retry on 401); auth-disabled
+  servers detected by probing `/api/v1/info` (200 without a token → skip
+  login).
+- Screens: dashboard (`/info` + `/shards` poll, ops/sec from
+  `total_commands_processed` deltas, used/max memory bar, per-shard
+  heatmap), key browser (`/keys/scan` + `/key/{key}` preview + DELETE),
+  live monitor, slowlog + latency, config editor (+ save/bgsave/
+  bgrewriteaof/flushdb actions), pub/sub inspector, account
+  administration with QR enrollment (`qr_code_png_base64` from
+  `/auth/totp/enable`).
+- Interactive console over `/ws/v1` (`web/src/lib/ws.ts`, protobuf-es
+  bindings from `gen/ts` like tests/ts-roundtrip): seq-correlated
+  commands, push-mode rendering (SUBSCRIBE/PSUBSCRIBE stream live),
+  type-aware Value rendering, and §9.4 session recovery (handshake,
+  push_seq replay, ABORTED/SESSION_EXPIRED handling, backoff reconnect).
+- Two follow-ups closed:
+  - **MONITOR command** (`lib/commands/monitor.go`): the monitor screen
+    needed a MONITOR surface reachable from a browser (gRPC's Monitor
+    stream is not). +OK, then a push-feed of other connections' commands
+    in Redis's `"<unix>.<micros> [<db> <addr>] "cmd" "arg"…"` format over
+    the pub/sub push funnel; credentials redacted per the M4 monitorArgs
+    convention. Divergences (probed, documented): a monitoring connection
+    stays usable (7.2.7 answers its commands with "ERR Replica can't
+    interact with the keyspace") and its own commands are excluded from
+    its feed.
+  - **WS origin policy**: `server.ws_origin_allow` config (comma-separated
+    origins or hosts, `*` = any); when auth is enabled, browser upgrades
+    must be same-origin or allowlisted — requests without an Origin
+    header (non-browser clients) always pass; auth-disabled servers keep
+    the pre-M6 open posture.
+- Deviations: no hit-ratio gauge (INFO has no keyspace hits/misses
+  counters); key editing is via the console (the REST key API is
+  read/delete by contract). Dev-mode note: `bun run dev`'s WS proxy keeps
+  the browser's Origin, so with auth enabled add the vite origin (e.g.
+  `http://localhost:5173`) to `server.ws_origin_allow`; the embedded UI
+  is same-origin and needs nothing.

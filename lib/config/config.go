@@ -68,6 +68,12 @@ type ServerConfig struct {
 	// GET /metrics (M6c, §10.1); parsed into []*net.IPNet at startup,
 	// bare IPs become /32 or /128.
 	MetricsAllow string `json:"metrics_allow" default:"127.0.0.0/8,::1"`
+	// WSOriginAllow is the comma-separated Origin allowlist for the
+	// /ws/v1 upgrade (M6d, §10.2), consulted only when auth.enabled:
+	// entries match a full Origin ("https://admin.example.com") or its
+	// host, "*" allows any origin. Same-origin upgrades and requests
+	// without an Origin header always pass.
+	WSOriginAllow string `json:"ws_origin_allow" default:""`
 }
 
 // HTTPListenAddrs resolves every address the HTTP surface binds: http_addr

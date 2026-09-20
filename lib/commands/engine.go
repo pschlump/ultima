@@ -78,6 +78,10 @@ type ConnState struct {
 	deliver   func(resp.Value)
 	outbox    []resp.Value
 
+	// monitorCancel deregisters this connection's MONITOR feed (M6d);
+	// nil when the connection is not monitoring. CloseConn calls it.
+	monitorCancel func()
+
 	// trackPersist is set by Execute around the handler of a write command
 	// while a persister is installed: it makes do/doMulti count the
 	// command's in-flight shard tasks (persistShardTasks) so the persist
@@ -275,15 +279,19 @@ func (e *Engine) NewConnState(addr string) *ConnState {
 }
 
 // CloseConn deregisters a connection: its pub/sub subscriptions are
-// dropped from the broker, transaction/watch state is cleared, the
-// client-registry entry (M6c) is removed, and the client counter is
-// decremented.
+// dropped from the broker, its MONITOR feed (M6d) is detached,
+// transaction/watch state is cleared, the client-registry entry (M6c) is
+// removed, and the client counter is decremented.
 func (e *Engine) CloseConn(cs *ConnState) {
 	if cs == nil {
 		return
 	}
 	e.PubSub.UnsubscribeAll(cs.ID)
 	cs.subs, cs.psubs = nil, nil
+	if cs.monitorCancel != nil {
+		cs.monitorCancel()
+		cs.monitorCancel = nil
+	}
 	cs.clearTx()
 	e.conns.Add(-1)
 	e.clientsMu.Lock()
@@ -493,6 +501,7 @@ type MonitorEvent struct {
 	When time.Time
 	DB   int
 	Addr string
+	ID   uint64   // connection that executed the command (ConnState.ID)
 	Args [][]byte // Args[0] is the command name as the client sent it
 }
 
@@ -522,7 +531,7 @@ func (e *Engine) notifyMonitors(cs *ConnState, args [][]byte) {
 	if e.monitorN.Load() == 0 {
 		return
 	}
-	ev := MonitorEvent{When: time.Now(), DB: cs.DB, Addr: cs.Addr, Args: monitorArgs(args)}
+	ev := MonitorEvent{When: time.Now(), DB: cs.DB, Addr: cs.Addr, ID: cs.ID, Args: monitorArgs(args)}
 	e.monitorMu.Lock()
 	defer e.monitorMu.Unlock()
 	for _, fn := range e.monitors {

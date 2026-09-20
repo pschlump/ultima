@@ -2,7 +2,7 @@
 
 LDFLAGS := $(shell sh bin/gen-build-stamp.sh)
 
-.PHONY: gen_proto gen_api build test lint tidy clean run bench bench-m5
+.PHONY: gen_proto gen_api build test lint tidy clean run bench bench-m5 web test-web
 
 gen_proto:
 	sh bin/gen.sh
@@ -12,6 +12,15 @@ gen_api:
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o ./ultima-server ./cmd/ultima-server
+
+# web builds the M6d management UI (§10.2) into web/dist, which the next
+# `make build` embeds. Requires bun. Without it, binaries embed the
+# committed placeholder dist.
+web:
+	cd web && bun install && bun run build
+
+test-web:
+	cd web && bun run typecheck
 
 test:
 	go test ./...

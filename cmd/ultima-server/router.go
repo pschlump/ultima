@@ -12,6 +12,7 @@ import (
 	"github.com/pschlump/ultima/lib/httpapi"
 	"github.com/pschlump/ultima/lib/wssession"
 	"github.com/pschlump/ultima/lib/wssrv"
+	"github.com/pschlump/ultima/web"
 )
 
 // newRouter builds the chi mux for the HTTP/WS port: lib/httpapi mounts
@@ -26,9 +27,13 @@ import (
 // behind Bearer tokens (§10.1) and the WS upgrade behind an access token
 // (§9.3). reg is the M6b resumable-session registry (§9.4). metricsAllow
 // is the parsed server.metrics_allow list.
-func newRouter(logger *slog.Logger, eng *commands.Engine, p commands.Persister, authSvc *auth.Service, reg *wssession.Registry, metricsAllow []*net.IPNet) http.Handler {
+func newRouter(logger *slog.Logger, eng *commands.Engine, p commands.Persister, authSvc *auth.Service, reg *wssession.Registry, metricsAllow []*net.IPNet, originAllow []string) http.Handler {
 	r := chi.NewRouter()
 	httpapi.NewServer(eng, p, authSvc, logger, metricsAllow).Register(r)
-	r.Get("/ws/v1", wssrv.Handler(eng, authSvc, reg, logger))
+	r.Get("/ws/v1", wssrv.Handler(eng, authSvc, reg, logger, originAllow))
+	// M6d web UI (§10.2): the embedded SPA catch-all comes last; chi's
+	// exact/static routes above always win over the wildcard, and the
+	// handler itself 404s unmatched machine paths (/api/, /ws/, …).
+	r.Handle("/*", web.Handler())
 	return r
 }

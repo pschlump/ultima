@@ -197,8 +197,17 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 		return nil, fmt.Errorf("invalid metrics_allow: %w", err)
 	}
 
+	// /ws/v1 Origin allowlist (M6d, §10.2): comma-separated origins or
+	// hosts; only consulted when auth is enabled.
+	var originAllow []string
+	for _, o := range strings.Split(cfg.Server.WSOriginAllow, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			originAllow = append(originAllow, o)
+		}
+	}
+
 	s.httpSrv = &http.Server{
-		Handler:           newRouter(logger, eng, s.persist, authSvc, s.wssess, metricsAllow),
+		Handler:           newRouter(logger, eng, s.persist, authSvc, s.wssess, metricsAllow, originAllow),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	// One http.Server over every bound listener; Shutdown(ctx) closes them

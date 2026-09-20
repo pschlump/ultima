@@ -20,13 +20,16 @@
 // across the drop (lib/wssession retains the ConnState), and learn which
 // in-flight command replies were lost via ABORTED error frames carrying
 // the command's seq. A resume that misses the retention window gets a
-// SESSION_EXPIRED error frame — explicit, never silent. There is still
-// no origin policy (M6d concern).
+// SESSION_EXPIRED error frame — explicit, never silent. The M6d origin
+// policy (server.ws_origin_allow) applies when auth is enabled: browser
+// upgrades must be same-origin or allowlisted; auth-disabled servers keep
+// the pre-M6 no-origin-policy posture.
 package wssrv
 
 import (
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -56,10 +59,19 @@ const bearerSubprotocol = "bearer"
 // authSvc is the M6a auth service; nil leaves the endpoint open (the
 // pre-M6 behavior, used when auth.enabled is false). reg is the M6b
 // resumable-session registry; nil disables the session handshake.
-func Handler(eng *commands.Engine, authSvc *auth.Service, reg *wssession.Registry, logger *slog.Logger) http.HandlerFunc {
+// originAllow is the M6d origin policy (server.ws_origin_allow,
+// comma-separated full origins or hosts, "*" for any): it applies only
+// when authSvc != nil — a missing Origin header (non-browser clients)
+// and same-host origins always pass. With auth disabled the endpoint
+// keeps its pre-M6 no-origin-policy posture.
+func Handler(eng *commands.Engine, authSvc *auth.Service, reg *wssession.Registry, logger *slog.Logger, originAllow []string) http.HandlerFunc {
 	upgrader := websocket.Upgrader{
-		// No origin policy yet; the web UI milestone (M6d) revisits this.
-		CheckOrigin: func(*http.Request) bool { return true },
+		CheckOrigin: func(r *http.Request) bool {
+			if authSvc == nil {
+				return true
+			}
+			return checkOrigin(r, originAllow)
+		},
 	}
 	if authSvc != nil {
 		upgrader.Subprotocols = []string{bearerSubprotocol}
@@ -81,6 +93,31 @@ func Handler(eng *commands.Engine, authSvc *auth.Service, reg *wssession.Registr
 		}
 		serve(eng, reg, conn, r.RemoteAddr, id)
 	}
+}
+
+// checkOrigin is the M6d origin policy (§10.2): browser upgrades must be
+// same-origin or on the configured allowlist. A missing Origin header
+// passes — non-browser clients (CLIs, tests) send none, and the bearer
+// credential is presented explicitly, so there is no ambient-credential
+// CSRF surface to defend there.
+func checkOrigin(r *http.Request, allow []string) bool {
+	o := r.Header.Get("Origin")
+	if o == "" {
+		return true
+	}
+	u, err := url.Parse(o)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	for _, a := range allow {
+		if a == "*" || strings.EqualFold(a, o) || strings.EqualFold(a, u.Host) {
+			return true
+		}
+	}
+	return false
 }
 
 // upgradeIdentity extracts and verifies the access token presented at

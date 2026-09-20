@@ -48,6 +48,7 @@
     { "name": "bgsave", "group": "server", "status": "implemented", "since": "M5", "notes": "per-shard point-in-time snapshot, no fork (§13.1)" },
     { "name": "lastsave", "group": "server", "status": "implemented", "since": "M5", "notes": "" },
     { "name": "bgrewriteaof", "group": "server", "status": "implemented", "since": "M5", "notes": "stop-the-world rewrite under PauseAll + persist drain" },
+    { "name": "monitor", "group": "server", "status": "implemented", "since": "M6d", "notes": "+OK then push-feed of other connections' commands; redaction per M4 monitorArgs; own commands excluded, monitoring conn stays usable (7.2.7 rejects them)" },
 
     { "name": "hset", "group": "hash", "status": "implemented", "since": "M2", "notes": "multiple field/value pairs" },
     { "name": "hget", "group": "hash", "status": "implemented", "since": "M2", "notes": "" },

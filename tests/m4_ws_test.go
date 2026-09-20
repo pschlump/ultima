@@ -31,7 +31,7 @@ func wsTestServer(t *testing.T) (*commands.Engine, string) {
 	t.Cleanup(reg.Close)
 
 	r := chi.NewRouter()
-	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, testLogger()))
+	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, testLogger(), nil))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	return eng, "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/v1"

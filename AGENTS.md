@@ -72,11 +72,23 @@ chi-server bindings (auth routes migrated from the deleted
 spec is served at `/api/openapi.yaml` with Swagger UI at `/api/docs`,
 and the middleware chain is request-id → logging → Recoverer → Timeout →
 Prometheus → JWT gate (chi's deprecated RealIP deliberately omitted — it
-would defeat the /metrics allowlist). M6d (web UI, §10.2) is pending.
+would defeat the /metrics allowlist). **M6d is done** — the web UI
+(§10.2): `web/` is a React+TS+vite app (bun; `make web` → `web/dist`,
+embedded via `//go:embed` in `web/embed.go` — a committed placeholder
+dist keeps bun-less builds working; served with SPA fallback by
+`web.Handler()` on the chi `/*` catch-all) with login/TOTP, token
+auto-refresh, dashboard, key browser, live monitor, slowlog, config
+editor, pub/sub inspector, account admin (QR enrollment), and an
+interactive console over `/ws/v1` with push-mode rendering and §9.4
+session recovery. M6d also closed two follow-ups: the **MONITOR command**
+(`lib/commands/monitor.go` — push-feed of other connections' commands,
+needed by the web monitor screen) and the **WS origin policy**
+(`server.ws_origin_allow`; enforced only when auth is enabled —
+same-origin and no-Origin always pass).
 Later
 milestones from the
 design layout
-(§14.1: `clients/`, `web/`, extra CLIs under
+(§14.1: `clients/`, extra CLIs under
 `cmd/`) do **not** exist yet.
 
 ## Technology Stack
@@ -160,7 +172,7 @@ PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH/PUBSUB; SSUBSCRIBE deferred to M8) and
 blocking ops (BLPOP/BRPOP/BLMPOP/
 BLMOVE/BRPOPLPUSH, BZPOPMIN/BZPOPMAX/BZMPOP). M5a adds
 `notify-keyspace-events` keyspace notifications (CONFIG key, off by
-default). Value types: strings
+default). M6d adds MONITOR. Value types: strings
 plus the four collections (`lib/types`). Ultima reports Redis compatibility
 version 7.2.7 (`commands.CompatVersion`).
 
@@ -455,6 +467,14 @@ lib/persist/         persistence (M5c, §13.1, D9 own formats): format.go
                      BGREWRITEAOF dump), replay.go (seq merge + broadcast
                      dedup), manager.go (save rules, fsync policies,
                      restore-before-serve, INFO persistence fields)
+web/                 M6d web UI (§10.2): React+TS+vite app (bun; src/ screens,
+                     src/lib/ws.ts is the /ws/v1 client with §9.4 session
+                     recovery, src/lib/api.ts the REST wrappers) plus the Go
+                     embedding: embed.go (//go:embed all:dist; the committed
+                     placeholder dist/index.html keeps bun-less builds
+                     working) and handler.go (SPA fallback; unmatched machine
+                     paths 404; index.html no-cache, /assets immutable).
+                     Build with `make web`, then `make build` embeds it.
 proto/ultima/v1/     protobuf IDL
 gen/go/ultima/v1/    generated protobuf Go bindings (do not hand-edit)
 gen/ts/ultima/v1/    generated protobuf TypeScript bindings (protobuf-es; do not hand-edit)
@@ -496,6 +516,9 @@ All via the Makefile (default goal is `build`):
   `$ENV$ultima_password`).
 - `make test` — `go test ./...` (unit + integration + differential).
 - `make lint` — `golangci-lint run` (v2 config in `.golangci.yml`).
+- `make web` — build the M6d web UI (`cd web && bun install && bun run
+  build` → `web/dist`); the next `make build` embeds it. `make test-web`
+  runs the UI's strict `tsc` typecheck.
 - `make gen_proto` — regenerate protobuf bindings from `proto/` into
   `gen/go`; requires `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`.
   Also emits `gen/ts` (protobuf-es) via `bin/gen-ts.sh`, which no-ops with
@@ -586,8 +609,11 @@ Running `go test ./...` also compiles `note/grpc-vs-text-benchmark` and
   `bin/gen-jwt-keys.sh` writes `./keys/`, gitignored), TOTP 2FA via
   `pschlump/htotp`. When enabled, `/api/v1/*` (except login/refresh) and
   the gRPC surface require a Bearer access token, and the `/ws/v1` upgrade
-  requires `?access_token=` or the `bearer, <token>` subprotocol. When
-  disabled (default), the WebSocket endpoint still has no origin policy
+  requires `?access_token=` or the `bearer, <token>` subprotocol, and the
+  M6d origin policy applies: browser upgrades must be same-origin or on
+  `server.ws_origin_allow` (comma-separated origins/hosts, `*` = any);
+  requests without an Origin header always pass. When auth is disabled
+  (default), the WebSocket endpoint still has no origin policy
   (`CheckOrigin: true`) and no upgrade-time auth.
   `note/redis-security-overview.md` is the security reference.
 - Command execution must never panic on client input; all errors are reply

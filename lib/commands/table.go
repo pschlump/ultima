@@ -188,6 +188,7 @@ func init() {
 	def("config", -2, []string{"admin"}, 0, 0, 0, "server", cmdConfig)
 	def("client", -2, []string{"admin"}, 0, 0, 0, "server", cmdClient)
 	def("command", -1, []string{"readonly"}, 0, 0, 0, "server", cmdCommand)
+	def("monitor", 1, []string{"admin"}, 0, 0, 0, "server", cmdMonitor)
 	def("save", 1, []string{"admin"}, 0, 0, 0, "server", cmdSave)
 	def("bgsave", 1, []string{"admin"}, 0, 0, 0, "server", cmdBGSave)
 	def("lastsave", 1, []string{"readonly", "fast"}, 0, 0, 0, "server", cmdLastSave)

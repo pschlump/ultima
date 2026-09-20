@@ -35,7 +35,7 @@ func newResumeServer(t *testing.T, window time.Duration, maxMsgs int) (*commands
 	reg := wssession.NewRegistry(eng, window, maxMsgs, logger)
 	t.Cleanup(reg.Close)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws/v1", Handler(eng, nil, reg, logger))
+	mux.HandleFunc("/ws/v1", Handler(eng, nil, reg, logger, nil))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return eng, reg, "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/v1"
