@@ -23,7 +23,26 @@ type Config struct {
 	Server  ServerConfig  `json:"server"`
 	Persist PersistConfig `json:"persist"`
 	Auth    AuthConfig    `json:"auth"`
+	Script  ScriptConfig  `json:"script"`
 	Debug   DebugConfig   `json:"debug"`
+}
+
+// ScriptConfig is the M8 Lua scripting section (§7 P3, D12; §5.1 of the
+// gopher-lua integration guide).
+type ScriptConfig struct {
+	// LuaTimeLimitMs mirrors Redis's lua-time-limit: the soft limit past
+	// which other clients get BUSY while a script runs.
+	LuaTimeLimitMs int `json:"lua_time_limit_ms" default:"5000"`
+	// HardDeadlineMs is the watchdog kill of a runaway script (decision
+	// S5 — an Ultima divergence: Redis cannot preempt; we kill at the
+	// deadline and keep the script's partial, already-AOF-captured
+	// effects). 0 disables the watchdog.
+	HardDeadlineMs int `json:"script_hard_deadline_ms" default:"30000"`
+	// MaxMemoryMB is the per-VM Lua allocation budget (rt_set_memlimit).
+	MaxMemoryMB int `json:"script_max_memory_mb" default:"64"`
+	// RngSeed bases math.random seeding inside scripts (S6); 0 = derive
+	// from the server run-id.
+	RngSeed int64 `json:"script_rng_seed" default:"0"`
 }
 
 // PersistConfig is the persistence section (M5c, §13.1): Redis-parity

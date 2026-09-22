@@ -151,6 +151,12 @@
     { "name": "unsubscribe", "group": "pubsub", "status": "implemented", "since": "M3", "notes": "no-arg form acks all (sorted; Redis hash order is arbitrary); null-channel ack when none" },
     { "name": "punsubscribe", "group": "pubsub", "status": "implemented", "since": "M3", "notes": "" },
     { "name": "publish", "group": "pubsub", "status": "implemented", "since": "M3", "notes": "reply counts deliveries, not unique clients; self-deliveries postponed behind the reply" },
-    { "name": "pubsub", "group": "pubsub", "status": "implemented", "since": "M3", "notes": "CHANNELS/NUMSUB/NUMPAT; HELP not implemented" }
+    { "name": "pubsub", "group": "pubsub", "status": "implemented", "since": "M3", "notes": "CHANNELS/NUMSUB/NUMPAT; HELP not implemented" },
+
+    { "name": "eval", "group": "scripting", "status": "implemented", "since": "M8", "notes": "gopher-lua wasm engine (D12); atomic under PauseAll like EXEC; effects-only AOF (S2)" },
+    { "name": "evalsha", "group": "scripting", "status": "implemented", "since": "M8", "notes": "SHA-1 cache lookup; NOSCRIPT on miss" },
+    { "name": "eval_ro", "group": "scripting", "status": "implemented", "since": "M8", "notes": "writes rejected with the probed 7.2.7 text" },
+    { "name": "evalsha_ro", "group": "scripting", "status": "implemented", "since": "M8", "notes": "" },
+    { "name": "script", "group": "scripting", "status": "implemented", "since": "M8", "notes": "LOAD/EXISTS/FLUSH/KILL/HELP; DEBUG refused (no debug hooks in the wasm backend)" }
   ]
 }

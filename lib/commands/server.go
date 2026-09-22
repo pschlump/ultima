@@ -175,6 +175,23 @@ func cmdInfo(e *Engine, _ *ConnState, args [][]byte) resp.Value {
 	if len(args) == 2 {
 		section = lowerASCII(args[1])
 	}
+	if section == "script" {
+		// Redis 7.2.7 has no scripting INFO section, so plain INFO must
+		// not gain one (the differential mInfo gate compares section
+		// sets); the counters are emitted only on an explicit request.
+		var sb strings.Builder
+		sb.WriteString("# Script\r\n")
+		if e.Scripts != nil {
+			fmt.Fprintf(&sb, "loaded_scripts:%d\r\n", e.Scripts.Cached())
+			fmt.Fprintf(&sb, "script_time_limit_ms:%d\r\n", e.Scripts.TimeLimitMs())
+			fmt.Fprintf(&sb, "script_hard_deadline_ms:%d\r\n", e.Scripts.HardDeadlineMs())
+			fmt.Fprintf(&sb, "script_max_memory_mb:%d\r\n", e.ScriptMaxMemoryMB())
+		} else {
+			sb.WriteString("loaded_scripts:0\r\n")
+		}
+		sb.WriteString("\r\n")
+		return resp.BlobStr(sb.String())
+	}
 	var sb strings.Builder
 	writeSection := func(name string, body func()) {
 		if section != "" && section != "all" && section != "default" && section != "everything" && section != name {
@@ -268,7 +285,7 @@ func sectionHeader(name string) string {
 // --- server ops -----------------------------------------------------------------
 
 func cmdDBSize(e *Engine, cs *ConnState, _ [][]byte) resp.Value {
-	return resp.Int(int64(e.Shards.DBSize(cs.DB)))
+	return resp.Int(int64(e.Shards.DBSizeTok(cs.tok, cs.DB)))
 }
 
 // flushArgs validates the optional SYNC/ASYNC modifier (accepted, always
@@ -291,15 +308,15 @@ func cmdFlushDB(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	if errV, failed := flushArgs(args); failed {
 		return errV
 	}
-	e.Shards.FlushDB(cs.DB)
+	e.Shards.FlushDBTok(cs.tok, cs.DB)
 	return replyOK
 }
 
-func cmdFlushAll(e *Engine, _ *ConnState, args [][]byte) resp.Value {
+func cmdFlushAll(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	if errV, failed := flushArgs(args); failed {
 		return errV
 	}
-	e.Shards.FlushAll()
+	e.Shards.FlushAllTok(cs.tok)
 	return replyOK
 }
 
@@ -405,6 +422,55 @@ var configParams = []configParam{
 		set: func(e *Engine, v string) (resp.Value, bool) {
 			if !e.SetNotifyKeyspaceEvents(v) {
 				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'notify-keyspace-events') - Invalid event class character. Use '" + notifyClassChars + "'."), true
+			}
+			return resp.Value{}, false
+		}},
+	{name: "lua-time-limit",
+		get: func(e *Engine) string {
+			if e.Scripts == nil {
+				return "5000"
+			}
+			return fmt.Sprintf("%d", e.Scripts.TimeLimitMs())
+		},
+		set: func(e *Engine, v string) (resp.Value, bool) {
+			// Byte-exact against 7.2.7 (probed).
+			n, ok := parseIntStrict([]byte(v))
+			if !ok {
+				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'lua-time-limit') - argument couldn't be parsed into an integer"), true
+			}
+			if n < 0 {
+				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'lua-time-limit') - argument must be between 0 and 9223372036854775807 inclusive"), true
+			}
+			if e.Scripts != nil {
+				e.Scripts.SetTimeLimitMs(n)
+			}
+			return resp.Value{}, false
+		}},
+	{name: "script-hard-deadline-ms", // Ultima extension (S5 watchdog kill)
+		get: func(e *Engine) string {
+			if e.Scripts == nil {
+				return "30000"
+			}
+			return fmt.Sprintf("%d", e.Scripts.HardDeadlineMs())
+		},
+		set: nil}, // engine-level VM budget knob: fixed at startup
+	{name: "script-max-memory-mb", // Ultima extension (per-VM Lua budget)
+		get: func(e *Engine) string { return fmt.Sprintf("%d", e.ScriptMaxMemoryMB()) },
+		set: nil},
+	{name: "script-rng-seed", // Ultima extension (S6 determinism)
+		get: func(e *Engine) string {
+			if e.Scripts == nil {
+				return "0"
+			}
+			return fmt.Sprintf("%d", e.Scripts.RngSeedBase())
+		},
+		set: func(e *Engine, v string) (resp.Value, bool) {
+			n, ok := parseIntStrict([]byte(v))
+			if !ok {
+				return resp.Err("ERR CONFIG SET failed (possibly related to argument 'script-rng-seed') - argument couldn't be parsed into an integer"), true
+			}
+			if e.Scripts != nil {
+				e.Scripts.SetRngSeedBase(n)
 			}
 			return resp.Value{}, false
 		}},

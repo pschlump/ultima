@@ -10,6 +10,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/oapi-codegen/runtime v1.6.0
 	github.com/prometheus/client_golang v1.24.1
+	github.com/pschlump/gopher-lua v0.0.3
 	github.com/pschlump/htotp v1.1.2
 	github.com/pschlump/pluto v0.0.0
 	go.uber.org/goleak v1.3.0
@@ -32,6 +33,7 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
+	github.com/tetratelabs/wazero v1.12.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
@@ -42,3 +44,5 @@ require (
 replace github.com/pschlump/pluto => ../pluto
 
 // replace github.com/pschlump/htotp => ../htotp
+
+replace github.com/pschlump/gopher-lua => ../gopher-lua

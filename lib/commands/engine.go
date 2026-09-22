@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/pschlump/ultima/lib/pubsub"
 	"github.com/pschlump/ultima/lib/resp"
+	"github.com/pschlump/ultima/lib/scripting"
 	"github.com/pschlump/ultima/lib/shard"
 )
 
@@ -186,6 +188,20 @@ type Engine struct {
 	monitorMu  sync.Mutex
 	monitors   map[uint64]func(MonitorEvent)
 
+	// Scripts is the M8 Lua scripting manager (lib/scripting), installed
+	// at startup; nil in bare test engines (EVAL then reports scripting
+	// unavailable).
+	Scripts *scripting.Manager
+
+	// logger is the server logger (scripting bridge diagnostics); nil
+	// falls back to slog.Default().
+	log *slog.Logger
+
+	// scriptMaxMemoryMB mirrors the startup config for CONFIG GET
+	// (script-max-memory-mb); the budget itself is baked into the
+	// scripting engine's VM factory at construction.
+	scriptMaxMemoryMB int
+
 	// Client registry (M6c, §10.1 /clients): every ConnState made by
 	// NewConnState is registered until CloseConn. Synthetic connections
 	// (AOF replay, HTTP key preview) build ConnState directly and never
@@ -261,6 +277,23 @@ func (e *Engine) SetAppendOnlyFlag(on bool) { e.appendOnly.Store(on) }
 // MaxMemory returns the configured maxmemory in bytes (0 = unlimited).
 // The value lives on the shard engine, which enforces it (M5b eviction).
 func (e *Engine) MaxMemory() int64 { return e.Shards.MaxMemory() }
+
+// SetLogger installs the server logger (startup).
+func (e *Engine) SetLogger(l *slog.Logger) { e.log = l }
+
+// SetScriptMaxMemoryMB records the per-VM Lua budget for CONFIG GET.
+func (e *Engine) SetScriptMaxMemoryMB(n int) { e.scriptMaxMemoryMB = n }
+
+// ScriptMaxMemoryMB returns the configured per-VM Lua budget (MB).
+func (e *Engine) ScriptMaxMemoryMB() int { return e.scriptMaxMemoryMB }
+
+// logger returns the server logger, defaulting when unset (tests).
+func (e *Engine) logger() *slog.Logger {
+	if e.log != nil {
+		return e.log
+	}
+	return slog.Default()
+}
 
 // SetMaxMemory updates maxmemory (config file, CONFIG SET).
 func (e *Engine) SetMaxMemory(n int64) { e.Shards.SetMaxMemory(n) }
@@ -423,6 +456,22 @@ func (e *Engine) Execute(cs *ConnState, args [][]byte) resp.Value {
 		}
 	}
 
+	// BUSY gate (M8, Redis's lua_timedout — probed 7.2.7): while a script
+	// runs past lua-time-limit, only SCRIPT KILL passes (plus the
+	// allow_busy connection/transaction commands; Ultima has no SHUTDOWN).
+	if e.Scripts != nil && e.Scripts.BusyTimeout() {
+		allowed := false
+		switch name {
+		case "script":
+			allowed = len(args) > 1 && lowerASCII(args[1]) == "kill"
+		case "multi", "discard", "watch", "unwatch", "auth", "hello", "quit", "reset":
+			allowed = true
+		}
+		if !allowed {
+			return resp.Err("BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.")
+		}
+	}
+
 	// OOM gate (Redis processCommand's maxmemory block, verified against
 	// 7.2.7): while over maxmemory, a denyoom command is rejected with the
 	// OOM error; a command QUEUED inside MULTI is rejected whatever its
@@ -539,6 +588,21 @@ func (e *Engine) notifyMonitors(cs *ConnState, args [][]byte) {
 	}
 }
 
+// notifyMonitorsLua fans a script-invoked command (redis.call) out to the
+// monitors in Redis's form (probed 7.2.7): the address field is "lua" and
+// the argv passes verbatim — AUTH can't appear (it is noscript).
+func (e *Engine) notifyMonitorsLua(cs *ConnState, args [][]byte) {
+	if e.monitorN.Load() == 0 {
+		return
+	}
+	ev := MonitorEvent{When: time.Now(), DB: cs.DB, Addr: "lua", ID: cs.ID, Args: cloneArgs(args)}
+	e.monitorMu.Lock()
+	defer e.monitorMu.Unlock()
+	for _, fn := range e.monitors {
+		fn(ev)
+	}
+}
+
 // monitorArgs copies args for the monitor feed, redacting credentials:
 // AUTH collapses to just its name and HELLO keeps only its protocol
 // version, matching Redis's MONITOR redaction.
@@ -566,6 +630,7 @@ var containerSubs = map[string]map[string]struct{}{
 	"client":  {"setname": {}, "getname": {}, "id": {}, "setinfo": {}},
 	"command": {"count": {}, "info": {}},
 	"pubsub":  {"channels": {}, "numsub": {}, "numpat": {}},
+	"script":  {"load": {}, "exists": {}, "flush": {}, "kill": {}, "debug": {}, "help": {}},
 }
 
 // gatedFullname renders the canonical fullname Redis reports in the

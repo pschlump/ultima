@@ -55,6 +55,16 @@ func TestDifferentialAuth(t *testing.T) {
 	runScripts(t, authScripts, "diff-secret-pw")
 }
 
+// TestDifferentialM8 runs the M8 scripting script table (EVAL/EVALSHA/
+// EVAL_RO/SCRIPT, conversions, redis.call, BUSY/KILL) against Ultima and
+// a real redis-server and diffs every reply, including error strings.
+func TestDifferentialM8(t *testing.T) {
+	if testing.Short() || os.Getenv("DIFFERENTIAL") == "0" {
+		t.Skip("differential harness disabled (-short or DIFFERENTIAL=0)")
+	}
+	runScripts(t, m8Scripts, "")
+}
+
 var authScripts = []script{
 	{"requirepass-flow", []step{
 		cmd("RECONNECT"), // fresh unauthenticated connections on both sides

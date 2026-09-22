@@ -14,6 +14,7 @@ import (
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/persist"
 	"github.com/pschlump/ultima/lib/respserver"
+	"github.com/pschlump/ultima/lib/scripting"
 	"github.com/pschlump/ultima/lib/shard"
 )
 
@@ -27,6 +28,20 @@ func startUltima(t *testing.T, requirepass string) string {
 	if requirepass != "" {
 		eng.SetRequirePass(requirepass)
 	}
+	// M8: the scripting manager (EVAL/SCRIPT) with a generous hard
+	// deadline — KILL/BUSY scripts must behave like Redis's (killable by
+	// SCRIPT KILL long before the watchdog would fire).
+	scr, err := scripting.New(scripting.Config{
+		LuaTimeLimitMs: 5000, HardDeadlineMs: 30000, MaxMemoryMB: 64,
+		CompatVersion: commands.CompatVersion, RunID: eng.RunID,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("scripting manager: %v", err)
+	}
+	t.Cleanup(func() { _ = scr.Close() })
+	eng.Scripts = scr
+	eng.SetScriptMaxMemoryMB(64)
 	// M5c: persistence manager on a per-test temp dir, so SAVE/BGSAVE/
 	// CONFIG-persist scripts run against real persistence wiring (AOF off
 	// by default, as Redis).

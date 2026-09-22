@@ -94,7 +94,18 @@ client `clients/typescript` (`@ultima/client` — the web UI was
 refactored onto it, making it the §11.2 first consumer), the plain-JS
 ESM/CJS distribution `clients/javascript`, and the leaderboard + chat
 example apps under `examples/` (§11.4, e2e-tested in
-`tests/m7_examples_test.go`).
+`tests/m7_examples_test.go`). **M8 scripting is done** — Lua-lite
+(§7 P3, D12, `docs/m8-detailed-plan.md`): EVAL/EVALSHA/EVAL_RO/
+EVALSHA_RO + SCRIPT LOAD/EXISTS/FLUSH/KILL/HELP on the gopher-lua wasm
+engine (`lib/scripting` over `gopher-lua/host`, pure Go, no cgo),
+atomic under PauseAll like EXEC, effects-only AOF capture per
+`redis.call` (S2), BUSY phase + SCRIPT KILL, hard-deadline watchdog
+(S5), per-VM memory budget, host-seeded RNG (S6), and the probed
+byte-exact conversion/error surface (`docs/Redis-Errors.md` — RESP3
+`setresp` wrapper tables included). Differential-green
+(`tests/differential/scripts_m8.go`); crash-recovery tested
+(`tests/m8_aof_test.go`). The rest of the M8 tail (streams, bitfield,
+geo, PF*, SSUBSCRIBE) landed earlier.
 
 ## Technology Stack
 
@@ -117,6 +128,12 @@ example apps under `examples/` (§11.4, e2e-tested in
   - `github.com/pschlump/htotp` — TOTP 2FA (D17). **Pulled in via `replace`
     to the sibling checkout `../htotp`**, like pluto — that directory must
     exist for the module to build.
+  - `github.com/pschlump/gopher-lua` — M8 Lua scripting (D12): the `host`
+    package (wazero runtime + the SHA-pinned `lua51_prod.wasm` blob;
+    scripts compile to wasm). **Pulled in via `replace` to the sibling
+    checkout `../gopher-lua`**, like pluto/htotp — pure Go, no cgo; the
+    daemon consumes only the Go host package and the embedded blob (S1),
+    enforced by `CGO_ENABLED=0 go build ./...`.
 - **No CGo**, no Docker/CI config currently in the repo.
 - `note/redis/` (gitignored) holds a Redis source checkout used as a
   reference; `note/` is scratch material, excluded from lint.
@@ -177,7 +194,8 @@ PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH/PUBSUB; SSUBSCRIBE deferred to M8) and
 blocking ops (BLPOP/BRPOP/BLMPOP/
 BLMOVE/BRPOPLPUSH, BZPOPMIN/BZPOPMAX/BZMPOP). M5a adds
 `notify-keyspace-events` keyspace notifications (CONFIG key, off by
-default). M6d adds MONITOR. Value types: strings
+default). M6d adds MONITOR. M8 adds scripting (EVAL/EVALSHA/EVAL_RO/
+EVALSHA_RO, SCRIPT LOAD/EXISTS/FLUSH/KILL/HELP). Value types: strings
 plus the four collections (`lib/types`). Ultima reports Redis compatibility
 version 7.2.7 (`commands.CompatVersion`).
 
@@ -395,6 +413,43 @@ M6 architecture notes (detail in `docs/m6-detailed-plan.md`):
   would defeat the metrics allowlist). `/ws/v1` stays outside the
   Timeout/Prometheus group to preserve Unwrap/Hijack.
 
+M8 architecture notes (detail in `docs/m8-detailed-plan.md`; the probing
+ground truth is `docs/Redis-Errors.md`):
+
+- **Scripting** (`lib/scripting`, decisions S1–S10 of the gopher-lua
+  integration guide): wraps `gopher-lua/host` (wazero + the SHA-pinned
+  `lua51_prod.wasm` blob; scripts compile to wasm). Fresh VM per EVAL
+  (S4 — created BEFORE the pause; instantiation is the slow part), run
+  under `PauseAll` like EXEC (S3 — reused, not re-taken, when EVAL runs
+  inside EXEC since txMu is not reentrant). Effects-only AOF: EVAL is
+  never logged; `redis.call` inner commands ride
+  `commands.runScriptCommand` (the cmdExec inner path + S9 gates:
+  noscript/arity/read-only/OOM) with per-command capture and the
+  `[db lua]` monitor form. Scripts compile under chunk name
+  `user_script` so error texts render byte-exact, with the
+  ` script: <sha>, on @user_script:N.` suffix (N from gopher-lua's new
+  `rt_err_line`). `redis.call` raises a plain error string (Redis's
+  metatagged error-object class — recognized textually,
+  `isErrorCodePrefixed`); `redis.pcall` returns
+  `{err, ignore_error_stats_update=1}`; `redis.setresp` switches the
+  RESP3 wrapper conversions (`{map=}/{set=}/{double=}`). BUSY gate in
+  `Execute` after the soft `lua-time-limit` (only SCRIPT KILL and the
+  allow_busy commands pass); SCRIPT KILL trips the VM deadline flag
+  (`host.VM.Kill`) unless the script already wrote (UNKILLABLE); the
+  hard `script_hard_deadline_ms` watchdog kills even writers (S5
+  divergence: partial effects persist). Host-seeded RNG (S6) and
+  host-side number formatting (S7). Ledgered divergences:
+  `docs/Redis-Errors.md` §11 (no shared globals across EVALs, dialect
+  texts, SCRIPT DEBUG refusal, wazero interpreter speed).
+- **gopher-lua additions consumed**: `rt_err_line` export, host
+  `ScriptError.Line`, `VM.Kill`, `Engine.RegisterValue`,
+  `host.ValueError` (non-string raised values). Blob SHA pin
+  `27d9802a…` (`host/blob.go`, `testdiff/m6c_test.go`).
+- **Flush fan-out tokens**: `shard.FlushDBTok/FlushAllTok/DBSizeTok` —
+  FLUSHDB/FLUSHALL/DBSIZE fan out shard tasks and must carry the
+  caller's pause token under PauseAll (a latent MULTI+FLUSHALL+EXEC
+  deadlock smoked out by `redis.call('flushall')`).
+
 ## Code Organization
 
 ```
@@ -488,6 +543,15 @@ lib/persist/         persistence (M5c, §13.1, D9 own formats): format.go
                      BGREWRITEAOF dump), replay.go (seq merge + broadcast
                      dedup), manager.go (save rules, fsync policies,
                      restore-before-serve, INFO persistence fields)
+lib/scripting/       Lua scripting (M8, §7 P3, D12, decisions S1–S10):
+                     scripting.go (Manager: host.Engine wrapper, SHA-1 script
+                     cache, per-run VM lifecycle, BUSY/KILL state, soft/hard
+                     deadlines, seeded RNG), bridge.go (the redis.* host
+                     functions: call/pcall/error_reply/status_reply/sha1hex/
+                     log/setresp + error mapping), convert.go (the probed
+                     Lua⇄RESP conversion rules incl. the RESP3 setresp
+                     {map=}/{set=}/{double=} wrappers; host-side number
+                     formatting, S7)
 web/                 M6d web UI (§10.2): React+TS+vite app (bun; src/ screens,
                      src/lib/ws.ts is the /ws/v1 client with §9.4 session
                      recovery, src/lib/api.ts the REST wrappers) plus the Go
@@ -508,7 +572,10 @@ tests/               integration_test.go (three surfaces, ephemeral ports), m3_t
                      m5_test.go (M5c crash recovery: subprocess + SIGKILL,
                      snapshot/AOF/AOF-rewrite variants), m6_test.go (M6a auth
                      flows: HTTP login/refresh/TOTP/admin, gRPC + WS JWT
-                     enforcement)
+                     enforcement), m8_script_test.go (M8 EVAL over three
+                     surfaces, BUSY/KILL, hard deadline, memory cap,
+                     concurrent stress), m8_aof_test.go (M8 S2 crash
+                     recovery of script effects; no EVAL verb in the AOF)
 tests/ts-roundtrip/  protobuf-es TS client script (bun; `bun install` first) — the M4
                      go+ts round-trip exit criterion; strict tsc typecheck via tsconfig
 tests/differential/  harness diffs replies against a real redis-server (the parity gate);

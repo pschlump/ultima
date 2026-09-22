@@ -21,6 +21,7 @@ import (
 	"github.com/pschlump/ultima/lib/persist"
 	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/respserver"
+	"github.com/pschlump/ultima/lib/scripting"
 	"github.com/pschlump/ultima/lib/shard"
 	"github.com/pschlump/ultima/lib/wssession"
 )
@@ -39,6 +40,7 @@ type servers struct {
 	shards  *shard.Engine
 	persist *persist.Manager
 	wssess  *wssession.Registry
+	scripts *scripting.Manager
 }
 
 func respPortOf(lis net.Listener) int {
@@ -125,6 +127,7 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 
 	s.shards = shard.NewEngine(cfg.Server.ShardCount, cfg.Server.MaxDBs)
 	eng := commands.NewEngine(s.shards, Version, respPortOf(s.respLis))
+	eng.SetLogger(logger)
 	eng.SetRequirePass(cfg.Server.RequirePass)
 	eng.SetMaxMemory(int64(cfg.Server.MaxMemoryMB) << 20)
 	if !eng.SetNotifyKeyspaceEvents(cfg.Server.NotifyKeyspaceEvents) {
@@ -135,6 +138,25 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 		return nil, fmt.Errorf("invalid maxmemory_policy %q: use one of '%s'", cfg.Server.MaxMemoryPolicy, strings.Join(shard.EvictPolicyNames, ", "))
 	}
 	s.shards.SetPolicy(pol)
+
+	// Lua scripting (M8, §7 P3, D12): the scripting manager wraps the
+	// SHA-pinned gopher-lua production blob; the script.* config group
+	// feeds the soft BUSY limit, the hard watchdog deadline (S5), the
+	// per-VM memory budget, and the deterministic RNG seed base (S6).
+	s.scripts, err = scripting.New(scripting.Config{
+		LuaTimeLimitMs: cfg.Script.LuaTimeLimitMs,
+		HardDeadlineMs: cfg.Script.HardDeadlineMs,
+		MaxMemoryMB:    cfg.Script.MaxMemoryMB,
+		RngSeed:        cfg.Script.RngSeed,
+		RunID:          eng.RunID,
+		CompatVersion:  commands.CompatVersion,
+		Logger:         logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scripting: %w", err)
+	}
+	eng.Scripts = s.scripts
+	eng.SetScriptMaxMemoryMB(cfg.Script.MaxMemoryMB)
 
 	// Persistence (M5c, §13.1): the manager restores synchronously (AOF
 	// when appendonly, else the snapshot) BEFORE any serve loop starts —
@@ -255,6 +277,7 @@ func (s *servers) shutdown(ctx context.Context) error {
 	errs = append(errs, s.httpSrv.Shutdown(ctx))
 	errs = append(errs, s.respSrv.Close()) // closes the listener and all conns
 	s.wssess.Close()                       // expire retained WS sessions (§9.4)
+	_ = s.scripts.Close()                  // no new script VMs (M8)
 	// Persist before the shard engine stops (§13.1): final fsync (+ the
 	// shutdown snapshot when save rules are configured and unsaved writes
 	// remain) needs live shard goroutines.

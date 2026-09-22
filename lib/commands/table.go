@@ -37,18 +37,18 @@ func init() {
 	// connection
 	def("ping", -1, []string{"fast"}, 0, 0, 0, "connection", cmdPing)
 	def("echo", 2, []string{"fast"}, 0, 0, 0, "connection", cmdEcho)
-	def("hello", -1, []string{"fast"}, 0, 0, 0, "connection", cmdHello)
-	def("auth", -2, []string{"fast"}, 0, 0, 0, "connection", cmdAuth)
+	def("hello", -1, []string{"fast", "noscript"}, 0, 0, 0, "connection", cmdHello)
+	def("auth", -2, []string{"fast", "noscript"}, 0, 0, 0, "connection", cmdAuth)
 	def("select", 2, []string{"fast"}, 0, 0, 0, "connection", cmdSelect)
-	def("quit", -1, []string{"fast"}, 0, 0, 0, "connection", cmdQuit)
-	def("reset", 1, []string{"fast"}, 0, 0, 0, "connection", cmdReset)
+	def("quit", -1, []string{"fast", "noscript"}, 0, 0, 0, "connection", cmdQuit)
+	def("reset", 1, []string{"fast", "noscript"}, 0, 0, 0, "connection", cmdReset)
 
 	// transaction
-	def("multi", 1, []string{"fast"}, 0, 0, 0, "transaction", cmdMulti)
-	def("exec", -1, []string{"write"}, 0, 0, 0, "transaction", cmdExec)
-	def("discard", 1, []string{"fast"}, 0, 0, 0, "transaction", cmdDiscard)
-	def("unwatch", 1, []string{"fast"}, 0, 0, 0, "transaction", cmdUnwatch)
-	def("watch", -2, []string{"fast"}, 1, -1, 1, "transaction", cmdWatch)
+	def("multi", 1, []string{"fast", "noscript"}, 0, 0, 0, "transaction", cmdMulti)
+	def("exec", -1, []string{"write", "noscript"}, 0, 0, 0, "transaction", cmdExec)
+	def("discard", 1, []string{"fast", "noscript"}, 0, 0, 0, "transaction", cmdDiscard)
+	def("unwatch", 1, []string{"fast", "noscript"}, 0, 0, 0, "transaction", cmdUnwatch)
+	def("watch", -2, []string{"fast", "noscript"}, 1, -1, 1, "transaction", cmdWatch)
 
 	// string
 	def("set", -3, []string{"write", "denyoom"}, 1, 1, 1, "string", cmdSet)
@@ -174,26 +174,33 @@ func init() {
 	def("zscan", -3, []string{"readonly"}, 0, 0, 0, "sorted_set", cmdZScan)
 
 	// pubsub
-	def("subscribe", -2, []string{"fast"}, 0, 0, 0, "pubsub", cmdSubscribe)
-	def("psubscribe", -2, []string{"fast"}, 0, 0, 0, "pubsub", cmdPSubscribe)
-	def("unsubscribe", -1, []string{"fast"}, 0, 0, 0, "pubsub", cmdUnsubscribe)
-	def("punsubscribe", -1, []string{"fast"}, 0, 0, 0, "pubsub", cmdPUnsubscribe)
+	def("subscribe", -2, []string{"fast", "noscript"}, 0, 0, 0, "pubsub", cmdSubscribe)
+	def("psubscribe", -2, []string{"fast", "noscript"}, 0, 0, 0, "pubsub", cmdPSubscribe)
+	def("unsubscribe", -1, []string{"fast", "noscript"}, 0, 0, 0, "pubsub", cmdUnsubscribe)
+	def("punsubscribe", -1, []string{"fast", "noscript"}, 0, 0, 0, "pubsub", cmdPUnsubscribe)
 	def("publish", 3, []string{"fast"}, 0, 0, 0, "pubsub", cmdPublish)
 	def("pubsub", -2, []string{"random"}, 0, 0, 0, "pubsub", cmdPubSub)
+
+	// scripting (M8; flags probed against 7.2.7 COMMAND INFO)
+	def("eval", -3, []string{"noscript", "stale", "skip_monitor", "no_mandatory_keys", "movablekeys"}, 0, 0, 0, "scripting", cmdEval)
+	def("evalsha", -3, []string{"noscript", "stale", "skip_monitor", "no_mandatory_keys", "movablekeys"}, 0, 0, 0, "scripting", cmdEvalSha)
+	def("eval_ro", -3, []string{"readonly", "noscript", "stale", "skip_monitor", "no_mandatory_keys", "movablekeys"}, 0, 0, 0, "scripting", cmdEvalRO)
+	def("evalsha_ro", -3, []string{"readonly", "noscript", "stale", "skip_monitor", "no_mandatory_keys", "movablekeys"}, 0, 0, 0, "scripting", cmdEvalShaRO)
+	def("script", -2, []string{"noscript"}, 0, 0, 0, "scripting", cmdScript)
 
 	// server
 	def("info", -1, []string{"readonly"}, 0, 0, 0, "server", cmdInfo)
 	def("dbsize", 1, []string{"readonly", "fast"}, 0, 0, 0, "server", cmdDBSize)
 	def("flushdb", -1, []string{"write"}, 0, 0, 0, "server", cmdFlushDB)
 	def("flushall", -1, []string{"write"}, 0, 0, 0, "server", cmdFlushAll)
-	def("config", -2, []string{"admin"}, 0, 0, 0, "server", cmdConfig)
-	def("client", -2, []string{"admin"}, 0, 0, 0, "server", cmdClient)
+	def("config", -2, []string{"admin", "noscript"}, 0, 0, 0, "server", cmdConfig)
+	def("client", -2, []string{"admin", "noscript"}, 0, 0, 0, "server", cmdClient)
 	def("command", -1, []string{"readonly"}, 0, 0, 0, "server", cmdCommand)
-	def("monitor", 1, []string{"admin"}, 0, 0, 0, "server", cmdMonitor)
-	def("save", 1, []string{"admin"}, 0, 0, 0, "server", cmdSave)
-	def("bgsave", 1, []string{"admin"}, 0, 0, 0, "server", cmdBGSave)
+	def("monitor", 1, []string{"admin", "noscript"}, 0, 0, 0, "server", cmdMonitor)
+	def("save", 1, []string{"admin", "noscript"}, 0, 0, 0, "server", cmdSave)
+	def("bgsave", 1, []string{"admin", "noscript"}, 0, 0, 0, "server", cmdBGSave)
 	def("lastsave", 1, []string{"readonly", "fast"}, 0, 0, 0, "server", cmdLastSave)
-	def("bgrewriteaof", 1, []string{"admin"}, 0, 0, 0, "server", cmdBGRewriteAOF)
+	def("bgrewriteaof", 1, []string{"admin", "noscript"}, 0, 0, 0, "server", cmdBGRewriteAOF)
 }
 
 // CommandCount reports the command table size (COMMAND COUNT).

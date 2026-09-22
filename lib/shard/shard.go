@@ -389,16 +389,28 @@ func (e *Engine) DoMultiTok(tok uint64, keys [][]byte, fn func(s *Shard, idxs []
 // tombstones and bump db's epoch, dirtying all watchers on db. Callers
 // must not be inside a shard goroutine (the fan-out submits shard tasks).
 func (e *Engine) FlushDB(db int) {
+	e.FlushDBTok(0, db)
+}
+
+// FlushDBTok is FlushDB carrying a pause token: under PauseAll (EXEC,
+// EVAL) the fan-out must ride the caller's token — plain tasks would
+// stash behind the parked shards and deadlock the caller.
+func (e *Engine) FlushDBTok(tok uint64, db int) {
 	e.dbs[db].ks.Store(e.newKeyspace())
 	for i := range e.shard {
-		e.DoShard(i, func(s *Shard) { s.flushDB(db) })
+		e.DoTok(tok, i, func(s *Shard) { s.flushDB(db) })
 	}
 }
 
 // FlushAll drops every key in every logical DB.
 func (e *Engine) FlushAll() {
+	e.FlushAllTok(0)
+}
+
+// FlushAllTok is FlushAll carrying a pause token (see FlushDBTok).
+func (e *Engine) FlushAllTok(tok uint64) {
 	for i := range e.dbs {
-		e.FlushDB(i)
+		e.FlushDBTok(tok, i)
 	}
 }
 
@@ -439,13 +451,18 @@ func (e *Engine) AllKeys(db int) []string {
 // DBSize returns the number of live keys in db: every shard sweeps its due
 // expiries, then per-shard stripe lengths (stripe i == shard i) are summed.
 func (e *Engine) DBSize(db int) int {
+	return e.DBSizeTok(0, db)
+}
+
+// DBSizeTok is DBSize carrying a pause token (see FlushDBTok).
+func (e *Engine) DBSizeTok(tok uint64, db int) int {
 	var total atomic.Int64
 	var wg sync.WaitGroup
 	for i := range e.shard {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			e.DoShard(i, func(s *Shard) {
+			e.DoTok(tok, i, func(s *Shard) {
 				s.sweep(e.NowMs(), -1, time.Time{})
 				ks := e.dbs[db].ks.Load()
 				total.Add(int64(ks.tab.StripeLen(i)))
