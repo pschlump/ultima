@@ -1,0 +1,265 @@
+# Server-group cases: DBSIZE, FLUSHDB/FLUSHALL, SAVE/BGSAVE/LASTSAVE/
+# BGREWRITEAOF, CONFIG GET/SET, COMMAND, CLIENT.
+#
+# INFO and CLIENT LIST are deliberately excluded (field sets legitimately
+# diverge; the runner covers INFO/CLIENT minimally via specials).
+# CLIENT NO-EVICT is excluded: unimplemented in ultima (unknown subcommand).
+# CONFIG GET no-such-param renders "(empty array)" on RESP2 and "(empty
+# hash)" on RESP3 — both clients agree, so one case covers both.
+
+# BGREWRITEAOF runs first: with appendonly off and no child ever forked,
+# both ultima and real redis 7.2.7 deterministically reply "started". Placed
+# after a BGSAVE it races the still-active child ("scheduled" on redis).
+== case: server.bgrewriteaof
+BGREWRITEAOF
+--
+Background append only file rewriting started
+
+== case: server.dbsize
+DBSIZE
+SET sv.a 1
+SET sv.b 2
+DBSIZE
+DEL sv.a
+DBSIZE
+--
+(integer) 0
+OK
+OK
+(integer) 2
+(integer) 1
+(integer) 1
+
+== case: server.flushdb-flushall
+SET sv.a 1
+FLUSHDB
+DBSIZE
+SET sv.a 1
+FLUSHDB ASYNC
+DBSIZE
+SET sv.a 1
+FLUSHDB SYNC
+DBSIZE
+FLUSHDB badopt
+SET sv.a 1
+FLUSHALL
+DBSIZE
+SET sv.a 1
+FLUSHALL ASYNC
+DBSIZE
+SET sv.a 1
+FLUSHALL SYNC
+DBSIZE
+FLUSHALL badopt
+--
+OK
+OK
+(integer) 0
+OK
+OK
+(integer) 0
+OK
+OK
+(integer) 0
+(error) ERR syntax error
+OK
+OK
+(integer) 0
+OK
+OK
+(integer) 0
+OK
+OK
+(integer) 0
+(error) ERR syntax error
+
+== case: server.flushdb-select-isolation
+SELECT 1
+SET sv.db1 v
+SELECT 2
+SET sv.db2 v
+DBSIZE
+FLUSHDB
+DBSIZE
+SELECT 1
+DBSIZE
+SELECT 2
+DBSIZE
+SELECT 0
+--
+OK
+OK
+OK
+OK
+(integer) 1
+OK
+(integer) 0
+OK
+(integer) 1
+OK
+(integer) 0
+OK
+
+== case: server.flushall-all-dbs
+SELECT 1
+SET sv.db1 v
+SELECT 2
+SET sv.db2 v
+FLUSHALL
+DBSIZE
+SELECT 1
+DBSIZE
+SELECT 0
+DBSIZE
+--
+OK
+OK
+OK
+OK
+OK
+(integer) 0
+OK
+(integer) 0
+OK
+(integer) 0
+
+== case: server.save
+SAVE
+--
+OK
+
+== case: server.bgsave
+BGSAVE
+--
+Background saving started
+
+== case: server.lastsave
+== type: match
+LASTSAVE
+--
+\(integer\) [0-9]+
+
+== case: server.config-get
+CONFIG GET maxmemory
+CONFIG GET maxmemory-policy
+CONFIG GET appendonly
+CONFIG GET save
+CONFIG GET notify-keyspace-events
+CONFIG GET appendfsync
+--
+1) "maxmemory"
+2) "0"
+1) "maxmemory-policy"
+2) "noeviction"
+1) "appendonly"
+2) "no"
+1) "save"
+2) ""
+1) "notify-keyspace-events"
+2) ""
+1) "appendfsync"
+2) "everysec"
+== resp3
+--
+1# "maxmemory" => "0"
+1# "maxmemory-policy" => "noeviction"
+1# "appendonly" => "no"
+1# "save" => ""
+1# "notify-keyspace-events" => ""
+1# "appendfsync" => "everysec"
+
+== case: server.config-set-policy
+CONFIG SET maxmemory-policy allkeys-lru
+CONFIG GET maxmemory-policy
+CONFIG SET maxmemory-policy noeviction
+--
+OK
+1) "maxmemory-policy"
+2) "allkeys-lru"
+OK
+== resp3
+--
+OK
+1# "maxmemory-policy" => "allkeys-lru"
+OK
+
+== case: server.config-set-errors
+CONFIG SET maxmemory-policy bogus-policy
+CONFIG SET maxmemory notanumber
+CONFIG SET dir /tmp
+--
+(error) ERR CONFIG SET failed (possibly related to argument 'maxmemory-policy') - argument(s) must be one of the following: volatile-lru, volatile-lfu, volatile-random, volatile-ttl, allkeys-lru, allkeys-lfu, allkeys-random, noeviction
+(error) ERR CONFIG SET failed (possibly related to argument 'maxmemory') - argument must be a memory value
+(error) ERR CONFIG SET failed (possibly related to argument 'dir') - can't set protected config
+
+== case: server.config-get-nosuch
+CONFIG GET no-such-param
+--
+(empty array)
+== resp3
+--
+(empty hash)
+
+== case: server.command-count
+== targets: no-redis
+COMMAND COUNT
+--
+(integer) 141
+
+== case: server.command-info
+== targets: no-redis
+COMMAND INFO get set keys
+--
+1) 1) "get"
+   2) (integer) 2
+   3) 1) readonly
+      2) fast
+   4) (integer) 1
+   5) (integer) 1
+   6) (integer) 1
+2) 1) "set"
+   2) (integer) -3
+   3) 1) write
+      2) denyoom
+   4) (integer) 1
+   5) (integer) 1
+   6) (integer) 1
+3) 1) "keys"
+   2) (integer) 2
+   3) 1) readonly
+   4) (integer) 0
+   5) (integer) 0
+   6) (integer) 0
+
+== case: server.command-info-unknown
+COMMAND INFO nosuchcmd
+--
+1) (nil)
+
+== case: server.command-docs
+== targets: no-redis
+COMMAND DOCS get
+--
+(error) ERR unknown subcommand 'DOCS'. Try COMMAND HELP.
+
+== case: server.client-name
+CLIENT GETNAME
+CLIENT SETNAME myconn
+CLIENT GETNAME
+CLIENT SETNAME "bad name"
+CLIENT SETNAME ""
+CLIENT GETNAME
+--
+(nil)
+OK
+"myconn"
+(error) ERR Client names cannot contain spaces, newlines or special characters.
+OK
+(nil)
+
+== case: server.client-id
+== type: match
+CLIENT ID
+--
+\(integer\) [0-9]+
+== end

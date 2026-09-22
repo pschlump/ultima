@@ -1,0 +1,488 @@
+# Unknown-group cases: byte-exact 'unknown command' errors for Redis 7.2.7
+# commands that ultima deliberately does NOT implement (Lua scripting,
+# functions, string range/bit ops, keyspace move/copy/dump, SORT, OBJECT,
+# LCS, streams, geo, HyperLogLog, ACL, replication, cluster, introspection
+# containers like LATENCY/MEMORY/MODULE/SLOWLOG).
+#
+# Every case except unknown.sync/unknown.psync is '== targets: no-redis': a
+# real redis-server implements most of these and would NOT error, so the
+# expectations would fail validation.
+#
+# Error shape (matches Redis 7.2.7):
+#   ERR unknown command '<name>', with args beginning with: '<a1>', '<a2>',
+# Name as typed (case preserved); each arg single-quoted with a trailing
+# space; zero-arg commands end the line right after "with: " (trailing
+# space — the trailing spaces on the expected lines below are significant).
+#
+# redis-cli client-side quirks worked around here (redis-cli.c, 7.2.7):
+#   * 'sync'/'psync' put redis-cli into slave output mode (it prints
+#     "SYNC with master failed: -ERR ..." + "Entering replica output
+#     mode..."), so those two cases are '== targets: resp3,no-redis'
+#     (ultima-ws-cli and ultima-grpc-cli render the error normally; the
+#     real-redis validation targets skip them because a real redis would
+#     answer SYNC with an RDB dump stream).
+#   * redis-cli prints the reply RAW (no "(error) " prefix) for 'lolwut'
+#     (any arity), 'memory doctor'/'memory malloc-stats', 'cluster info'/
+#     'cluster nodes' (2-arg), 'latency doctor' (2-arg)/'latency graph'
+#     (3-arg) and 'debug htstats*' — so unknown.lolwut uses 'match' with an
+#     optional "(error) " prefix and the memory/cluster/latency/debug cases
+#     simply use other subcommands.
+
+== case: unknown.eval
+== targets: no-redis
+eval
+eval return-1 0
+EVAL return-1 2 k1 k2
+--
+(error) ERR unknown command 'eval', with args beginning with: 
+(error) ERR unknown command 'eval', with args beginning with: 'return-1' '0' 
+(error) ERR unknown command 'EVAL', with args beginning with: 'return-1' '2' 'k1' 'k2' 
+
+== case: unknown.evalsha
+== targets: no-redis
+evalsha
+EVALSHA deadbeef 1 mykey
+--
+(error) ERR unknown command 'evalsha', with args beginning with: 
+(error) ERR unknown command 'EVALSHA', with args beginning with: 'deadbeef' '1' 'mykey' 
+
+== case: unknown.script
+== targets: no-redis
+script
+script load return-1
+SCRIPT EXISTS abc
+--
+(error) ERR unknown command 'script', with args beginning with: 
+(error) ERR unknown command 'script', with args beginning with: 'load' 'return-1' 
+(error) ERR unknown command 'SCRIPT', with args beginning with: 'EXISTS' 'abc' 
+
+== case: unknown.function
+== targets: no-redis
+function
+function list
+FUNCTION DUMP
+--
+(error) ERR unknown command 'function', with args beginning with: 
+(error) ERR unknown command 'function', with args beginning with: 'list' 
+(error) ERR unknown command 'FUNCTION', with args beginning with: 'DUMP' 
+
+== case: unknown.getrange
+== targets: no-redis
+getrange k 0 -1
+GETRANGE k 0 3
+--
+(error) ERR unknown command 'getrange', with args beginning with: 'k' '0' '-1' 
+(error) ERR unknown command 'GETRANGE', with args beginning with: 'k' '0' '3' 
+
+== case: unknown.setrange
+== targets: no-redis
+setrange k 0 v
+SETRANGE k 5 xyz
+--
+(error) ERR unknown command 'setrange', with args beginning with: 'k' '0' 'v' 
+(error) ERR unknown command 'SETRANGE', with args beginning with: 'k' '5' 'xyz' 
+
+== case: unknown.setnx
+== targets: no-redis
+setnx k v
+SETNX k2 v2
+--
+(error) ERR unknown command 'setnx', with args beginning with: 'k' 'v' 
+(error) ERR unknown command 'SETNX', with args beginning with: 'k2' 'v2' 
+
+== case: unknown.substr
+== targets: no-redis
+substr k 0 -1
+SUBSTR k 1 2
+--
+(error) ERR unknown command 'substr', with args beginning with: 'k' '0' '-1' 
+(error) ERR unknown command 'SUBSTR', with args beginning with: 'k' '1' '2' 
+
+== case: unknown.randomkey
+== targets: no-redis
+randomkey
+RANDOMKEY
+--
+(error) ERR unknown command 'randomkey', with args beginning with: 
+(error) ERR unknown command 'RANDOMKEY', with args beginning with: 
+
+== case: unknown.rename
+== targets: no-redis
+rename a b
+RENAME a
+--
+(error) ERR unknown command 'rename', with args beginning with: 'a' 'b' 
+(error) ERR unknown command 'RENAME', with args beginning with: 'a' 
+
+== case: unknown.renamenx
+== targets: no-redis
+renamenx a b
+RENAMENX a
+--
+(error) ERR unknown command 'renamenx', with args beginning with: 'a' 'b' 
+(error) ERR unknown command 'RENAMENX', with args beginning with: 'a' 
+
+== case: unknown.move
+== targets: no-redis
+move k 1
+MOVE k 2
+--
+(error) ERR unknown command 'move', with args beginning with: 'k' '1' 
+(error) ERR unknown command 'MOVE', with args beginning with: 'k' '2' 
+
+== case: unknown.copy
+== targets: no-redis
+copy a b
+COPY a b REPLACE
+--
+(error) ERR unknown command 'copy', with args beginning with: 'a' 'b' 
+(error) ERR unknown command 'COPY', with args beginning with: 'a' 'b' 'REPLACE' 
+
+== case: unknown.dump
+== targets: no-redis
+dump k
+DUMP k2
+--
+(error) ERR unknown command 'dump', with args beginning with: 'k' 
+(error) ERR unknown command 'DUMP', with args beginning with: 'k2' 
+
+== case: unknown.restore
+== targets: no-redis
+restore k 0 payload
+RESTORE k 0 payload REPLACE
+--
+(error) ERR unknown command 'restore', with args beginning with: 'k' '0' 'payload' 
+(error) ERR unknown command 'RESTORE', with args beginning with: 'k' '0' 'payload' 'REPLACE' 
+
+== case: unknown.sort
+== targets: no-redis
+sort k
+SORT k ALPHA
+--
+(error) ERR unknown command 'sort', with args beginning with: 'k' 
+(error) ERR unknown command 'SORT', with args beginning with: 'k' 'ALPHA' 
+
+== case: unknown.sort-ro
+== targets: no-redis
+sort_ro k
+SORT_RO k ALPHA
+--
+(error) ERR unknown command 'sort_ro', with args beginning with: 'k' 
+(error) ERR unknown command 'SORT_RO', with args beginning with: 'k' 'ALPHA' 
+
+== case: unknown.object
+== targets: no-redis
+object
+object encoding k
+OBJECT ENCODING k
+--
+(error) ERR unknown command 'object', with args beginning with: 
+(error) ERR unknown command 'object', with args beginning with: 'encoding' 'k' 
+(error) ERR unknown command 'OBJECT', with args beginning with: 'ENCODING' 'k' 
+
+== case: unknown.bitcount
+== targets: no-redis
+bitcount k
+BITCOUNT k 0 -1
+--
+(error) ERR unknown command 'bitcount', with args beginning with: 'k' 
+(error) ERR unknown command 'BITCOUNT', with args beginning with: 'k' '0' '-1' 
+
+== case: unknown.bitop
+== targets: no-redis
+bitop and d a b
+BITOP NOT d a
+--
+(error) ERR unknown command 'bitop', with args beginning with: 'and' 'd' 'a' 'b' 
+(error) ERR unknown command 'BITOP', with args beginning with: 'NOT' 'd' 'a' 
+
+== case: unknown.bitpos
+== targets: no-redis
+bitpos k 1
+BITPOS k 0 0 -1
+--
+(error) ERR unknown command 'bitpos', with args beginning with: 'k' '1' 
+(error) ERR unknown command 'BITPOS', with args beginning with: 'k' '0' '0' '-1' 
+
+== case: unknown.getbit
+== targets: no-redis
+getbit k 0
+GETBIT k 7
+--
+(error) ERR unknown command 'getbit', with args beginning with: 'k' '0' 
+(error) ERR unknown command 'GETBIT', with args beginning with: 'k' '7' 
+
+== case: unknown.setbit
+== targets: no-redis
+setbit k 0 1
+SETBIT k 7 0
+--
+(error) ERR unknown command 'setbit', with args beginning with: 'k' '0' '1' 
+(error) ERR unknown command 'SETBIT', with args beginning with: 'k' '7' '0' 
+
+== case: unknown.bitfield
+== targets: no-redis
+bitfield k get u1 0
+BITFIELD k set u8 0 1
+--
+(error) ERR unknown command 'bitfield', with args beginning with: 'k' 'get' 'u1' '0' 
+(error) ERR unknown command 'BITFIELD', with args beginning with: 'k' 'set' 'u8' '0' '1' 
+
+== case: unknown.bitfield-ro
+== targets: no-redis
+bitfield_ro k get u1 0
+BITFIELD_RO k get u8 0
+--
+(error) ERR unknown command 'bitfield_ro', with args beginning with: 'k' 'get' 'u1' '0' 
+(error) ERR unknown command 'BITFIELD_RO', with args beginning with: 'k' 'get' 'u8' '0' 
+
+== case: unknown.lcs
+== targets: no-redis
+lcs a b
+LCS a b LEN
+--
+(error) ERR unknown command 'lcs', with args beginning with: 'a' 'b' 
+(error) ERR unknown command 'LCS', with args beginning with: 'a' 'b' 'LEN' 
+
+== case: unknown.xadd
+== targets: no-redis
+xadd s * f v
+XADD s 1-1 f v
+--
+(error) ERR unknown command 'xadd', with args beginning with: 's' '*' 'f' 'v' 
+(error) ERR unknown command 'XADD', with args beginning with: 's' '1-1' 'f' 'v' 
+
+== case: unknown.xread
+== targets: no-redis
+xread streams s 0
+XREAD count 2 streams s 0
+--
+(error) ERR unknown command 'xread', with args beginning with: 'streams' 's' '0' 
+(error) ERR unknown command 'XREAD', with args beginning with: 'count' '2' 'streams' 's' '0' 
+
+== case: unknown.xinfo
+== targets: no-redis
+xinfo stream s
+XINFO groups s
+--
+(error) ERR unknown command 'xinfo', with args beginning with: 'stream' 's' 
+(error) ERR unknown command 'XINFO', with args beginning with: 'groups' 's' 
+
+== case: unknown.geoadd
+== targets: no-redis
+geoadd g 0 0 m
+GEOADD g 1 1 m2
+--
+(error) ERR unknown command 'geoadd', with args beginning with: 'g' '0' '0' 'm' 
+(error) ERR unknown command 'GEOADD', with args beginning with: 'g' '1' '1' 'm2' 
+
+== case: unknown.geodist
+== targets: no-redis
+geodist g a b
+GEODIST g a b km
+--
+(error) ERR unknown command 'geodist', with args beginning with: 'g' 'a' 'b' 
+(error) ERR unknown command 'GEODIST', with args beginning with: 'g' 'a' 'b' 'km' 
+
+== case: unknown.pfadd
+== targets: no-redis
+pfadd h e
+PFADD h e1 e2
+--
+(error) ERR unknown command 'pfadd', with args beginning with: 'h' 'e' 
+(error) ERR unknown command 'PFADD', with args beginning with: 'h' 'e1' 'e2' 
+
+== case: unknown.pfcount
+== targets: no-redis
+pfcount h
+PFCOUNT h1 h2
+--
+(error) ERR unknown command 'pfcount', with args beginning with: 'h' 
+(error) ERR unknown command 'PFCOUNT', with args beginning with: 'h1' 'h2' 
+
+== case: unknown.pfmerge
+== targets: no-redis
+pfmerge d s
+PFMERGE d s1 s2
+--
+(error) ERR unknown command 'pfmerge', with args beginning with: 'd' 's' 
+(error) ERR unknown command 'PFMERGE', with args beginning with: 'd' 's1' 's2' 
+
+== case: unknown.acl
+== targets: no-redis
+acl
+acl whoami
+ACL LIST
+--
+(error) ERR unknown command 'acl', with args beginning with: 
+(error) ERR unknown command 'acl', with args beginning with: 'whoami' 
+(error) ERR unknown command 'ACL', with args beginning with: 'LIST' 
+
+== case: unknown.wait
+== targets: no-redis
+wait 0 0
+WAIT 1 100
+--
+(error) ERR unknown command 'wait', with args beginning with: '0' '0' 
+(error) ERR unknown command 'WAIT', with args beginning with: '1' '100' 
+
+== case: unknown.failover
+== targets: no-redis
+failover
+FAILOVER TO 127.0.0.1 6379
+--
+(error) ERR unknown command 'failover', with args beginning with: 
+(error) ERR unknown command 'FAILOVER', with args beginning with: 'TO' '127.0.0.1' '6379' 
+
+== case: unknown.replconf
+== targets: no-redis
+replconf listening-port 6379
+REPLCONF ACK 0
+--
+(error) ERR unknown command 'replconf', with args beginning with: 'listening-port' '6379' 
+(error) ERR unknown command 'REPLCONF', with args beginning with: 'ACK' '0' 
+
+== case: unknown.replicaof
+== targets: no-redis
+replicaof no one
+REPLICAOF 127.0.0.1 6379
+--
+(error) ERR unknown command 'replicaof', with args beginning with: 'no' 'one' 
+(error) ERR unknown command 'REPLICAOF', with args beginning with: '127.0.0.1' '6379' 
+
+== case: unknown.slaveof
+== targets: no-redis
+slaveof no one
+SLAVEOF 127.0.0.1 6379
+--
+(error) ERR unknown command 'slaveof', with args beginning with: 'no' 'one' 
+(error) ERR unknown command 'SLAVEOF', with args beginning with: '127.0.0.1' '6379' 
+
+== case: unknown.sync
+== targets: resp3,no-redis
+sync
+SYNC
+--
+(error) ERR unknown command 'sync', with args beginning with: 
+(error) ERR unknown command 'SYNC', with args beginning with: 
+
+== case: unknown.psync
+== targets: resp3,no-redis
+psync ? -1
+PSYNC replid 0
+--
+(error) ERR unknown command 'psync', with args beginning with: '?' '-1' 
+(error) ERR unknown command 'PSYNC', with args beginning with: 'replid' '0' 
+
+== case: unknown.debug
+== targets: no-redis
+debug
+debug sleep 0
+DEBUG JMAP
+--
+(error) ERR unknown command 'debug', with args beginning with: 
+(error) ERR unknown command 'debug', with args beginning with: 'sleep' '0' 
+(error) ERR unknown command 'DEBUG', with args beginning with: 'JMAP' 
+
+== case: unknown.shutdown
+== targets: no-redis
+shutdown
+shutdown nosave
+SHUTDOWN SAVE
+--
+(error) ERR unknown command 'shutdown', with args beginning with: 
+(error) ERR unknown command 'shutdown', with args beginning with: 'nosave' 
+(error) ERR unknown command 'SHUTDOWN', with args beginning with: 'SAVE' 
+
+== case: unknown.migrate
+== targets: no-redis
+migrate 127.0.0.1 6379 k 0 100
+MIGRATE 127.0.0.1 6379 k 0 100 COPY
+--
+(error) ERR unknown command 'migrate', with args beginning with: '127.0.0.1' '6379' 'k' '0' '100' 
+(error) ERR unknown command 'MIGRATE', with args beginning with: '127.0.0.1' '6379' 'k' '0' '100' 'COPY' 
+
+== case: unknown.asking
+== targets: no-redis
+asking
+ASKING
+--
+(error) ERR unknown command 'asking', with args beginning with: 
+(error) ERR unknown command 'ASKING', with args beginning with: 
+
+== case: unknown.cluster
+== targets: no-redis
+cluster
+cluster myid
+CLUSTER SLOTS
+--
+(error) ERR unknown command 'cluster', with args beginning with: 
+(error) ERR unknown command 'cluster', with args beginning with: 'myid' 
+(error) ERR unknown command 'CLUSTER', with args beginning with: 'SLOTS' 
+
+== case: unknown.readonly
+== targets: no-redis
+readonly
+READONLY
+--
+(error) ERR unknown command 'readonly', with args beginning with: 
+(error) ERR unknown command 'READONLY', with args beginning with: 
+
+== case: unknown.readwrite
+== targets: no-redis
+readwrite
+READWRITE
+--
+(error) ERR unknown command 'readwrite', with args beginning with: 
+(error) ERR unknown command 'READWRITE', with args beginning with: 
+
+== case: unknown.lolwut
+== targets: no-redis
+== type: match
+lolwut
+LOLWUT VERSION 1
+--
+(\(error\) )?ERR unknown command 'lolwut', with args beginning with: 
+(\(error\) )?ERR unknown command 'LOLWUT', with args beginning with: 'VERSION' '1' 
+
+== case: unknown.latency
+== targets: no-redis
+latency
+latency latest
+LATENCY HISTORY some-event
+--
+(error) ERR unknown command 'latency', with args beginning with: 
+(error) ERR unknown command 'latency', with args beginning with: 'latest' 
+(error) ERR unknown command 'LATENCY', with args beginning with: 'HISTORY' 'some-event' 
+
+== case: unknown.memory
+== targets: no-redis
+memory
+memory usage k
+MEMORY STATS
+--
+(error) ERR unknown command 'memory', with args beginning with: 
+(error) ERR unknown command 'memory', with args beginning with: 'usage' 'k' 
+(error) ERR unknown command 'MEMORY', with args beginning with: 'STATS' 
+
+== case: unknown.module
+== targets: no-redis
+module
+module list
+MODULE LOAD /tmp/x.so
+--
+(error) ERR unknown command 'module', with args beginning with: 
+(error) ERR unknown command 'module', with args beginning with: 'list' 
+(error) ERR unknown command 'MODULE', with args beginning with: 'LOAD' '/tmp/x.so' 
+
+== case: unknown.slowlog
+== targets: no-redis
+slowlog
+slowlog get
+SLOWLOG LEN
+slowlog reset
+--
+(error) ERR unknown command 'slowlog', with args beginning with: 
+(error) ERR unknown command 'slowlog', with args beginning with: 'get' 
+(error) ERR unknown command 'SLOWLOG', with args beginning with: 'LEN' 
+(error) ERR unknown command 'slowlog', with args beginning with: 'reset' 

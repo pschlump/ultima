@@ -36,6 +36,7 @@
     { "name": "persist", "group": "keyspace", "status": "implemented", "since": "M1", "notes": "" },
     { "name": "type", "group": "keyspace", "status": "implemented", "since": "M1", "notes": "string/hash/list/set/zset/none" },
     { "name": "scan", "group": "keyspace", "status": "implemented", "since": "M1", "notes": "pluto rehash-safe cursor; MATCH glob; COUNT hint" },
+    { "name": "keys", "group": "keyspace", "status": "implemented", "since": "M7+", "notes": "full keyspace walk with glob pattern; expired keys filtered" },
 
     { "name": "info", "group": "server", "status": "implemented", "since": "M1", "notes": "server/clients/memory/stats/keyspace sections" },
     { "name": "dbsize", "group": "server", "status": "implemented", "since": "M1", "notes": "per-shard sweep + stripe sums" },

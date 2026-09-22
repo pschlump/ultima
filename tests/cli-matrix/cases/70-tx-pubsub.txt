@@ -1,0 +1,220 @@
+# Transactions + pub/sub-group cases: MULTI, EXEC, DISCARD, WATCH, UNWATCH,
+# PUBLISH, PUBSUB (empty-state only).
+#
+# Streaming verbs (SUBSCRIBE/PSUBSCRIBE/UNSUBSCRIBE/PUNSUBSCRIBE/MONITOR) are
+# banned from case inputs — the CLIs stream forever on them; live delivery is
+# covered by the runner specials (special:pubsub-delivery etc.). EXEC-nil on a
+# watched-key change is not testable on a single connection, so it is skipped
+# by design. All expected strings probed against redis-server 7.2.7; RESP3
+# renders every reply shape used here identically to RESP2 (verified with
+# redis-cli -3), so no == resp3 blocks are needed.
+
+== case: tx-pubsub.multi-exec-queued
+MULTI
+SET tx.k1 v1
+GET tx.k1
+INCR tx.cnt
+EXEC
+GET tx.cnt
+--
+OK
+QUEUED
+QUEUED
+QUEUED
+1) OK
+2) "v1"
+3) (integer) 1
+"1"
+
+== case: tx-pubsub.exec-without-multi
+EXEC
+--
+(error) ERR EXEC without MULTI
+
+== case: tx-pubsub.discard-without-multi
+DISCARD
+--
+(error) ERR DISCARD without MULTI
+
+== case: tx-pubsub.multi-nested
+MULTI
+MULTI
+EXEC
+--
+OK
+(error) ERR MULTI calls can not be nested
+(empty array)
+
+== case: tx-pubsub.discard-clears-queue
+MULTI
+SET tx.dk vd
+DISCARD
+GET tx.dk
+--
+OK
+QUEUED
+OK
+(nil)
+
+== case: tx-pubsub.queue-error-aborts-exec
+MULTI
+SET tx.bad
+GET tx.k
+EXEC
+EXEC
+--
+OK
+(error) ERR wrong number of arguments for 'set' command
+QUEUED
+(error) EXECABORT Transaction discarded because of previous errors.
+(error) ERR EXEC without MULTI
+
+== case: tx-pubsub.queue-unknown-cmd-aborts-exec
+MULTI
+NOSUCHCMD a b
+PING
+EXEC
+--
+OK
+(error) ERR unknown command 'NOSUCHCMD', with args beginning with: 'a' 'b' 
+QUEUED
+(error) EXECABORT Transaction discarded because of previous errors.
+
+== case: tx-pubsub.exec-array-with-error
+MULTI
+LPUSH tx.l a
+INCR tx.l
+EXEC
+--
+OK
+QUEUED
+QUEUED
+1) (integer) 1
+2) (error) WRONGTYPE Operation against a key holding the wrong kind of value
+
+== case: tx-pubsub.discard-then-exec
+MULTI
+DISCARD
+EXEC
+--
+OK
+OK
+(error) ERR EXEC without MULTI
+
+== case: tx-pubsub.tx-arity
+MULTI extra
+DISCARD extra
+--
+(error) ERR wrong number of arguments for 'multi' command
+(error) ERR wrong number of arguments for 'discard' command
+
+== case: tx-pubsub.watch-exec-same-conn
+WATCH tx.wk
+MULTI
+SET tx.wk v2
+EXEC
+GET tx.wk
+--
+OK
+OK
+QUEUED
+1) OK
+"v2"
+
+== case: tx-pubsub.watch-inside-multi
+MULTI
+WATCH tx.wk2
+EXEC
+--
+OK
+(error) ERR WATCH inside MULTI is not allowed
+(empty array)
+
+== case: tx-pubsub.unwatch
+WATCH tx.a tx.b
+UNWATCH
+WATCH tx.c
+UNWATCH
+MULTI
+PING
+EXEC
+--
+OK
+OK
+OK
+OK
+OK
+QUEUED
+1) PONG
+
+== case: tx-pubsub.watch-unwatch-arity
+WATCH
+UNWATCH extra
+--
+(error) ERR wrong number of arguments for 'watch' command
+(error) ERR wrong number of arguments for 'unwatch' command
+
+== case: tx-pubsub.publish-no-subscribers
+PUBLISH tx.none hello
+PUBLISH tx.none ""
+--
+(integer) 0
+(integer) 0
+
+== case: tx-pubsub.publish-arity
+PUBLISH onlychan
+PUBLISH a b c
+--
+(error) ERR wrong number of arguments for 'publish' command
+(error) ERR wrong number of arguments for 'publish' command
+
+== case: tx-pubsub.publish-in-multi
+MULTI
+PUBLISH tx.t queued-msg
+EXEC
+--
+OK
+QUEUED
+1) (integer) 0
+
+== case: tx-pubsub.pubsub-empty-state
+PUBSUB CHANNELS
+PUBSUB CHANNELS tx.*
+PUBSUB NUMSUB
+PUBSUB NUMSUB tx.a tx.b
+PUBSUB NUMPAT
+--
+(empty array)
+(empty array)
+(empty array)
+1) "tx.a"
+2) (integer) 0
+3) "tx.b"
+4) (integer) 0
+(integer) 0
+
+== case: tx-pubsub.pubsub-errors
+PUBSUB
+PUBSUB BADSUB
+PUBSUB badsub
+PUBSUB CHANNELS a b
+--
+(error) ERR wrong number of arguments for 'pubsub' command
+(error) ERR unknown subcommand 'BADSUB'. Try PUBSUB HELP.
+(error) ERR unknown subcommand 'badsub'. Try PUBSUB HELP.
+(error) ERR unknown subcommand or wrong number of arguments for 'CHANNELS'. Try PUBSUB HELP.
+== end
+
+# Regression: EXEC arity error comes in EXECABORT form and discards the tx
+== case: tx-pubsub.exec-extra-args
+# Divergence: EXEC with wrong arity (extra argument) and NO MULTI active.
+#   real Redis 7.2.7: (error) EXECABORT Transaction discarded because of:
+#                     wrong number of arguments for 'exec' command
+#   ultima:           (error) ERR wrong number of arguments for 'exec' command
+# Redis wraps the EXEC arity failure in its EXECABORT form (probed on a live
+# 7.2.7 server, RESP2 and RESP3, with and without requirepass; standalone
+# connection, no MULTI in effect). Ultima replies with the plain arity error.
+EXEC extra
+--
+(error) EXECABORT Transaction discarded because of: wrong number of arguments for 'exec' command
+== end

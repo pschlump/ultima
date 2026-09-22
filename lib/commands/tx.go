@@ -62,7 +62,13 @@ func cmdUnwatch(_ *Engine, cs *ConnState, _ [][]byte) resp.Value {
 	return replyOK
 }
 
-func cmdExec(e *Engine, cs *ConnState, _ [][]byte) resp.Value {
+func cmdExec(e *Engine, cs *ConnState, args [][]byte) resp.Value {
+	if len(args) != 1 {
+		// Probed 7.2.7: EXEC's own arity error comes in EXECABORT form
+		// (not the plain arity error) and discards the transaction.
+		cs.clearTx()
+		return resp.Err("EXECABORT Transaction discarded because of: wrong number of arguments for 'exec' command")
+	}
 	if !cs.Multi {
 		return errExecNoMulti
 	}

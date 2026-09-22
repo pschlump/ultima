@@ -114,6 +114,13 @@ func cmdSet(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	var applied bool
 	e.do(cs, args[1], func(s *shard.Shard) {
 		old, found := s.Lookup(cs.DB, key)
+		// Probed 7.2.7: SET … GET on a wrong-type key is WRONGTYPE and
+		// writes nothing — and this beats an NX abort (XX on a missing
+		// key still aborts with nil before any type check can apply).
+		if o.get && found && old.Type != shard.TypeString {
+			reply = errWrongType
+			return
+		}
 		blocked := (o.nx && found) || (o.xx && !found)
 		applied = !blocked
 		if !blocked {

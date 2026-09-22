@@ -45,7 +45,7 @@ func init() {
 
 	// transaction
 	def("multi", 1, []string{"fast"}, 0, 0, 0, "transaction", cmdMulti)
-	def("exec", 1, []string{"write"}, 0, 0, 0, "transaction", cmdExec)
+	def("exec", -1, []string{"write"}, 0, 0, 0, "transaction", cmdExec)
 	def("discard", 1, []string{"fast"}, 0, 0, 0, "transaction", cmdDiscard)
 	def("unwatch", 1, []string{"fast"}, 0, 0, 0, "transaction", cmdUnwatch)
 	def("watch", -2, []string{"fast"}, 1, -1, 1, "transaction", cmdWatch)
@@ -79,6 +79,7 @@ func init() {
 	def("persist", 2, []string{"write", "fast"}, 1, 1, 1, "keyspace", cmdPersist)
 	def("type", 2, []string{"readonly", "fast"}, 1, 1, 1, "keyspace", cmdType)
 	def("scan", -2, []string{"readonly"}, 0, 0, 0, "keyspace", cmdScan)
+	def("keys", 2, []string{"readonly"}, 0, 0, 0, "keyspace", cmdKeys)
 
 	// hash
 	def("hset", -4, []string{"write", "denyoom", "fast"}, 1, 1, 1, "hash", cmdHSet)

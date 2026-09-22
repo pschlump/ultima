@@ -1,0 +1,121 @@
+# Connection-group cases (§6.1): PING, ECHO, HELLO, AUTH, SELECT, RESET.
+# QUIT is a runner special (special:quit) because the REPLs intercept the
+# literal word "quit".
+#
+# Case format:
+#   == case: <name>            unique, dotted group prefix
+#   == type: exact|sorted|match|smatch   (default exact)
+#   == targets: all|no-redis|resp2|resp3 (default all)
+#   == modes: all|auth-only|noauth-only  (default all)
+#   <input lines, one per line, all sent on ONE connection>
+#   --
+#   <expected output lines (RESP2 class rendering)>
+#   == resp3            (optional) expected block for RESP3-class targets
+#   --
+#   <expected output lines (RESP3 class rendering)>
+#   == resp3: skip      (alternative: skip this case on RESP3 targets)
+
+== case: conn.ping
+PING
+PING hello
+PING a b
+--
+PONG
+"hello"
+(error) ERR wrong number of arguments for 'ping' command
+
+== case: conn.echo
+ECHO "hi there"
+ECHO x
+ECHO
+--
+"hi there"
+"x"
+(error) ERR wrong number of arguments for 'echo' command
+
+== case: conn.select
+SELECT 2
+SET conn.dk in-db2
+SELECT 0
+GET conn.dk
+SELECT 2
+GET conn.dk
+SELECT 16
+SELECT -1
+SELECT abc
+--
+OK
+OK
+OK
+(nil)
+OK
+"in-db2"
+(error) ERR DB index is out of range
+(error) ERR DB index is out of range
+(error) ERR value is not an integer or out of range
+
+== case: conn.reset
+== modes: noauth-only
+SELECT 2
+SET conn.dk v
+RESET
+GET conn.dk
+--
+OK
+OK
+RESET
+(nil)
+== end
+
+== case: conn.hello
+== type: match
+HELLO
+--
+ 1\) "server"
+ 2\) "redis"
+ 3\) "version"
+ 4\) "7\.2\.7"
+ 5\) "proto"
+ 6\) \(integer\) 2
+ 7\) "id"
+ 8\) \(integer\) [0-9]+
+ 9\) "mode"
+10\) "standalone"
+11\) "role"
+12\) "master"
+13\) "modules"
+14\) \(empty array\)
+== resp3
+--
+1# "server" => "redis"
+2# "version" => "7\.2\.7"
+3# "proto" => \(integer\) 3
+4# "id" => \(integer\) [0-9]+
+5# "mode" => "standalone"
+6# "role" => "master"
+7# "modules" => \(empty array\)
+
+== case: conn.hello-errors
+HELLO 9
+HELLO abc
+HELLO 0
+HELLO 2 extra
+--
+(error) NOPROTO unsupported protocol version
+(error) ERR Protocol version is not an integer or out of range
+(error) NOPROTO unsupported protocol version
+(error) ERR Syntax error in HELLO option 'extra'
+== end
+
+== case: conn.auth-no-pass
+== modes: noauth-only
+AUTH somepw
+--
+(error) ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?
+
+== case: conn.auth-wrong-pass
+== modes: auth-only
+== targets: resp2
+AUTH wrongpw
+--
+(error) WRONGPASS invalid username-password pair or user is disabled.

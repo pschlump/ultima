@@ -2,7 +2,7 @@
 
 LDFLAGS := $(shell sh bin/gen-build-stamp.sh)
 
-.PHONY: gen_proto gen_api build build-cli test test-clients lint tidy clean run bench bench-m5 web test-web
+.PHONY: gen_proto gen_api build build-cli test test-clients test-cli-matrix lint tidy clean run bench bench-m5 web test-web
 
 gen_proto:
 	sh bin/gen.sh
@@ -40,6 +40,16 @@ test-clients:
 	go test ./clients/... -count=1
 	cd clients/typescript && bun install --silent && bun run typecheck
 	cd clients/javascript && bun install --silent && bun run build && bun run smoke
+
+# test-cli-matrix runs the CLI command matrix (tests/cli-matrix) — every
+# implemented Redis 7.2.7 command exercised against a live ultima-server
+# through redis-cli and all three operator CLIs, in both security modes.
+# Requires redis-cli and GNU timeout (brew install coreutils). Pass -R
+# (MATRIX_FLAGS=-R) to also validate expectations against a real
+# redis-server. See docs/cli-matrix-testing.md.
+MATRIX_FLAGS ?=
+test-cli-matrix: build build-cli
+	sh bin/test-cli-matrix.sh $(MATRIX_FLAGS)
 
 lint:
 	golangci-lint run

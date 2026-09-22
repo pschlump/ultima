@@ -1,6 +1,7 @@
 // Package ultima redis-cli-style reply rendering (§6.4), shared by the three CLIs:
 // integers as "(integer) N", null as "(nil)", error replies as
-// "(error) …", arrays/sets/pushes numbered "1) …" with nested aggregates
+// "(error) …", arrays/pushes numbered "1) …" (RESP3 sets use "1~ …" and an
+// empty RESP3 map prints "(empty hash)"), with nested aggregates
 // indented under the parent's prefix, RESP3 maps as "1# k => v" pairs.
 package ultima
 
@@ -43,7 +44,13 @@ func renderValue(sb *strings.Builder, v resp.Value, indent string) {
 			return
 		}
 		for i, e := range v.Arr {
-			head := fmt.Sprintf("%d) ", i+1)
+			// redis-cli right-aligns the index to the widest element
+			// number; RESP3 sets use a "~" marker instead of ")".
+			marker := ") "
+			if v.Kind == resp.KindSet {
+				marker = "~ "
+			}
+			head := fmt.Sprintf("%*d%s", len(strconv.Itoa(len(v.Arr))), i+1, marker)
 			if i > 0 {
 				sb.WriteString("\n" + indent)
 			}
@@ -52,11 +59,11 @@ func renderValue(sb *strings.Builder, v resp.Value, indent string) {
 		}
 	case resp.KindMap:
 		if len(v.Arr) == 0 {
-			sb.WriteString("(empty map)")
+			sb.WriteString("(empty hash)") // redis-cli's RESP3 map label
 			return
 		}
 		for i := 0; i+1 < len(v.Arr); i += 2 {
-			head := fmt.Sprintf("%d# ", i/2+1)
+			head := fmt.Sprintf("%*d# ", len(strconv.Itoa(len(v.Arr)/2)), i/2+1)
 			if i > 0 {
 				sb.WriteString("\n" + indent)
 			}

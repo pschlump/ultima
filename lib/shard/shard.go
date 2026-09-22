@@ -419,6 +419,23 @@ func (e *Engine) Scan(db int, cursor uint64, count int) (keys []string, next uin
 	return keys, next
 }
 
+// AllKeys returns every live key of db (KEYS semantics): the table is
+// walked once and expired-but-unswept entries are filtered out (not
+// deleted — deletion is the owner's job). Order is unspecified.
+func (e *Engine) AllKeys(db int) []string {
+	ks := e.dbs[db].ks.Load()
+	now := e.NowMs()
+	keys := make([]string, 0)
+	ks.tab.Walk(func(_ int, it item) bool {
+		if it.E.ExpireAtMs > 0 && it.E.ExpireAtMs <= now {
+			return true
+		}
+		keys = append(keys, it.Key)
+		return true
+	})
+	return keys
+}
+
 // DBSize returns the number of live keys in db: every shard sweeps its due
 // expiries, then per-shard stripe lengths (stripe i == shard i) are summed.
 func (e *Engine) DBSize(db int) int {

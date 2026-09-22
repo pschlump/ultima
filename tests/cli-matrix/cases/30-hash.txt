@@ -1,0 +1,362 @@
+# Hash-group cases: HSET, HGET, HMSET, HMGET, HGETALL, HDEL, HEXISTS, HLEN,
+# HKEYS, HVALS, HINCRBY, HINCRBYFLOAT, HSETNX, HSTRLEN, HRANDFIELD, HSCAN.
+#
+# Notes:
+# - HGETALL returns a MAP on RESP3-class targets -> == resp3 block. A missing
+#   key renders as `(empty hash)` on RESP3 vs `(empty array)` on RESP2.
+# - HINCRBYFLOAT replies are bulk strings on BOTH protocols (probed 7.2.7).
+# - HRANDFIELD ... WITHVALUES is a flat alternating array on RESP2 and an
+#   array of 2-element arrays on RESP3 (probed 7.2.7: `1) 1) "f"` / `   2) "v"`).
+# - Random-order replies (HRANDFIELD) use `match` with per-line regexes: the
+#   numeric index prefixes make plain `sorted` comparison unusable for
+#   permuted replies (the sorted line multisets differ).
+
+== case: hash.set-get
+HSET hash.sg f1 v1
+HSET hash.sg f2 v2 f3 v3 f4 v4
+HSET hash.sg f1 vX
+HGET hash.sg f1
+HGET hash.sg f2
+HGET hash.sg nope
+HGET hash.missing f
+HSET hash.sg odd
+--
+(integer) 1
+(integer) 3
+(integer) 0
+"vX"
+"v2"
+(nil)
+(nil)
+(error) ERR wrong number of arguments for 'hset' command
+
+== case: hash.mset-mget
+HMSET hash.mm a 1 b 2 c 3
+HMGET hash.mm a b c
+HMGET hash.mm a nope c
+HMGET hash.missing a b
+HMSET hash.mm odd
+--
+OK
+1) "1"
+2) "2"
+3) "3"
+1) "1"
+2) (nil)
+3) "3"
+1) (nil)
+2) (nil)
+(error) ERR wrong number of arguments for 'hmset' command
+
+== case: hash.getall
+== type: sorted
+HSET hash.ga f1 v1 f2 v2 f3 v3
+HGETALL hash.ga
+--
+(integer) 3
+1) "f1"
+2) "v1"
+3) "f2"
+4) "v2"
+5) "f3"
+6) "v3"
+== resp3
+--
+(integer) 3
+1# "f1" => "v1"
+2# "f2" => "v2"
+3# "f3" => "v3"
+
+# RESP2 empty HGETALL renders `(empty array)` — fine on RESP2-class targets.
+# The RESP3 empty-map rendering (`(empty hash)` per redis-cli -3 7.2.7) is
+# divergent in the ultima RESP3-class CLIs; see 30-hash-bugs.txt.disabled.
+== case: hash.getall-missing
+== targets: resp2
+HGETALL hash.missing
+--
+(empty array)
+
+== case: hash.del
+HSET hash.d a 1 b 2 c 3 d 4
+HDEL hash.d a c nope
+HDEL hash.d nope
+HDEL hash.d b d
+HLEN hash.d
+EXISTS hash.d
+HDEL hash.missing f
+--
+(integer) 4
+(integer) 2
+(integer) 0
+(integer) 2
+(integer) 0
+(integer) 0
+(integer) 0
+
+== case: hash.exists-len
+HSET hash.el x 1
+HEXISTS hash.el x
+HEXISTS hash.el y
+HEXISTS hash.missing x
+HLEN hash.el
+HLEN hash.missing
+--
+(integer) 1
+(integer) 1
+(integer) 0
+(integer) 0
+(integer) 1
+(integer) 0
+
+== case: hash.keys-vals
+== type: sorted
+HSET hash.kv f1 v1 f2 v2 f3 v3
+HKEYS hash.kv
+HVALS hash.kv
+HKEYS hash.missing
+HVALS hash.missing
+--
+(integer) 3
+1) "f1"
+2) "f2"
+3) "f3"
+1) "v1"
+2) "v2"
+3) "v3"
+(empty array)
+(empty array)
+
+== case: hash.incrby
+HSET hash.ib n 10 s abc
+HINCRBY hash.ib n 5
+HINCRBY hash.ib n -3
+HINCRBY hash.ib fresh 2
+HINCRBY hash.ib s 1
+HINCRBY hash.ib n notanint
+HSET hash.ib big 9223372036854775807
+HINCRBY hash.ib big 1
+HINCRBY hash.ib big -1
+HINCRBY hash.ib big -9223372036854775808
+HSET hash.ib small -9223372036854775808
+HINCRBY hash.ib small -1
+--
+(integer) 2
+(integer) 15
+(integer) 12
+(integer) 2
+(error) ERR hash value is not an integer
+(error) ERR value is not an integer or out of range
+(integer) 1
+(error) ERR increment or decrement would overflow
+(integer) 9223372036854775806
+(integer) -2
+(integer) 1
+(error) ERR increment or decrement would overflow
+
+== case: hash.incrbyfloat
+HSET hash.if a 1.5 s notafloat
+HINCRBYFLOAT hash.if a 2.25
+HINCRBYFLOAT hash.if fresh 3.0e2
+HINCRBYFLOAT hash.if fresh 0.1
+HINCRBYFLOAT hash.if neg -0.5
+HINCRBYFLOAT hash.if s 1
+HINCRBYFLOAT hash.if a notafloat
+HINCRBYFLOAT hash.if a inf
+--
+(integer) 2
+"3.75"
+"300"
+"300.10000000000002274"
+"-0.5"
+(error) ERR hash value is not a float
+(error) ERR value is not a valid float
+(error) ERR value is NaN or Infinity
+
+== case: hash.setnx
+HSETNX hash.sn f v1
+HSETNX hash.sn f v2
+HGET hash.sn f
+HSETNX hash.sn g v3
+HGET hash.sn g
+HLEN hash.sn
+--
+(integer) 1
+(integer) 0
+"v1"
+(integer) 1
+"v3"
+(integer) 2
+
+== case: hash.strlen
+HSET hash.st short abc long abcdefghij empty ""
+HSTRLEN hash.st short
+HSTRLEN hash.st long
+HSTRLEN hash.st empty
+HSTRLEN hash.st nope
+HSTRLEN hash.missing f
+--
+(integer) 3
+(integer) 3
+(integer) 10
+(integer) 0
+(integer) 0
+(integer) 0
+
+== case: hash.randfield-single
+== type: match
+HSET hash.rf one 1 two 2
+HRANDFIELD hash.rf
+HRANDFIELD hash.rf
+--
+\(integer\) 2
+"(one|two)"
+"(one|two)"
+
+== case: hash.randfield-count
+== type: match
+HSET hash.rc one 1 two 2 three 3
+HRANDFIELD hash.rc 3
+HRANDFIELD hash.rc 10
+--
+\(integer\) 3
+[0-9]+\) "(one|two|three)"
+[0-9]+\) "(one|two|three)"
+[0-9]+\) "(one|two|three)"
+[0-9]+\) "(one|two|three)"
+[0-9]+\) "(one|two|three)"
+[0-9]+\) "(one|two|three)"
+
+== case: hash.randfield-negative
+== type: match
+HSET hash.rn one 1 two 2
+HRANDFIELD hash.rn -5
+--
+\(integer\) 2
+[0-9]+\) "(one|two)"
+[0-9]+\) "(one|two)"
+[0-9]+\) "(one|two)"
+[0-9]+\) "(one|two)"
+[0-9]+\) "(one|two)"
+
+== case: hash.randfield-withvalues
+== type: match
+HSET hash.wv one 1 two 2
+HRANDFIELD hash.wv 2 WITHVALUES
+HRANDFIELD hash.wv -3 WITHVALUES
+--
+\(integer\) 2
+[0-9]+\) "(one|two)"
+[0-9]+\) "(1|2)"
+[0-9]+\) "(one|two)"
+[0-9]+\) "(1|2)"
+[0-9]+\) "(one|two)"
+[0-9]+\) "(1|2)"
+[0-9]+\) "(one|two)"
+[0-9]+\) "(1|2)"
+[0-9]+\) "(one|two)"
+[0-9]+\) "(1|2)"
+== resp3
+--
+\(integer\) 2
+[0-9]+\) [0-9]+\) "(one|two)"
+ +[0-9]+\) "(1|2)"
+[0-9]+\) [0-9]+\) "(one|two)"
+ +[0-9]+\) "(1|2)"
+[0-9]+\) [0-9]+\) "(one|two)"
+ +[0-9]+\) "(1|2)"
+[0-9]+\) [0-9]+\) "(one|two)"
+ +[0-9]+\) "(1|2)"
+[0-9]+\) [0-9]+\) "(one|two)"
+ +[0-9]+\) "(1|2)"
+
+== case: hash.randfield-missing
+HRANDFIELD hash.missing
+HRANDFIELD hash.missing 3
+HRANDFIELD hash.missing -3
+HRANDFIELD hash.missing 3 WITHVALUES
+--
+(nil)
+(empty array)
+(empty array)
+(empty array)
+
+== case: hash.scan-full
+== type: smatch
+HMSET hash.sf a 1 b 2 c 3 d 4
+HSCAN hash.sf 0
+--
+OK
+1\) "0"
+2\) [0-9]+\) "[a-d1-4]"
+   [0-9]+\) "[a-d1-4]"
+   [0-9]+\) "[a-d1-4]"
+   [0-9]+\) "[a-d1-4]"
+   [0-9]+\) "[a-d1-4]"
+   [0-9]+\) "[a-d1-4]"
+   [0-9]+\) "[a-d1-4]"
+   [0-9]+\) "[a-d1-4]"
+
+== case: hash.scan-match
+HSET hash.sm a 1 b 2 c 3 d 4
+HSCAN hash.sm 0 MATCH b*
+HSCAN hash.sm 0 MATCH zz*
+HSCAN hash.missing 0
+HSCAN hash.sm badcursor
+HSCAN hash.sm 0 COUNT xx
+HSCAN hash.sm 0 MATCH
+--
+(integer) 4
+1) "0"
+2) 1) "b"
+   2) "2"
+1) "0"
+2) (empty array)
+1) "0"
+2) (empty array)
+(error) ERR invalid cursor
+(error) ERR value is not an integer or out of range
+(error) ERR syntax error
+
+== case: hash.wrongtype
+SET hash.wt plain
+HSET hash.wt f v
+HMSET hash.wt f v
+HGET hash.wt f
+HMGET hash.wt f
+HGETALL hash.wt
+HDEL hash.wt f
+HEXISTS hash.wt f
+HLEN hash.wt
+HKEYS hash.wt
+HVALS hash.wt
+HINCRBY hash.wt f 1
+HINCRBYFLOAT hash.wt f 1
+HSETNX hash.wt f v
+HSTRLEN hash.wt f
+HRANDFIELD hash.wt
+HSCAN hash.wt 0
+--
+OK
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+
+# RESP3 empty-map renders as (empty hash), matching redis-cli -3
+== case: hash.getall-empty-map-resp3
+== targets: resp3
+HGETALL hash.missing
+--
+(empty hash)

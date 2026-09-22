@@ -1,0 +1,397 @@
+# Keyspace-group cases (§5): DEL, EXISTS, EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT,
+# TTL/PTTL, PERSIST, TYPE, SCAN, KEYS.
+# All replies in this group are integers, simple strings or (nested) arrays,
+# which render identically under RESP2 and RESP3 — no == resp3 blocks needed
+# (verified against redis-server 7.2.7 with redis-cli -3).
+
+== case: keyspace.del-multi
+SET dk.a 1
+SET dk.b 2
+SET dk.c 3
+DEL dk.a dk.b dk.c dk.a
+DEL dk.a
+DEL dk.missing
+DEL
+--
+OK
+OK
+OK
+(integer) 3
+(integer) 0
+(integer) 0
+(error) ERR wrong number of arguments for 'del' command
+
+== case: keyspace.exists-multi
+SET ex.a 1
+SET ex.b 2
+EXISTS ex.a
+EXISTS ex.a ex.b ex.a
+EXISTS ex.a ex.missing ex.b
+EXISTS ex.missing
+EXISTS
+--
+OK
+OK
+(integer) 1
+(integer) 3
+(integer) 2
+(integer) 0
+(error) ERR wrong number of arguments for 'exists' command
+
+== case: keyspace.expire-ttl
+== type: match
+SET ttl.k v
+PEXPIREAT ttl.k 2524608000000
+TTL ttl.k
+PTTL ttl.k
+EXPIREAT ttl.k 2524608000
+TTL ttl.k
+PTTL ttl.k
+EXPIRE ttl.k 100
+TTL ttl.k
+PTTL ttl.k
+PEXPIRE ttl.k 60000
+TTL ttl.k
+PTTL ttl.k
+--
+OK
+\(integer\) 1
+\(integer\) [0-9]+
+\(integer\) [0-9]+
+\(integer\) 1
+\(integer\) [0-9]+
+\(integer\) [0-9]+
+\(integer\) 1
+\(integer\) [0-9]+
+\(integer\) [0-9]+
+\(integer\) 1
+\(integer\) [0-9]+
+\(integer\) [0-9]+
+
+== case: keyspace.expire-persist
+SET pe.k v
+PERSIST pe.k
+TTL pe.k
+PTTL pe.k
+EXPIRE pe.k 100
+PERSIST pe.k
+TTL pe.k
+PTTL pe.k
+PERSIST pe.missing
+TTL pe.missing
+PTTL pe.missing
+--
+OK
+(integer) 0
+(integer) -1
+(integer) -1
+(integer) 1
+(integer) 1
+(integer) -1
+(integer) -1
+(integer) 0
+(integer) -2
+(integer) -2
+
+== case: keyspace.expire-options
+SET op.k v
+EXPIRE op.k 100 XX
+EXPIRE op.k 100 GT
+EXPIRE op.k 100 LT
+EXPIRE op.k 200 NX
+EXPIRE op.k 300 GT
+EXPIRE op.k 100 GT
+EXPIRE op.k 100 LT
+EXPIRE op.k 500 LT
+SET op.p v
+PEXPIRE op.p 100000 NX
+PEXPIRE op.p 200000 NX
+PEXPIRE op.p 300000 GT
+PEXPIRE op.p 1 GT
+PEXPIRE op.p 50000 LT
+PEXPIRE op.p 999999 LT
+SET op.n v
+EXPIRE op.n 100 NX
+--
+OK
+(integer) 0
+(integer) 0
+(integer) 1
+(integer) 0
+(integer) 1
+(integer) 0
+(integer) 1
+(integer) 0
+OK
+(integer) 1
+(integer) 0
+(integer) 1
+(integer) 0
+(integer) 1
+(integer) 0
+OK
+(integer) 1
+
+== case: keyspace.expire-option-errors
+SET er.k v
+EXPIRE er.k 100 NX XX
+EXPIRE er.k 100 NX GT
+EXPIRE er.k 100 NX LT
+EXPIRE er.k 100 NX XX GT
+EXPIRE er.k 100 GT LT
+EXPIRE er.k 100 BAD
+EXPIRE er.k abc
+EXPIRE er.k 1.5
+EXPIRE er.k 9999999999999999999999
+PEXPIRE er.k abc
+EXPIREAT er.k abc
+PEXPIREAT er.k 1.5
+EXPIRE er.k
+TTL er.k extra
+--
+OK
+(error) ERR NX and XX, GT or LT options at the same time are not compatible
+(error) ERR NX and XX, GT or LT options at the same time are not compatible
+(error) ERR NX and XX, GT or LT options at the same time are not compatible
+(error) ERR NX and XX, GT or LT options at the same time are not compatible
+(error) ERR GT and LT options at the same time are not compatible
+(error) ERR Unsupported option BAD
+(error) ERR value is not an integer or out of range
+(error) ERR value is not an integer or out of range
+(error) ERR value is not an integer or out of range
+(error) ERR value is not an integer or out of range
+(error) ERR value is not an integer or out of range
+(error) ERR value is not an integer or out of range
+(error) ERR wrong number of arguments for 'expire' command
+(error) ERR wrong number of arguments for 'ttl' command
+
+== case: keyspace.expire-past
+SET pa.1 v
+EXPIRE pa.1 -1
+EXISTS pa.1
+TTL pa.1
+SET pa.2 v
+PEXPIRE pa.2 0
+EXISTS pa.2
+SET pa.3 v
+EXPIREAT pa.3 1
+EXISTS pa.3
+SET pa.4 v
+PEXPIREAT pa.4 100
+EXISTS pa.4
+PTTL pa.4
+--
+OK
+(integer) 1
+(integer) 0
+(integer) -2
+OK
+(integer) 1
+(integer) 0
+OK
+(integer) 1
+(integer) 0
+OK
+(integer) 1
+(integer) 0
+(integer) -2
+
+== case: keyspace.expire-missing
+EXPIRE no.such 100
+PEXPIRE no.such 100000
+EXPIREAT no.such 2524608000
+PEXPIREAT no.such 2524608000000
+PERSIST no.such
+TTL no.such
+PTTL no.such
+--
+(integer) 0
+(integer) 0
+(integer) 0
+(integer) 0
+(integer) 0
+(integer) -2
+(integer) -2
+
+== case: keyspace.type
+SET ty.s v
+HSET ty.h f v
+RPUSH ty.l a
+SADD ty.t m
+ZADD ty.z 1 m
+TYPE ty.s
+TYPE ty.h
+TYPE ty.l
+TYPE ty.t
+TYPE ty.z
+TYPE ty.missing
+--
+OK
+(integer) 1
+(integer) 1
+(integer) 1
+(integer) 1
+string
+hash
+list
+set
+zset
+none
+
+== case: keyspace.scan-full
+== type: smatch
+SET k1 v
+SET k2 v
+SET k3 v
+SET k4 v
+SET k5 v
+SET k6 v
+SET k7 v
+SET k8 v
+SET k9 v
+SET k10 v
+SET k11 v
+SET k12 v
+SET k13 v
+SET k14 v
+SET k15 v
+SCAN 0 COUNT 1000
+--
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+OK
+1\) "0"
+2\)  *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+ *[0-9]+\) "k[0-9]+"
+
+== case: keyspace.scan-match
+== type: smatch
+SET sm.a 1
+SET sm.b 2
+SET sm.c 3
+SCAN 0 MATCH sm.[ab] COUNT 1000
+--
+OK
+OK
+OK
+1\) "0"
+2\) 1\) "sm\.[ab]"
+ *[0-9]+\) "sm\.[ab]"
+
+== case: keyspace.scan-nomatch
+SET sn.a 1
+SCAN 0 MATCH zz.nomatch.* COUNT 1000
+--
+OK
+1) "0"
+2) (empty array)
+
+== case: keyspace.scan-bad-cursor
+SCAN abc
+SCAN 0 BADARG
+SCAN 0 COUNT abc
+SCAN 0 COUNT -5
+SCAN 0 MATCH
+SCAN
+--
+(error) ERR invalid cursor
+(error) ERR syntax error
+(error) ERR value is not an integer or out of range
+(error) ERR syntax error
+(error) ERR syntax error
+(error) ERR wrong number of arguments for 'scan' command
+
+== case: keyspace.keys-all
+== type: smatch
+SET ky.a 1
+SET ky.b 2
+SET ky.c 3
+SET ky.other 4
+KEYS *
+--
+OK
+OK
+OK
+OK
+1\) "ky\.[a-z]+"
+2\) "ky\.[a-z]+"
+3\) "ky\.[a-z]+"
+4\) "ky\.[a-z]+"
+
+== case: keyspace.keys-prefix
+== type: smatch
+SET kp.a 1
+SET kp.b 2
+SET kp.c 3
+KEYS kp.*
+--
+OK
+OK
+OK
+1\) "kp\.[a-z]+"
+2\) "kp\.[a-z]+"
+3\) "kp\.[a-z]+"
+
+== case: keyspace.keys-nomatch
+SET kn.a 1
+KEYS zz.nomatch.*
+--
+OK
+(empty array)
+== end
+
+# Regression: XX composes with GT/LT (7.2.7); only NX conflicts, and GT+LT conflict
+== case: keyspace.expire-xx-gt-lt
+SET bg.k v
+EXPIRE bg.k 100
+EXPIRE bg.k 200 XX GT
+EXPIRE bg.k 50 XX LT
+SET bg.n v
+EXPIRE bg.n 100 XX GT
+EXPIRE bg.n 100 XX LT
+EXPIRE bg.k 100 XX GT LT
+SET bg.p v
+PEXPIRE bg.p 100000
+PEXPIRE bg.p 200000 XX GT
+PEXPIRE bg.p 50000 XX LT
+PEXPIREAT bg.p 2524608000000 XX GT
+--
+OK
+(integer) 1
+(integer) 1
+(integer) 1
+OK
+(integer) 0
+(integer) 0
+(error) ERR GT and LT options at the same time are not compatible
+OK
+(integer) 1
+(integer) 1
+(integer) 1
+(integer) 1
+== end

@@ -1,0 +1,475 @@
+# String-group cases (P0 strings): SET, GET, GETDEL, GETEX, GETSET,
+# INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT, APPEND, STRLEN, MGET, MSET, MSETNX.
+#
+# All replies in this group are simple strings, integers, bulk strings, nulls,
+# flat arrays or errors — the RESP2/RESP3 rendering is identical (INCRBYFLOAT
+# returns a BULK string in both protocols), so no == resp3 blocks are needed.
+# TTL/PTTL-bearing cases use `match` so wall-clock skew cannot flake them.
+
+== case: string.set-get-basic
+SET sg.k hello
+GET sg.k
+SET sg.k world
+GET sg.k
+GET sg.miss
+SET sg.onlykey
+GET sg.k extra
+SET
+--
+OK
+"hello"
+OK
+"world"
+(nil)
+(error) ERR wrong number of arguments for 'set' command
+(error) ERR wrong number of arguments for 'get' command
+(error) ERR wrong number of arguments for 'set' command
+
+== case: string.set-nx-xx
+SET sx.k v1
+SET sx.k v2 NX
+GET sx.k
+SET sx.k v2 XX
+GET sx.k
+SET sx.miss v XX
+GET sx.miss
+SET sx.k v3 NX XX
+SET sx.k v3 XX NX
+--
+OK
+(nil)
+"v1"
+OK
+"v2"
+(nil)
+(nil)
+(error) ERR syntax error
+(error) ERR syntax error
+
+# Note: SET <wrong-type-key> v GET is covered in 10-string-bugs.txt.disabled
+# (ultima returns (nil) and overwrites instead of WRONGTYPE).
+== case: string.set-get-option
+SET so.k old
+SET so.k new GET
+GET so.k
+SET so.miss v GET
+GET so.miss
+SET so.k v2 GET XX
+--
+OK
+"old"
+"new"
+(nil)
+"v"
+"new"
+
+== case: string.set-expire-errors
+SET se.k v EX abc
+SET se.k v EX 10.5
+SET se.k v EX -1
+SET se.k v PX 0
+SET se.k v EXAT abc
+SET se.k v PXAT -3
+SET se.k v BADOPT
+SET se.k v EX
+SET se.k v PX
+SET se.k v EX 10 KEEPTTL
+SET se.k v EX 10 PX 100
+GET se.k
+--
+(error) ERR value is not an integer or out of range
+(error) ERR value is not an integer or out of range
+(error) ERR invalid expire time in 'set' command
+(error) ERR invalid expire time in 'set' command
+(error) ERR value is not an integer or out of range
+(error) ERR invalid expire time in 'set' command
+(error) ERR syntax error
+(error) ERR syntax error
+(error) ERR syntax error
+(error) ERR syntax error
+(error) ERR syntax error
+(nil)
+
+== case: string.set-keepttl
+== type: match
+SET sk.k a EX 100
+SET sk.k b KEEPTTL
+GET sk.k
+TTL sk.k
+SET sk.k c
+TTL sk.k
+SET sk.miss v KEEPTTL
+TTL sk.miss
+--
+OK
+OK
+"b"
+\(integer\) [0-9]+
+OK
+\(integer\) -1
+OK
+\(integer\) -1
+
+== case: string.set-ex-px
+== type: match
+SET sp.k v EX 100
+TTL sp.k
+SET sp.k v PX 100000
+PTTL sp.k
+SET sp.k v EXAT 4102444800
+TTL sp.k
+SET sp.k v PXAT 4102444800000
+GET sp.k
+--
+OK
+\(integer\) [0-9]+
+OK
+\(integer\) [0-9]+
+OK
+\(integer\) [0-9]+
+OK
+"v"
+
+== case: string.set-expire-past
+SET st.k v
+SET st.k v2 EXAT 1
+GET st.k
+SET st.k v2 PXAT 1
+GET st.k
+--
+OK
+OK
+(nil)
+OK
+(nil)
+
+== case: string.getdel
+SET gd.k v1
+GETDEL gd.k
+GET gd.k
+GETDEL gd.miss
+LPUSH gd.l a
+GETDEL gd.l
+GETDEL
+GETDEL a b
+--
+OK
+"v1"
+(nil)
+(nil)
+(integer) 1
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) ERR wrong number of arguments for 'getdel' command
+(error) ERR wrong number of arguments for 'getdel' command
+
+== case: string.getex
+== type: match
+SET gx.k v1
+GETEX gx.k
+TTL gx.k
+GETEX gx.k EX 100
+TTL gx.k
+GETEX gx.k PERSIST
+TTL gx.k
+GETEX gx.k PX 100000
+PTTL gx.k
+GETEX gx.k PERSIST
+GETEX gx.miss
+--
+OK
+"v1"
+\(integer\) -1
+"v1"
+\(integer\) [0-9]+
+"v1"
+\(integer\) -1
+"v1"
+\(integer\) [0-9]+
+"v1"
+\(nil\)
+
+== case: string.getex-exat
+== type: match
+SET ga.k v
+GETEX ga.k EXAT 4102444800
+TTL ga.k
+GETEX ga.k PXAT 4102444800000
+PTTL ga.k
+GETEX ga.k PERSIST
+TTL ga.k
+--
+OK
+"v"
+\(integer\) [0-9]+
+"v"
+\(integer\) [0-9]+
+"v"
+\(integer\) -1
+
+== case: string.getex-errors
+SET ge.k v
+GETEX ge.k EX abc
+GETEX ge.k EX 0
+GETEX ge.k EX -5
+GETEX ge.k PX -1
+GETEX ge.k BADOPT
+GETEX ge.k EX
+GETEX ge.k EX 10 PERSIST
+GET ge.k
+LPUSH ge.l a
+GETEX ge.l
+GETEX
+--
+OK
+(error) ERR value is not an integer or out of range
+(error) ERR invalid expire time in 'getex' command
+(error) ERR invalid expire time in 'getex' command
+(error) ERR invalid expire time in 'getex' command
+(error) ERR syntax error
+(error) ERR syntax error
+(error) ERR syntax error
+"v"
+(integer) 1
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) ERR wrong number of arguments for 'getex' command
+
+== case: string.getset
+SET gs.k old
+GETSET gs.k new
+GET gs.k
+GETSET gs.miss v
+GET gs.miss
+LPUSH gs.l a
+GETSET gs.l v
+GETSET onlykey
+GETSET
+--
+OK
+"old"
+"new"
+(nil)
+"v"
+(integer) 1
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) ERR wrong number of arguments for 'getset' command
+(error) ERR wrong number of arguments for 'getset' command
+
+== case: string.incr-decr
+SET n.k 5
+INCR n.k
+INCR n.k
+DECR n.k
+GET n.k
+INCR n.miss
+DECR n.miss2
+GET n.miss2
+SET n.f 1.5
+INCR n.f
+SET n.s abc
+DECR n.s
+INCR
+DECR n.k extra
+--
+OK
+(integer) 6
+(integer) 7
+(integer) 6
+"6"
+(integer) 1
+(integer) -1
+"-1"
+OK
+(error) ERR value is not an integer or out of range
+OK
+(error) ERR value is not an integer or out of range
+(error) ERR wrong number of arguments for 'incr' command
+(error) ERR wrong number of arguments for 'decr' command
+
+== case: string.incr-overflow
+SET n.max 9223372036854775807
+INCR n.max
+INCRBY n.max 1
+DECRBY n.max -1
+SET n.min -9223372036854775808
+DECR n.min
+DECRBY n.min 1
+INCRBY n.min -1
+SET n.big 9223372036854775808
+INCR n.big
+INCRBY n.k 9223372036854775808
+--
+OK
+(error) ERR increment or decrement would overflow
+(error) ERR increment or decrement would overflow
+(error) ERR increment or decrement would overflow
+OK
+(error) ERR increment or decrement would overflow
+(error) ERR increment or decrement would overflow
+(error) ERR increment or decrement would overflow
+OK
+(error) ERR value is not an integer or out of range
+(error) ERR value is not an integer or out of range
+
+== case: string.incrby-decrby
+SET ni.k 10
+INCRBY ni.k 5
+DECRBY ni.k 3
+INCRBY ni.miss 7
+DECRBY ni.miss2 7
+INCRBY ni.k abc
+INCRBY ni.k 1.5
+INCRBY ni.k
+DECRBY ni.k
+--
+OK
+(integer) 15
+(integer) 12
+(integer) 7
+(integer) -7
+(error) ERR value is not an integer or out of range
+(error) ERR value is not an integer or out of range
+(error) ERR wrong number of arguments for 'incrby' command
+(error) ERR wrong number of arguments for 'decrby' command
+
+== case: string.incrbyfloat
+SET f.k 10.5
+INCRBYFLOAT f.k 0.1
+SET f.k 3.0e3
+INCRBYFLOAT f.k 2.0e2
+SET f.k 5.0e-3
+INCRBYFLOAT f.k 200
+INCRBYFLOAT f.miss 1.5
+GET f.miss
+SET f.s notafloat
+INCRBYFLOAT f.s 1
+INCRBYFLOAT f.k abc
+INCRBYFLOAT f.k nan
+INCRBYFLOAT f.k 1e400
+INCRBYFLOAT f.k
+--
+OK
+"10.59999999999999964"
+OK
+"3200"
+OK
+"200.00499999999999545"
+"1.5"
+"1.5"
+OK
+(error) ERR value is not a valid float
+(error) ERR value is not a valid float
+(error) ERR value is not a valid float
+(error) ERR value is not a valid float
+(error) ERR wrong number of arguments for 'incrbyfloat' command
+
+== case: string.append-strlen
+SET a.k hello
+APPEND a.k " world"
+STRLEN a.k
+GET a.k
+APPEND a.new abc
+STRLEN a.new
+STRLEN a.miss
+APPEND a.k
+APPEND a.k x y
+STRLEN
+--
+OK
+(integer) 11
+(integer) 11
+"hello world"
+(integer) 3
+(integer) 3
+(integer) 0
+(error) ERR wrong number of arguments for 'append' command
+(error) ERR wrong number of arguments for 'append' command
+(error) ERR wrong number of arguments for 'strlen' command
+
+== case: string.mset-mget
+MSET m.a 1 m.b 2 m.c 3
+MGET m.a m.b m.c
+MGET m.a m.miss m.c
+LPUSH m.l x
+MGET m.l m.a
+MSET m.l overwritten
+TYPE m.l
+MSET m.odd 1 m.odd2
+MSET
+MGET
+--
+OK
+1) "1"
+2) "2"
+3) "3"
+1) "1"
+2) (nil)
+3) "3"
+(integer) 1
+1) (nil)
+2) "1"
+OK
+string
+(error) ERR wrong number of arguments for 'mset' command
+(error) ERR wrong number of arguments for 'mset' command
+(error) ERR wrong number of arguments for 'mget' command
+
+== case: string.msetnx
+MSETNX mx.a 1 mx.b 2
+MGET mx.a mx.b
+SET mx.c exists
+MSETNX mx.c 9 mx.d 4
+GET mx.d
+LPUSH mx.l a
+MSETNX mx.e 5 mx.l x
+GET mx.e
+MSETNX
+--
+(integer) 1
+1) "1"
+2) "2"
+OK
+(integer) 0
+(nil)
+(integer) 1
+(integer) 0
+(nil)
+(error) ERR wrong number of arguments for 'msetnx' command
+
+== case: string.wrongtype
+LPUSH w.l item
+GET w.l
+GETDEL w.l
+GETEX w.l
+GETSET w.l v
+INCR w.l
+DECR w.l
+INCRBY w.l 1
+DECRBY w.l 1
+INCRBYFLOAT w.l 1
+APPEND w.l x
+STRLEN w.l
+--
+(integer) 1
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+== end
+
+# Regression: SET … GET on a wrong-type key is WRONGTYPE and writes nothing
+== case: string.set-get-wrongtype
+LPUSH sb.l item
+SET sb.l v GET
+TYPE sb.l
+--
+(integer) 1
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+list
+== end

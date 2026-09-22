@@ -1,0 +1,517 @@
+# Set-group cases (§5.3): SADD, SREM, SMEMBERS, SISMEMBER, SMISMEMBER, SCARD,
+# SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF, SINTERSTORE, SUNIONSTORE,
+# SDIFFSTORE, SINTERCARD, SSCAN.
+#
+# Unordered multi-member replies (SMEMBERS/SINTER/SPOP-count/...) use
+# `type: match` rather than `sorted`: the rendered lines carry array indices
+# (`1) "a"`), so the index pins each line's position and only the member at
+# each index is nondeterministic — per-index alternation regexes cover that.
+# (Plain `sorted` cannot normalize a permuted indexed reply: the leading
+# index dominates the whole-line sort.)
+#
+# RESP3 renders set replies as `1~ "a"` / `(empty set)` where RESP2 renders
+# `1) "a"` / `(empty array)` — but the ultima-ws-cli/ultima-grpc-cli renderer
+# (clients/go/ultima/render.go) numbers set elements `1)` like an array
+# (keeping `(empty set)` for empties), diverging from redis-cli -3's `1~`.
+# Since one `== resp3` block must serve both redis3 and the ultima RESP3-class
+# targets, cases with a non-empty set reply are RESP2-only here; the correct
+# RESP3 expectations live in 50-set-bugs.txt.disabled. SRANDMEMBER is an
+# ARRAY reply in both protocols (even RESP3), and SSCAN's reply is an array
+# in both — those cases run on all targets.
+
+== case: set.sadd-srem-scard
+SADD set.a a b c a b
+SADD set.a c d
+SADD set.a
+SCARD set.a
+SREM set.a a zz
+SREM set.missing x
+SREM set.a
+SCARD set.a
+SREM set.a b c d
+EXISTS set.a
+SCARD set.missing
+--
+(integer) 3
+(integer) 1
+(error) ERR wrong number of arguments for 'sadd' command
+(integer) 4
+(integer) 1
+(integer) 0
+(error) ERR wrong number of arguments for 'srem' command
+(integer) 3
+(integer) 3
+(integer) 0
+(integer) 0
+
+== case: set.smembers
+== type: match
+== targets: resp2
+SADD set.m delta alpha charlie bravo
+SMEMBERS set.m
+SMEMBERS set.missing
+--
+\(integer\) 4
+1\) "(alpha|bravo|charlie|delta)"
+2\) "(alpha|bravo|charlie|delta)"
+3\) "(alpha|bravo|charlie|delta)"
+4\) "(alpha|bravo|charlie|delta)"
+\(empty array\)
+
+== case: set.sismember-smismember
+SADD set.s a b c
+SISMEMBER set.s a
+SISMEMBER set.s zz
+SISMEMBER set.missing a
+SMISMEMBER set.s a zz b
+SMISMEMBER set.missing a b
+--
+(integer) 3
+(integer) 1
+(integer) 0
+(integer) 0
+1) (integer) 1
+2) (integer) 0
+3) (integer) 1
+1) (integer) 0
+2) (integer) 0
+
+== case: set.spop-count
+== type: match
+== targets: resp2
+SADD set.p a b c
+SPOP set.p 10
+EXISTS set.p
+SPOP set.p 2
+SPOP set.missing 2
+SPOP set.missing
+--
+\(integer\) 3
+1\) "(a|b|c)"
+2\) "(a|b|c)"
+3\) "(a|b|c)"
+\(integer\) 0
+\(empty array\)
+\(empty array\)
+\(nil\)
+
+== case: set.srandmember-count
+== type: match
+SADD set.r m1 m2 m3
+SRANDMEMBER set.r 99
+SRANDMEMBER set.missing 2
+--
+\(integer\) 3
+1\) "(m1|m2|m3)"
+2\) "(m1|m2|m3)"
+3\) "(m1|m2|m3)"
+\(empty array\)
+
+== case: set.srandmember-negative
+== type: match
+SADD set.rn x y z
+SRANDMEMBER set.rn -5
+SRANDMEMBER set.missing
+--
+\(integer\) 3
+1\) "(x|y|z)"
+2\) "(x|y|z)"
+3\) "(x|y|z)"
+4\) "(x|y|z)"
+5\) "(x|y|z)"
+\(nil\)
+
+== case: set.smove
+SADD set.src a b
+SADD set.dst b c
+SMOVE set.src set.dst a
+SMOVE set.src set.dst a
+SMOVE set.src set.dst zz
+SMOVE set.nokey set.dst a
+SISMEMBER set.dst a
+SISMEMBER set.src a
+SMOVE set.dst set.dst b
+--
+(integer) 2
+(integer) 2
+(integer) 1
+(integer) 0
+(integer) 0
+(integer) 0
+(integer) 1
+(integer) 0
+(integer) 1
+
+== case: set.sinter
+== type: match
+== targets: resp2
+SADD set.i1 a b c d
+SADD set.i2 b c d e
+SADD set.i3 c d e f
+SINTER set.i1 set.i2
+SINTER set.i1 set.i2 set.i3
+SINTER set.i1 set.missing
+--
+\(integer\) 4
+\(integer\) 4
+\(integer\) 4
+1\) "(b|c|d)"
+2\) "(b|c|d)"
+3\) "(b|c|d)"
+1\) "(c|d)"
+2\) "(c|d)"
+\(empty array\)
+
+== case: set.sunion
+== type: match
+== targets: resp2
+SADD set.u1 a b c d
+SADD set.u2 b c d e
+SADD set.u3 c d e f
+SUNION set.u1 set.u2
+SUNION set.u1 set.u2 set.u3
+SUNION set.u3 set.missing
+--
+\(integer\) 4
+\(integer\) 4
+\(integer\) 4
+1\) "(a|b|c|d|e)"
+2\) "(a|b|c|d|e)"
+3\) "(a|b|c|d|e)"
+4\) "(a|b|c|d|e)"
+5\) "(a|b|c|d|e)"
+1\) "(a|b|c|d|e|f)"
+2\) "(a|b|c|d|e|f)"
+3\) "(a|b|c|d|e|f)"
+4\) "(a|b|c|d|e|f)"
+5\) "(a|b|c|d|e|f)"
+6\) "(a|b|c|d|e|f)"
+1\) "(c|d|e|f)"
+2\) "(c|d|e|f)"
+3\) "(c|d|e|f)"
+4\) "(c|d|e|f)"
+
+== case: set.sdiff
+== type: match
+== targets: resp2
+SADD set.d1 a b c d
+SADD set.d2 b c d e
+SADD set.d3 d e f
+SDIFF set.d1 set.d2
+SDIFF set.d2 set.d1
+SDIFF set.d1 set.d2 set.d3
+SDIFF set.d1 set.d1
+SDIFF set.missing set.d1
+--
+\(integer\) 4
+\(integer\) 4
+\(integer\) 3
+1\) "a"
+1\) "e"
+1\) "a"
+\(empty array\)
+\(empty array\)
+
+== case: set.store
+== type: match
+== targets: resp2
+SADD set.s1 a b c d
+SADD set.s2 b c d e
+SADD set.s3 c d e f
+SINTERSTORE set.dst set.s1 set.s2
+SMEMBERS set.dst
+SUNIONSTORE set.dst set.s1 set.s3
+SMEMBERS set.dst
+SDIFFSTORE set.dst set.s2 set.s1
+SMEMBERS set.dst
+SDIFFSTORE set.dst set.s1 set.s1
+EXISTS set.dst
+SET set.dst str
+SINTERSTORE set.dst set.s1 set.s2
+TYPE set.dst
+--
+\(integer\) 4
+\(integer\) 4
+\(integer\) 4
+\(integer\) 3
+1\) "(b|c|d)"
+2\) "(b|c|d)"
+3\) "(b|c|d)"
+\(integer\) 6
+1\) "(a|b|c|d|e|f)"
+2\) "(a|b|c|d|e|f)"
+3\) "(a|b|c|d|e|f)"
+4\) "(a|b|c|d|e|f)"
+5\) "(a|b|c|d|e|f)"
+6\) "(a|b|c|d|e|f)"
+\(integer\) 1
+1\) "e"
+\(integer\) 0
+\(integer\) 0
+OK
+\(integer\) 3
+set
+
+== case: set.sintercard
+SADD set.c1 a b c d
+SADD set.c2 b c d e
+SADD set.c3 c d
+SINTERCARD 2 set.c1 set.c2
+SINTERCARD 2 set.c1 set.c2 LIMIT 2
+SINTERCARD 2 set.c1 set.c2 LIMIT 0
+SINTERCARD 2 set.c1 set.c2 LIMIT 99
+SINTERCARD 3 set.c1 set.c2 set.c3
+SINTERCARD 2 set.c1 set.missing
+--
+(integer) 4
+(integer) 4
+(integer) 2
+(integer) 3
+(integer) 2
+(integer) 3
+(integer) 3
+(integer) 2
+(integer) 0
+
+== case: set.sintercard-errors
+SINTERCARD
+SINTERCARD 2
+SINTERCARD 1 set.c1
+SINTERCARD 3 set.c1 set.c2
+SINTERCARD 0 set.c1
+SINTERCARD -1 set.c1
+SINTERCARD xx set.c1
+SINTERCARD 2 set.c1 set.c2 LIMIT -1
+SINTERCARD 2 set.c1 set.c2 LIMIT xx
+SINTERCARD 2 set.c1 set.c2 LIMIT
+SINTERCARD 2 set.c1 set.c2 FOO 1
+SINTERCARD 2 set.c1 set.c2 LIMIT 1 extra
+--
+(error) ERR wrong number of arguments for 'sintercard' command
+(error) ERR wrong number of arguments for 'sintercard' command
+(integer) 0
+(error) ERR Number of keys can't be greater than number of args
+(error) ERR numkeys should be greater than 0
+(error) ERR numkeys should be greater than 0
+(error) ERR numkeys should be greater than 0
+(error) ERR LIMIT can't be negative
+(error) ERR LIMIT can't be negative
+(error) ERR syntax error
+(error) ERR syntax error
+(error) ERR syntax error
+
+== case: set.wrongtype
+SET set.str plain
+SADD set.str a
+SREM set.str a
+SMEMBERS set.str
+SISMEMBER set.str a
+SMISMEMBER set.str a b
+SCARD set.str
+SPOP set.str 2
+SRANDMEMBER set.str 2
+SADD set.ok a b
+SMOVE set.ok set.str a
+SMOVE set.str set.ok a
+SINTER set.str set.ok
+SUNION set.str set.ok
+SDIFF set.str set.ok
+SINTERSTORE set.dst set.str set.ok
+SUNIONSTORE set.dst set.str set.ok
+SDIFFSTORE set.dst set.str set.ok
+SINTERCARD 2 set.str set.ok
+SSCAN set.str 0
+--
+OK
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(integer) 2
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+
+== case: set.sscan-full
+== type: match
+SADD set.scan em1 em2 em3 em4 em5
+SSCAN set.scan 0
+--
+\(integer\) 5
+1\) "0"
+2\) 1\) "(em1|em2|em3|em4|em5)"
+   2\) "(em1|em2|em3|em4|em5)"
+   3\) "(em1|em2|em3|em4|em5)"
+   4\) "(em1|em2|em3|em4|em5)"
+   5\) "(em1|em2|em3|em4|em5)"
+
+== case: set.sscan-match
+SADD set.sm alpha beta gamma alps
+SSCAN set.sm 0 MATCH alph*
+SSCAN set.missing 0
+SSCAN set.sm 0 MATCH zz*
+SSCAN set.sm notacursor
+--
+(integer) 4
+1) "0"
+2) 1) "alpha"
+1) "0"
+2) (empty array)
+1) "0"
+2) (empty array)
+(error) ERR invalid cursor
+
+# RESP3 set replies render with the ~ marker, matching redis-cli -3
+== case: set.smembers-resp3
+== type: match
+== targets: resp3
+SADD set.m delta alpha charlie bravo
+SMEMBERS set.m
+SMEMBERS set.missing
+--
+\(integer\) 4
+1~ "(alpha|bravo|charlie|delta)"
+2~ "(alpha|bravo|charlie|delta)"
+3~ "(alpha|bravo|charlie|delta)"
+4~ "(alpha|bravo|charlie|delta)"
+\(empty set\)
+
+== case: set.spop-count-resp3
+== type: match
+== targets: resp3
+SADD set.p a b c
+SPOP set.p 10
+EXISTS set.p
+SPOP set.p 2
+SPOP set.missing 2
+SPOP set.missing
+--
+\(integer\) 3
+1~ "(a|b|c)"
+2~ "(a|b|c)"
+3~ "(a|b|c)"
+\(integer\) 0
+\(empty set\)
+\(empty set\)
+\(nil\)
+
+== case: set.sinter-resp3
+== type: match
+== targets: resp3
+SADD set.i1 a b c d
+SADD set.i2 b c d e
+SADD set.i3 c d e f
+SINTER set.i1 set.i2
+SINTER set.i1 set.i2 set.i3
+SINTER set.i1 set.missing
+--
+\(integer\) 4
+\(integer\) 4
+\(integer\) 4
+1~ "(b|c|d)"
+2~ "(b|c|d)"
+3~ "(b|c|d)"
+1~ "(c|d)"
+2~ "(c|d)"
+\(empty set\)
+
+== case: set.sunion-resp3
+== type: match
+== targets: resp3
+SADD set.u1 a b c d
+SADD set.u2 b c d e
+SADD set.u3 c d e f
+SUNION set.u1 set.u2
+SUNION set.u1 set.u2 set.u3
+SUNION set.u3 set.missing
+--
+\(integer\) 4
+\(integer\) 4
+\(integer\) 4
+1~ "(a|b|c|d|e)"
+2~ "(a|b|c|d|e)"
+3~ "(a|b|c|d|e)"
+4~ "(a|b|c|d|e)"
+5~ "(a|b|c|d|e)"
+1~ "(a|b|c|d|e|f)"
+2~ "(a|b|c|d|e|f)"
+3~ "(a|b|c|d|e|f)"
+4~ "(a|b|c|d|e|f)"
+5~ "(a|b|c|d|e|f)"
+6~ "(a|b|c|d|e|f)"
+1~ "(c|d|e|f)"
+2~ "(c|d|e|f)"
+3~ "(c|d|e|f)"
+4~ "(c|d|e|f)"
+
+== case: set.sdiff-resp3
+== type: match
+== targets: resp3
+SADD set.d1 a b c d
+SADD set.d2 b c d e
+SADD set.d3 d e f
+SDIFF set.d1 set.d2
+SDIFF set.d2 set.d1
+SDIFF set.d1 set.d2 set.d3
+SDIFF set.d1 set.d1
+SDIFF set.missing set.d1
+--
+\(integer\) 4
+\(integer\) 4
+\(integer\) 3
+1~ "a"
+1~ "e"
+1~ "a"
+\(empty set\)
+\(empty set\)
+
+== case: set.store-resp3
+== type: match
+== targets: resp3
+SADD set.s1 a b c d
+SADD set.s2 b c d e
+SADD set.s3 c d e f
+SINTERSTORE set.dst set.s1 set.s2
+SMEMBERS set.dst
+SUNIONSTORE set.dst set.s1 set.s3
+SMEMBERS set.dst
+SDIFFSTORE set.dst set.s2 set.s1
+SMEMBERS set.dst
+SDIFFSTORE set.dst set.s1 set.s1
+EXISTS set.dst
+SET set.dst str
+SINTERSTORE set.dst set.s1 set.s2
+TYPE set.dst
+--
+\(integer\) 4
+\(integer\) 4
+\(integer\) 4
+\(integer\) 3
+1~ "(b|c|d)"
+2~ "(b|c|d)"
+3~ "(b|c|d)"
+\(integer\) 6
+1~ "(a|b|c|d|e|f)"
+2~ "(a|b|c|d|e|f)"
+3~ "(a|b|c|d|e|f)"
+4~ "(a|b|c|d|e|f)"
+5~ "(a|b|c|d|e|f)"
+6~ "(a|b|c|d|e|f)"
+\(integer\) 1
+1~ "e"
+\(integer\) 0
+\(integer\) 0
+OK
+\(integer\) 3
+set

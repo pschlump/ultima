@@ -231,6 +231,31 @@ var p0Scripts = []script{
 		steps = append(steps, step{args: []string{"SCANLOOP"}, m: mEq})
 		return steps
 	}()},
+	{"keys", []step{
+		cmd("MSET", "user:1", "a", "user:2", "b", "other:1", "c", "zz", "d", "hello", "e", "hallo", "f", "hxllo", "g"),
+		cmdM(mSetCmp, "KEYS", "*"),
+		cmdM(mSetCmp, "KEYS", "user:*"),
+		cmdM(mSetCmp, "KEYS", "h?llo"),
+		cmdM(mSetCmp, "KEYS", "h[ae]llo"),
+		cmdM(mSetCmp, "KEYS", "h[^e]llo"),
+		cmdM(mSetCmp, "KEYS", "h[a-c]llo"),
+		cmdM(mSetCmp, "KEYS", "no-match-*"),
+		cmdM(mSetCmp, "KEYS", "hello"),
+		// expired keys are excluded from the reply
+		cmd("SET", "kexp", "v", "PX", "100"),
+		cmdM(mSetCmp, "KEYS", "k*"),
+		cmd("SLEEP", "200"),
+		cmdM(mSetCmp, "KEYS", "k*"),
+		// KEYS is per-DB
+		cmd("SELECT", "5"),
+		cmdM(mSetCmp, "KEYS", "*"),
+		cmd("SET", "db5k", "v"),
+		cmdM(mSetCmp, "KEYS", "*"),
+		cmd("SELECT", "0"),
+		// arity
+		cmd("KEYS"),
+		cmd("KEYS", "a", "b"),
+	}},
 	{"select-dbs", []step{
 		cmd("SELECT", "3"),
 		cmd("SET", "dk", "in-db3"),

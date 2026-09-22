@@ -143,6 +143,10 @@ type wsFrame struct {
 	data   []byte
 	seq    uint64
 	isPush bool
+	// flush, when set, marks a synchronization marker: the writer closes
+	// the channel once every frame queued ahead of it has been written
+	// (QUIT must deliver its OK before the connection closes, like Redis).
+	flush chan struct{}
 }
 
 // wsConn serializes all writes to the websocket through one writer
@@ -258,6 +262,7 @@ func serve(eng *commands.Engine, reg *wssession.Registry, conn *websocket.Conn, 
 			}
 		}
 		if cs.Quit {
+			ws.flushWait() // deliver the QUIT reply before closing
 			return
 		}
 	}
@@ -389,6 +394,10 @@ func (ws *wsConn) writer() {
 	for {
 		select {
 		case fr := <-ws.send:
+			if fr.flush != nil {
+				close(fr.flush)
+				continue
+			}
 			if err := ws.conn.WriteMessage(websocket.BinaryMessage, fr.data); err != nil {
 				if !fr.isPush {
 					ws.dropMu.Lock()
@@ -411,6 +420,21 @@ func (ws *wsConn) close() {
 		close(ws.done)
 		_ = ws.conn.Close()
 	})
+}
+
+// flushWait blocks until every frame queued so far has been written to the
+// wire (or the connection is already closing). The read loop calls it
+// before honoring QUIT so the OK reply is not lost to the teardown.
+func (ws *wsConn) flushWait() {
+	ch := make(chan struct{})
+	select {
+	case ws.send <- wsFrame{flush: ch}:
+		select {
+		case <-ch:
+		case <-ws.done:
+		}
+	case <-ws.done:
+	}
 }
 
 // errorFrame builds a reply frame carrying an error value.

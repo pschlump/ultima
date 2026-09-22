@@ -161,7 +161,7 @@ AUTH, SELECT, QUIT), strings (SET/GET family, INCR/DECR family +
 INCRBYFLOAT (M4), APPEND,
 STRLEN, MGET/MSET/MSETNX), keyspace (DEL, EXISTS, EXPIRE/PEXPIRE/
 EXPIREAT/PEXPIREAT (M5c), TTL/PTTL,
-PERSIST, TYPE, SCAN), server (INFO, DBSIZE, FLUSHDB/FLUSHALL, CONFIG,
+PERSIST, TYPE, SCAN, KEYS), server (INFO, DBSIZE, FLUSHDB/FLUSHALL, CONFIG,
 CLIENT, COMMAND, SAVE/BGSAVE/LASTSAVE/BGREWRITEAOF (M5c)). M2/P1 — hashes (HSET/HGET/HMSET/HMGET/HGETALL/HDEL/
 HEXISTS/HLEN/HKEYS/HVALS/HINCRBY/HINCRBYFLOAT/HSETNX/HSTRLEN/HRANDFIELD/
 HSCAN), lists (LPUSH/RPUSH/LPUSHX/RPUSHX/LPOP/RPOP/LLEN/LRANGE/LINDEX/
@@ -513,11 +513,16 @@ tests/ts-roundtrip/  protobuf-es TS client script (bun; `bun install` first) —
                      go+ts round-trip exit criterion; strict tsc typecheck via tsconfig
 tests/differential/  harness diffs replies against a real redis-server (the parity gate);
                      multi-connection scripts, push frames and blocking wakeups supported
+tests/cli-matrix/    CLI command matrix: cases/*.txt drive every implemented command
+                     through redis-cli + the three operator CLIs against a live
+                     ultima-server in both security modes; runner is
+                     bin/test-cli-matrix.sh; doc is docs/cli-matrix-testing.md
 bin/                 gen.sh (protoc), gen-api.sh (oapi-codegen + spec embed sync),
                      gen-build-stamp.sh (ldflags), bench.sh (M1 sweep,
                      chains into bench-pubsub.sh for the M3 pub/sub benchmark and
                      bench-m5.sh for the M5 maxmemory soak), gen-jwt-keys.sh
-                     (M6a Ed25519 JWT key pair into ./keys, gitignored)
+                     (M6a Ed25519 JWT key pair into ./keys, gitignored),
+                     test-cli-matrix.sh (the CLI matrix runner)
 docs/                ULTIMA-DESIGN.md, pluto/ structure specs, benchmarks/ reports
 note/                scratch/reference (Redis checkout, benchmarks); gitignored, lint-excluded
 ```
@@ -546,6 +551,11 @@ All via the Makefile (default goal is `build`):
   `./ultima-ws-cli`, `./ultima-grpc-cli`; `make clean` removes them).
   `make test-clients` runs the Go client tests and the TS client
   typecheck/build + JS dist build.
+- `make test-cli-matrix` — the CLI command matrix (tests/cli-matrix):
+  every implemented command through redis-cli + ultima-cli + ultima-ws-cli +
+  ultima-grpc-cli against a live server, in noauth and auth modes;
+  `MATRIX_FLAGS=-R` also validates expectations against a real redis-server.
+  See docs/cli-matrix-testing.md. Requires redis-cli + GNU timeout.
 - `make gen_proto` — regenerate protobuf bindings from `proto/` into
   `gen/go`; requires `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`.
   Also emits `gen/ts` (protobuf-es) via `bin/gen-ts.sh`, which no-ops with

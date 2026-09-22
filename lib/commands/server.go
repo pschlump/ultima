@@ -127,7 +127,8 @@ func cmdHello(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 			name, hasName = string(args[i+1]), true
 			i += 2
 		default:
-			return resp.Err(fmt.Sprintf("ERR Syntax error in HELLO option '%s'", opt))
+			// Redis reports the option in the client's original casing.
+			return resp.Err(fmt.Sprintf("ERR Syntax error in HELLO option '%s'", string(args[i])))
 		}
 	}
 	if hasAuth {

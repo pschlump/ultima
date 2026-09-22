@@ -168,7 +168,7 @@ func TestRenderValue(t *testing.T) {
 		{resp.Arr(resp.Arr(resp.BlobStr("x"))), "1) 1) \"x\""},
 		{resp.Arr(), "(empty array)"},
 		{resp.Map(resp.BlobStr("f"), resp.BlobStr("v")), "1# \"f\" => \"v\""},
-		{resp.Set(resp.BlobStr("s")), "1) \"s\""},
+		{resp.Set(resp.BlobStr("s")), "1~ \"s\""},
 		{resp.Push(resp.BlobStr("message"), resp.BlobStr("ch"), resp.BlobStr("p")),
 			"1) \"message\"\n2) \"ch\"\n3) \"p\""},
 		{resp.Value{Kind: resp.KindBigNumber, Str: "3492890328409238509324850943850943825024385"},

@@ -13,3 +13,4 @@ clients/javascript/dist/
 cmd/ultima-cli/ultima-cli
 cmd/ultima-ws-cli/ultima-ws-cli
 cmd/ultima-grpc-cli/ultima-grpc-cli
+/data/

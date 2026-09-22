@@ -64,12 +64,13 @@ func parseExpireFlags(args [][]byte) (expireFlags, resp.Value, bool) {
 			}
 			f.nx = true
 		case "xx":
-			if f.nx || f.gt || f.lt {
+			// Probed 7.2.7: XX composes with GT/LT; only NX conflicts.
+			if f.nx {
 				return fail(resp.Err("ERR NX and XX, GT or LT options at the same time are not compatible"))
 			}
 			f.xx = true
 		case "gt":
-			if f.nx || f.xx {
+			if f.nx {
 				return fail(resp.Err("ERR NX and XX, GT or LT options at the same time are not compatible"))
 			}
 			if f.lt {
@@ -77,7 +78,7 @@ func parseExpireFlags(args [][]byte) (expireFlags, resp.Value, bool) {
 			}
 			f.gt = true
 		case "lt":
-			if f.nx || f.xx {
+			if f.nx {
 				return fail(resp.Err("ERR NX and XX, GT or LT options at the same time are not compatible"))
 			}
 			if f.gt {
@@ -269,6 +270,19 @@ func typeName(t shard.Type) string {
 	default:
 		return "string"
 	}
+}
+
+func cmdKeys(e *Engine, cs *ConnState, args [][]byte) resp.Value {
+	pattern := args[1]
+	all := len(pattern) == 1 && pattern[0] == '*' // Redis's fast path
+	keys := e.Shards.AllKeys(cs.DB)
+	elems := make([]resp.Value, 0, len(keys))
+	for _, k := range keys {
+		if all || GlobMatch(pattern, []byte(k)) {
+			elems = append(elems, resp.BlobStr(k))
+		}
+	}
+	return resp.Arr(elems...)
 }
 
 func cmdScan(e *Engine, cs *ConnState, args [][]byte) resp.Value {

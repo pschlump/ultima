@@ -1,0 +1,1104 @@
+# Sorted-set group cases: zadd zscore zmscore zincrby zrank zrevrank zrange
+# zrangebyscore zrangebylex zrevrange zrevrangebyscore zremrangebyrank
+# zremrangebyscore zremrangebylex zcard zcount zlexcount zrem zpopmin zpopmax
+# zrandmember zdiff zinter zunion zinterstore zunionstore zscan bzpopmin
+# bzpopmax bzmpop.
+# Blocking commands appear only in their NON-BLOCKING form (data present).
+# RESP3-class targets get '(double)' scores and nested member/score pairs for
+# the WITHSCORES family; each affected case carries an == resp3 block.
+
+== case: zset.zadd-basics
+ZADD zb 1 one 2 two 3 three
+ZADD zb 2 two 4 four
+ZADD zb CH 5 two
+ZADD zb CH 5 two
+ZRANGE zb 0 -1
+ZADD zb 1 a 1 b 1 c
+ZRANGE zb 0 -1
+--
+(integer) 3
+(integer) 1
+(integer) 1
+(integer) 0
+1) "one"
+2) "three"
+3) "four"
+4) "two"
+(integer) 3
+1) "a"
+2) "b"
+3) "c"
+4) "one"
+5) "three"
+6) "four"
+7) "two"
+
+== case: zset.zadd-flags
+ZADD zo 1 a
+ZADD zo NX 9 a
+ZADD zo XX 2 a
+ZSCORE zo a
+ZADD zo XX GT CH 7 a
+ZADD zo GT CH 5 a
+ZADD zo LT CH 5 a
+ZSCORE zo a
+ZADD zo GT 100 new
+ZADD zo NX 1 fresh
+ZADD zo GT LT 1 a
+ZADD zo NX XX 1 a
+ZADD zo NX GT 1 a
+ZADD zo bad a
+ZADD zo FOO 1 a
+ZADD zo 1
+ZADD zo
+--
+(integer) 1
+(integer) 0
+(integer) 0
+"2"
+(integer) 1
+(integer) 0
+(integer) 1
+"5"
+(integer) 1
+(integer) 1
+(error) ERR GT, LT, and/or NX options at the same time are not compatible
+(error) ERR XX and NX options at the same time are not compatible
+(error) ERR GT, LT, and/or NX options at the same time are not compatible
+(error) ERR value is not a valid float
+(error) ERR syntax error
+(error) ERR wrong number of arguments for 'zadd' command
+(error) ERR wrong number of arguments for 'zadd' command
+== resp3
+--
+(integer) 1
+(integer) 0
+(integer) 0
+(double) 2
+(integer) 1
+(integer) 0
+(integer) 1
+(double) 5
+(integer) 1
+(integer) 1
+(error) ERR GT, LT, and/or NX options at the same time are not compatible
+(error) ERR XX and NX options at the same time are not compatible
+(error) ERR GT, LT, and/or NX options at the same time are not compatible
+(error) ERR value is not a valid float
+(error) ERR syntax error
+(error) ERR wrong number of arguments for 'zadd' command
+(error) ERR wrong number of arguments for 'zadd' command
+
+== case: zset.zadd-incr
+ZADD zi INCR 2 a
+ZADD zi INCR 1.5 a
+ZADD zi INCR XX 0.5 a
+ZADD zi INCR NX 10 fresh
+ZADD zi INCR XX 5 nosuch
+ZADD zi INCR NX 5 a
+ZADD zi INCR GT 100 a
+ZADD zi INCR LT 0 a
+ZADD zi INCR LT -1 a
+ZADD zi INCR 1 a 2 b
+ZADD zi INCR bad a
+ZSCORE zi a
+--
+"2"
+"3.5"
+"4"
+"10"
+(nil)
+(nil)
+"104"
+(nil)
+"103"
+(error) ERR INCR option supports a single increment-element pair
+(error) ERR value is not a valid float
+"103"
+== resp3
+--
+(double) 2
+(double) 3.5
+(double) 4
+(double) 10
+(nil)
+(nil)
+(double) 104
+(nil)
+(double) 103
+(error) ERR INCR option supports a single increment-element pair
+(error) ERR value is not a valid float
+(double) 103
+
+== case: zset.zscore-zmscore
+ZADD zs 1.5 a 2 b 3 c
+ZSCORE zs a
+ZSCORE zs b
+ZSCORE zs nosuch
+ZSCORE nosuch a
+ZMSCORE zs a c nosuch b
+ZMSCORE nosuch a
+ZSCORE zs a b
+--
+(integer) 3
+"1.5"
+"2"
+(nil)
+(nil)
+1) "1.5"
+2) "3"
+3) (nil)
+4) "2"
+1) (nil)
+(error) ERR wrong number of arguments for 'zscore' command
+== resp3
+--
+(integer) 3
+(double) 1.5
+(double) 2
+(nil)
+(nil)
+1) (double) 1.5
+2) (double) 3
+3) (nil)
+4) (double) 2
+1) (nil)
+(error) ERR wrong number of arguments for 'zscore' command
+
+== case: zset.zincrby
+ZINCRBY zc 2 new
+ZINCRBY zc 1.5 new
+ZINCRBY zc -0.5 new
+ZADD zc 1 x
+ZINCRBY zc 0.25 x
+ZINCRBY zc nope x
+ZINCRBY zc 1
+ZSCORE zc new
+--
+"2"
+"3.5"
+"3"
+(integer) 1
+"1.25"
+(error) ERR value is not a valid float
+(error) ERR wrong number of arguments for 'zincrby' command
+"3"
+== resp3
+--
+(double) 2
+(double) 3.5
+(double) 3
+(integer) 1
+(double) 1.25
+(error) ERR value is not a valid float
+(error) ERR wrong number of arguments for 'zincrby' command
+(double) 3
+
+== case: zset.zrank
+ZADD zr 10 a 20 b 30 c 40 d
+ZRANK zr b
+ZRANK zr b WITHSCORE
+ZRANK zr d
+ZREVRANK zr d
+ZREVRANK zr a
+ZREVRANK zr a WITHSCORE
+ZRANK zr nosuch
+ZRANK zr nosuch WITHSCORE
+ZRANK nosuch a
+ZREVRANK nosuch a WITHSCORE
+ZRANK zr b BAD
+ZRANK zr
+--
+(integer) 4
+(integer) 1
+1) (integer) 1
+2) "20"
+(integer) 3
+(integer) 0
+(integer) 3
+1) (integer) 3
+2) "10"
+(nil)
+(nil)
+(nil)
+(nil)
+(error) ERR syntax error
+(error) ERR wrong number of arguments for 'zrank' command
+== resp3
+--
+(integer) 4
+(integer) 1
+1) (integer) 1
+2) (double) 20
+(integer) 3
+(integer) 0
+(integer) 3
+1) (integer) 3
+2) (double) 10
+(nil)
+(nil)
+(nil)
+(nil)
+(error) ERR syntax error
+(error) ERR wrong number of arguments for 'zrank' command
+
+== case: zset.zrange
+ZADD z 1 a 2 b 3 c 4 d 5 e
+ZRANGE z 0 -1
+ZRANGE z -2 -1
+ZRANGE z -100 100
+ZRANGE z 2 1
+ZRANGE z 0 -1 WITHSCORES
+ZRANGE z 0 -1 REV
+ZRANGE z (1 (4 BYSCORE
+ZRANGE z (4 (1 BYSCORE REV
+ZRANGE z 0 -1 LIMIT 0 2
+ZRANGE nosuch 0 -1
+ZRANGE z 0
+--
+(integer) 5
+1) "a"
+2) "b"
+3) "c"
+4) "d"
+5) "e"
+1) "d"
+2) "e"
+1) "a"
+2) "b"
+3) "c"
+4) "d"
+5) "e"
+(empty array)
+ 1) "a"
+ 2) "1"
+ 3) "b"
+ 4) "2"
+ 5) "c"
+ 6) "3"
+ 7) "d"
+ 8) "4"
+ 9) "e"
+10) "5"
+1) "e"
+2) "d"
+3) "c"
+4) "b"
+5) "a"
+1) "b"
+2) "c"
+1) "c"
+2) "b"
+(error) ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX
+(empty array)
+(error) ERR wrong number of arguments for 'zrange' command
+== resp3
+--
+(integer) 5
+1) "a"
+2) "b"
+3) "c"
+4) "d"
+5) "e"
+1) "d"
+2) "e"
+1) "a"
+2) "b"
+3) "c"
+4) "d"
+5) "e"
+(empty array)
+1) 1) "a"
+   2) (double) 1
+2) 1) "b"
+   2) (double) 2
+3) 1) "c"
+   2) (double) 3
+4) 1) "d"
+   2) (double) 4
+5) 1) "e"
+   2) (double) 5
+1) "e"
+2) "d"
+3) "c"
+4) "b"
+5) "a"
+1) "b"
+2) "c"
+1) "c"
+2) "b"
+(error) ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX
+(empty array)
+(error) ERR wrong number of arguments for 'zrange' command
+
+== case: zset.zrangebyscore
+ZADD z 1 a 2 b 3 c 4 d 5 e
+ZRANGEBYSCORE z -inf +inf
+ZRANGEBYSCORE z 2 4
+ZRANGEBYSCORE z (2 4
+ZRANGEBYSCORE z (2 (5
+ZRANGEBYSCORE z 2 3 WITHSCORES
+ZRANGEBYSCORE z -inf +inf LIMIT 1 2
+ZRANGEBYSCORE z 5 1
+ZRANGEBYSCORE nosuch -inf +inf
+ZRANGEBYSCORE z 1
+ZRANGEBYSCORE z abc def
+ZRANGEBYSCORE z 1 5 LIMIT 0 x
+--
+(integer) 5
+1) "a"
+2) "b"
+3) "c"
+4) "d"
+5) "e"
+1) "b"
+2) "c"
+3) "d"
+1) "c"
+2) "d"
+1) "c"
+2) "d"
+1) "b"
+2) "2"
+3) "c"
+4) "3"
+1) "b"
+2) "c"
+(empty array)
+(empty array)
+(error) ERR wrong number of arguments for 'zrangebyscore' command
+(error) ERR min or max is not a float
+(error) ERR value is not an integer or out of range
+== resp3
+--
+(integer) 5
+1) "a"
+2) "b"
+3) "c"
+4) "d"
+5) "e"
+1) "b"
+2) "c"
+3) "d"
+1) "c"
+2) "d"
+1) "c"
+2) "d"
+1) 1) "b"
+   2) (double) 2
+2) 1) "c"
+   2) (double) 3
+1) "b"
+2) "c"
+(empty array)
+(empty array)
+(error) ERR wrong number of arguments for 'zrangebyscore' command
+(error) ERR min or max is not a float
+(error) ERR value is not an integer or out of range
+
+== case: zset.zrangebylex
+ZADD zx 0 a 0 b 0 c 0 d 0 e 0 f 0 g
+ZRANGEBYLEX zx - +
+ZRANGEBYLEX zx [b [f
+ZRANGEBYLEX zx (b (f
+ZRANGEBYLEX zx - [c
+ZRANGEBYLEX zx [c +
+ZRANGEBYLEX zx - + LIMIT 2 2
+ZRANGEBYLEX zx + -
+ZRANGEBYLEX nosuch - +
+ZRANGE zx (b (e BYLEX
+ZRANGEBYLEX zx abc def
+ZRANGEBYLEX zx [a
+--
+(integer) 7
+1) "a"
+2) "b"
+3) "c"
+4) "d"
+5) "e"
+6) "f"
+7) "g"
+1) "b"
+2) "c"
+3) "d"
+4) "e"
+5) "f"
+1) "c"
+2) "d"
+3) "e"
+1) "a"
+2) "b"
+3) "c"
+1) "c"
+2) "d"
+3) "e"
+4) "f"
+5) "g"
+1) "c"
+2) "d"
+(empty array)
+(empty array)
+1) "c"
+2) "d"
+(error) ERR min or max not valid string range item
+(error) ERR wrong number of arguments for 'zrangebylex' command
+
+== case: zset.zrevrange
+ZADD z 1 a 2 b 3 c 4 d 5 e
+ZREVRANGE z 0 -1
+ZREVRANGE z 0 1
+ZREVRANGE z 0 1 WITHSCORES
+ZREVRANGEBYSCORE z +inf -inf
+ZREVRANGEBYSCORE z 4 (2
+ZREVRANGEBYSCORE z +inf -inf LIMIT 1 2
+ZREVRANGEBYSCORE z 2 4
+ZREVRANGEBYSCORE nosuch +inf -inf
+ZREVRANGEBYSCORE z x y
+--
+(integer) 5
+1) "e"
+2) "d"
+3) "c"
+4) "b"
+5) "a"
+1) "e"
+2) "d"
+1) "e"
+2) "5"
+3) "d"
+4) "4"
+1) "e"
+2) "d"
+3) "c"
+4) "b"
+5) "a"
+1) "d"
+2) "c"
+1) "d"
+2) "c"
+(empty array)
+(empty array)
+(error) ERR min or max is not a float
+== resp3
+--
+(integer) 5
+1) "e"
+2) "d"
+3) "c"
+4) "b"
+5) "a"
+1) "e"
+2) "d"
+1) 1) "e"
+   2) (double) 5
+2) 1) "d"
+   2) (double) 4
+1) "e"
+2) "d"
+3) "c"
+4) "b"
+5) "a"
+1) "d"
+2) "c"
+1) "d"
+2) "c"
+(empty array)
+(empty array)
+(error) ERR min or max is not a float
+
+== case: zset.zremrange
+ZADD z 0 a 0 b 0 c 0 d 0 e 0 f 0 g
+ZREMRANGEBYLEX z (b (e
+ZRANGE z 0 -1
+ZADD zs 1 a 2 b 3 c 4 d 5 e
+ZREMRANGEBYSCORE zs (2 4
+ZRANGE zs 0 -1
+ZREMRANGEBYRANK zs 0 1
+ZRANGE zs 0 -1
+ZREMRANGEBYRANK zs 0 -1
+EXISTS zs
+ZREMRANGEBYRANK nosuch 0 -1
+ZREMRANGEBYSCORE z x y
+ZREMRANGEBYLEX z x y
+ZREMRANGEBYRANK z 0
+--
+(integer) 7
+(integer) 2
+1) "a"
+2) "b"
+3) "e"
+4) "f"
+5) "g"
+(integer) 5
+(integer) 2
+1) "a"
+2) "b"
+3) "e"
+(integer) 2
+1) "e"
+(integer) 1
+(integer) 0
+(integer) 0
+(error) ERR min or max is not a float
+(error) ERR min or max not valid string range item
+(error) ERR wrong number of arguments for 'zremrangebyrank' command
+
+== case: zset.zcard-zcount-zlexcount
+ZADD zc 1 a 2 b 2 c 4 d
+ZCARD zc
+ZCARD nosuch
+ZCOUNT zc 1 4
+ZCOUNT zc (1 4
+ZCOUNT zc (2 (4
+ZCOUNT zc -inf +inf
+ZCOUNT nosuch 0 9
+ZCOUNT zc x y
+ZADD zl 0 a 0 b 0 c 0 d
+ZLEXCOUNT zl - +
+ZLEXCOUNT zl [b (d
+ZLEXCOUNT zl x y
+ZLEXCOUNT nosuch - +
+ZCARD zc extra
+--
+(integer) 4
+(integer) 4
+(integer) 0
+(integer) 4
+(integer) 3
+(integer) 0
+(integer) 4
+(integer) 0
+(error) ERR min or max is not a float
+(integer) 4
+(integer) 4
+(integer) 2
+(error) ERR min or max not valid string range item
+(integer) 0
+(error) ERR wrong number of arguments for 'zcard' command
+
+== case: zset.zrem
+ZADD z 1 a 2 b 3 c 4 d
+ZREM z b
+ZREM z a nosuch c
+ZREM z nosuch
+ZREM nosuch a
+ZRANGE z 0 -1
+ZREM z d
+EXISTS z
+ZREM z
+--
+(integer) 4
+(integer) 1
+(integer) 2
+(integer) 0
+(integer) 0
+1) "d"
+(integer) 1
+(integer) 0
+(error) ERR wrong number of arguments for 'zrem' command
+
+== case: zset.zpopminmax
+ZADD zp 1 a 2 b 3 c 4 d
+ZPOPMIN zp
+ZPOPMAX zp
+ZPOPMIN zp 2
+ZPOPMIN zp
+ZPOPMIN nosuch
+ZPOPMAX nosuch 3
+ZADD zp 5 x
+ZPOPMAX zp 0
+ZRANGE zp 0 -1
+ZPOPMIN zp x
+ZPOPMIN
+--
+(integer) 4
+1) "a"
+2) "1"
+1) "d"
+2) "4"
+1) "b"
+2) "2"
+3) "c"
+4) "3"
+(empty array)
+(empty array)
+(empty array)
+(integer) 1
+(empty array)
+1) "x"
+(error) ERR value is out of range, must be positive
+(error) ERR wrong number of arguments for 'zpopmin' command
+== resp3
+--
+(integer) 4
+1) "a"
+2) (double) 1
+1) "d"
+2) (double) 4
+1) 1) "b"
+   2) (double) 2
+2) 1) "c"
+   2) (double) 3
+(empty array)
+(empty array)
+(empty array)
+(integer) 1
+(empty array)
+1) "x"
+(error) ERR value is out of range, must be positive
+(error) ERR wrong number of arguments for 'zpopmin' command
+
+== case: zset.zrandmember
+== type: match
+ZADD zr 1 a 2 b 3 c
+ZRANDMEMBER zr 5
+ZRANDMEMBER zr 0
+ZRANDMEMBER nosuch 3
+ZRANDMEMBER nosuch
+ZRANDMEMBER zr x
+ZRANDMEMBER zr 3 WITHSCORES
+--
+\(integer\) 3
+1\) "[abc]"
+2\) "[abc]"
+3\) "[abc]"
+\(empty array\)
+\(empty array\)
+\(nil\)
+\(error\) ERR value is not an integer or out of range
+1\) "[abc]"
+2\) "[123]"
+3\) "[abc]"
+4\) "[123]"
+5\) "[abc]"
+6\) "[123]"
+== resp3
+--
+\(integer\) 3
+1\) "[abc]"
+2\) "[abc]"
+3\) "[abc]"
+\(empty array\)
+\(empty array\)
+\(nil\)
+\(error\) ERR value is not an integer or out of range
+1\) 1\) "[abc]"
+   2\) \(double\) [123]
+2\) 1\) "[abc]"
+   2\) \(double\) [123]
+3\) 1\) "[abc]"
+   2\) \(double\) [123]
+
+== case: zset.zdiff
+ZADD z1 1 a 2 b 3 c
+ZADD z2 2 b 3 c 4 d
+ZADD z3 10 c 20 a
+ZDIFF 2 z1 z2
+ZDIFF 2 z2 z1
+ZDIFF 3 z1 z2 z3
+ZDIFF 1 z1
+ZDIFF 2 z1 nosuch
+ZDIFF 2 z1 z2 WITHSCORES
+ZDIFF x z1 z2
+ZDIFF 2 z1
+ZDIFF 0
+--
+(integer) 3
+(integer) 3
+(integer) 2
+1) "a"
+1) "d"
+(empty array)
+1) "a"
+2) "b"
+3) "c"
+1) "a"
+2) "b"
+3) "c"
+1) "a"
+2) "1"
+(error) ERR value is not an integer or out of range
+(error) ERR syntax error
+(error) ERR wrong number of arguments for 'zdiff' command
+== resp3
+--
+(integer) 3
+(integer) 3
+(integer) 2
+1) "a"
+1) "d"
+(empty array)
+1) "a"
+2) "b"
+3) "c"
+1) "a"
+2) "b"
+3) "c"
+1) 1) "a"
+   2) (double) 1
+(error) ERR value is not an integer or out of range
+(error) ERR syntax error
+(error) ERR wrong number of arguments for 'zdiff' command
+
+== case: zset.zinter-zunion
+# Plain ZINTER/ZUNION result sets aggregate through a hash table, so member
+# order is unspecified in Redis (dict order, random hash seed): only
+# single-member, single-key, and WITHSCORES (score-ordered) forms are pinned.
+ZADD z1 1 a 2 b 3 c
+ZADD z2 2 b 3 c 4 d
+ZADD z3 10 c 20 a
+ZINTER 3 z1 z2 z3
+ZINTER 2 z1 nosuch
+ZINTER 2 z1 z2 WITHSCORES
+ZUNION 1 z1
+ZUNION 2 z1 z2 WITHSCORES
+ZINTER 2 z1
+ZUNION 0
+ZUNION x z1 z2
+--
+(integer) 3
+(integer) 3
+(integer) 2
+1) "c"
+(empty array)
+1) "b"
+2) "4"
+3) "c"
+4) "6"
+1) "a"
+2) "b"
+3) "c"
+1) "a"
+2) "1"
+3) "b"
+4) "4"
+5) "d"
+6) "4"
+7) "c"
+8) "6"
+(error) ERR syntax error
+(error) ERR wrong number of arguments for 'zunion' command
+(error) ERR value is not an integer or out of range
+== resp3
+--
+(integer) 3
+(integer) 3
+(integer) 2
+1) "c"
+(empty array)
+1) 1) "b"
+   2) (double) 4
+2) 1) "c"
+   2) (double) 6
+1) "a"
+2) "b"
+3) "c"
+1) 1) "a"
+   2) (double) 1
+2) 1) "b"
+   2) (double) 4
+3) 1) "d"
+   2) (double) 4
+4) 1) "c"
+   2) (double) 6
+(error) ERR syntax error
+(error) ERR wrong number of arguments for 'zunion' command
+(error) ERR value is not an integer or out of range
+
+== case: zset.zstores
+ZADD z1 1 a 2 b 3 c
+ZADD z2 2 b 3 c 4 d
+ZINTERSTORE dst 2 z1 z2
+ZRANGE dst 0 -1 WITHSCORES
+ZINTERSTORE dstw 2 z1 z2 WEIGHTS 2 3
+ZRANGE dstw 0 -1 WITHSCORES
+ZINTERSTORE dstm 2 z1 z2 AGGREGATE MAX
+ZRANGE dstm 0 -1 WITHSCORES
+ZUNIONSTORE dstu 2 z1 z2
+ZRANGE dstu 0 -1 WITHSCORES
+ZUNIONSTORE dstmin 2 z1 z2 AGGREGATE MIN
+ZRANGE dstmin 0 -1 WITHSCORES
+ZUNIONSTORE dstws 2 z1 z2 WEIGHTS 1 0.5 AGGREGATE SUM
+ZRANGE dstws 0 -1 WITHSCORES
+ZINTERSTORE dstn 2 z1 nosuch
+EXISTS dstn
+ZINTERSTORE dstx 2 z1 z2 WEIGHTS 1
+ZINTERSTORE dstx 2 z1 z2 AGGREGATE BOGUS
+ZINTERSTORE dstx 2 z1 z2 WEIGHTS 1 nope
+ZUNIONSTORE dstx 3 z1 z2
+--
+(integer) 3
+(integer) 3
+(integer) 2
+1) "b"
+2) "4"
+3) "c"
+4) "6"
+(integer) 2
+1) "b"
+2) "10"
+3) "c"
+4) "15"
+(integer) 2
+1) "b"
+2) "2"
+3) "c"
+4) "3"
+(integer) 4
+1) "a"
+2) "1"
+3) "b"
+4) "4"
+5) "d"
+6) "4"
+7) "c"
+8) "6"
+(integer) 4
+1) "a"
+2) "1"
+3) "b"
+4) "2"
+5) "c"
+6) "3"
+7) "d"
+8) "4"
+(integer) 4
+1) "a"
+2) "1"
+3) "d"
+4) "2"
+5) "b"
+6) "3"
+7) "c"
+8) "4.5"
+(integer) 0
+(integer) 0
+(error) ERR syntax error
+(error) ERR syntax error
+(error) ERR weight value is not a float
+(error) ERR syntax error
+== resp3
+--
+(integer) 3
+(integer) 3
+(integer) 2
+1) 1) "b"
+   2) (double) 4
+2) 1) "c"
+   2) (double) 6
+(integer) 2
+1) 1) "b"
+   2) (double) 10
+2) 1) "c"
+   2) (double) 15
+(integer) 2
+1) 1) "b"
+   2) (double) 2
+2) 1) "c"
+   2) (double) 3
+(integer) 4
+1) 1) "a"
+   2) (double) 1
+2) 1) "b"
+   2) (double) 4
+3) 1) "d"
+   2) (double) 4
+4) 1) "c"
+   2) (double) 6
+(integer) 4
+1) 1) "a"
+   2) (double) 1
+2) 1) "b"
+   2) (double) 2
+3) 1) "c"
+   2) (double) 3
+4) 1) "d"
+   2) (double) 4
+(integer) 4
+1) 1) "a"
+   2) (double) 1
+2) 1) "d"
+   2) (double) 2
+3) 1) "b"
+   2) (double) 3
+4) 1) "c"
+   2) (double) 4.5
+(integer) 0
+(integer) 0
+(error) ERR syntax error
+(error) ERR syntax error
+(error) ERR weight value is not a float
+(error) ERR syntax error
+
+== case: zset.wrongtype
+SET s plain
+ZADD s 1 a
+ZSCORE s a
+ZMSCORE s a
+ZINCRBY s 1 a
+ZRANK s a
+ZREVRANK s a
+ZRANGE s 0 -1
+ZRANGEBYSCORE s 0 1
+ZRANGEBYLEX s - +
+ZCARD s
+ZCOUNT s 0 1
+ZLEXCOUNT s - +
+ZREM s a
+ZREMRANGEBYRANK s 0 -1
+ZPOPMIN s
+ZPOPMAX s
+ZRANDMEMBER s
+ZRANDMEMBER s 2
+ZDIFF 1 s
+ZINTER 1 s
+ZUNION 1 s
+ZINTERSTORE dstw 1 s
+ZUNIONSTORE dstw2 2 s s
+ZSCAN s 0
+BZPOPMIN s 1
+BZMPOP 1 1 s MIN
+--
+OK
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+
+== case: zset.zscan
+# Small zsets iterate in score order on both implementations (listpack /
+# skiplist), and a full iteration returns cursor "0" — deterministic, so
+# exact comparison. Scores stay bulk strings even on RESP3.
+ZADD z 1 a 2 b 3 c
+ZSCAN z 0
+ZSCAN z 0 MATCH b*
+ZSCAN nosuch 0
+ZSCAN z notacursor
+--
+(integer) 3
+1) "0"
+2) 1) "a"
+   2) "1"
+   3) "b"
+   4) "2"
+   5) "c"
+   6) "3"
+1) "0"
+2) 1) "b"
+   2) "2"
+1) "0"
+2) (empty array)
+(error) ERR invalid cursor
+
+== case: zset.blocking-immediate
+ZADD zb 1 x 2 y 3 z
+BZPOPMIN zb 1
+BZPOPMAX zb 1
+BZMPOP 1 1 zb MIN
+ZADD zb 9 p 8 q
+BZMPOP 1 1 zb MAX COUNT 2
+ZADD zb 5 r
+BZMPOP 1 2 zb nosuch MIN
+ZADD zb 6 s 7 t
+BZMPOP 1 0 zb MIN
+BZMPOP 1 1 zb MIDDLE
+BZMPOP 1 1 zb MIN COUNT 0
+BZPOPMIN zb
+BZPOPMAX nosuch zb 1
+SET s v
+BZPOPMAX s 1
+BZMPOP 1 1 s MIN
+BZPOPMIN zb 1
+--
+(integer) 3
+1) "zb"
+2) "x"
+3) "1"
+1) "zb"
+2) "z"
+3) "3"
+1) "zb"
+2) 1) 1) "y"
+      2) "2"
+(integer) 2
+1) "zb"
+2) 1) 1) "p"
+      2) "9"
+   2) 1) "q"
+      2) "8"
+(integer) 1
+1) "zb"
+2) 1) 1) "r"
+      2) "5"
+(integer) 2
+(error) ERR numkeys should be greater than 0
+(error) ERR syntax error
+(error) ERR count should be greater than 0
+(error) ERR wrong number of arguments for 'bzpopmin' command
+1) "zb"
+2) "t"
+3) "7"
+OK
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+1) "zb"
+2) "s"
+3) "6"
+== resp3
+--
+(integer) 3
+1) "zb"
+2) "x"
+3) (double) 1
+1) "zb"
+2) "z"
+3) (double) 3
+1) "zb"
+2) 1) 1) "y"
+      2) (double) 2
+(integer) 2
+1) "zb"
+2) 1) 1) "p"
+      2) (double) 9
+   2) 1) "q"
+      2) (double) 8
+(integer) 1
+1) "zb"
+2) 1) 1) "r"
+      2) (double) 5
+(integer) 2
+(error) ERR numkeys should be greater than 0
+(error) ERR syntax error
+(error) ERR count should be greater than 0
+(error) ERR wrong number of arguments for 'bzpopmin' command
+1) "zb"
+2) "t"
+3) (double) 7
+OK
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+(error) WRONGTYPE Operation against a key holding the wrong kind of value
+1) "zb"
+2) "s"
+3) (double) 6
