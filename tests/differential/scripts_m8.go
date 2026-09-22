@@ -102,6 +102,33 @@ var m8ConversionScripts = []script{
 		cmdM(mSetCmp, "EVAL", "return {map={a=1,b=2}}", "0"), // pair order undefined
 		cmdM(mSetCmp, "EVAL", "return {set={m1=true,m2=true}}", "0"),
 	}},
+	{"eval-globals-guard", []step{
+		// Redis 7.2.7 script environment lockdown (script_lua.c +
+		// deps/lua readonly-table patch, ported to the gopher-lua
+		// runtime in M8d): undefined-global reads raise via the _G
+		// error metatable; globals and every reachable table are
+		// readonly; KEYS/ARGV stay writable; rawget bypasses the guard.
+		cmd("EVAL", "return undefined_global", "0"),
+		cmd("EVAL", "g = 5 return g", "0"),
+		cmd("EVAL", "return _G[nil]", "0"),
+		cmd("EVAL", "rawset(_G, 'g3', 1) return 1", "0"),
+		cmd("EVAL", "rawseti(_G, 1, 'x') return 1", "0"), // no such builtin: guard fires first
+		cmd("EVAL", "return rawget(_G, 'undefined_global') == nil", "0"),
+		cmd("EVAL", "string.foo = 1 return 1", "0"),
+		cmd("EVAL", "redis.error_reply = nil return 1", "0"),
+		cmd("EVAL", "redis = nil return 1", "0"),
+		cmd("EVAL", "math.huge = 5 return math.huge", "0"),
+		cmd("EVAL", "KEYS[1] = 'x' return KEYS[1]", "1", "k"),
+		cmd("EVAL", "ARGV[1] = 'y' return ARGV[1]", "0", "a"),
+		cmd("EVAL", "_G.pairs = nil return 1", "0"),
+		cmd("EVAL", "local ok,e = pcall(function() return nosuchglobal end) return {ok, e}", "0"),
+		cmd("EVAL", "local ok,e = pcall(function() g = 5 end) return {ok, e}", "0"),
+		cmd("EVAL", "local t = setmetatable({}, {__index=function() return 7 end}) return t.x", "0"),
+		cmd("EVAL", "return getmetatable(_G) ~= nil", "0"),
+		cmd("EVAL", "for k in pairs(_G) do if k=='nosuch' then return 1 end end return 0", "0"),
+		cmd("EVAL", "local t = {} rawset(t, 'k', 1) return t.k", "0"),
+		cmd("EVAL", "return _G", "0"), // a table: empty array reply
+	}},
 	{"eval-args-and-globals", []step{
 		cmd("EVAL", "return #KEYS", "0"),
 		cmd("EVAL", "return #ARGV", "1", "k1", "a1", "a2"),
@@ -383,21 +410,10 @@ var m8FlowScripts = []script{
 	{"eval-busy-and-kill", []step{
 		cmd("CONFIG", "SET", "lua-time-limit", "100"),
 		sendOn(1, "EVAL", "while true do end", "0"),
-		cmd("SLEEP", "400"),
-		cmd("GET", "anything"),   // BUSY
-		cmd("PING"),              // BUSY
-		cmd("INFO"),              // BUSY
-		cmd("SCRIPT", "KILL"),    // allowed through the gate
-		recvOn(1, mEq),           // the killed script's error
-		cmd("SCRIPT", "KILL"),    // NOTBUSY now
-		cmd("SET", "after", "1"), // healthy again
-		cmd("CONFIG", "SET", "lua-time-limit", "5000"),
-		cmd("DEL", "after"),
-	}},
-	{"eval-busy-and-kill", []step{
-		cmd("CONFIG", "SET", "lua-time-limit", "100"),
-		sendOn(1, "EVAL", "while true do end", "0"),
-		cmd("SLEEP", "400"),
+		// SLEEP 2000, not 400: under -race the fresh-VM instantiation can
+		// eat most of a 400 ms window before the loop even starts, and the
+		// BUSY gate would not be up yet (flakes; ultima #M8d).
+		cmd("SLEEP", "2000"),
 		cmd("GET", "anything"),   // BUSY
 		cmd("PING"),              // BUSY
 		cmd("INFO"),              // BUSY

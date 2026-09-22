@@ -16,10 +16,11 @@ through four different clients:
 Each case is also run in **both security modes** (`noauth` and `auth`), and
 with `-R` every expectation is additionally validated against a **real
 redis-server 7.2.7** (targets `redis` and `redis3`), so the expected outputs
-are proven Redis-correct, not just Ultima-consistent. Lua/scripting commands
-are out of scope (unimplemented); they and ~50 other unimplemented Redis
-commands are pinned to byte-exact `unknown command` errors in
-`cases/95-unknown.txt` instead.
+are proven Redis-correct, not just Ultima-consistent. M8 Lua scripting is
+covered by `cases/90-scripting.txt` (all rows probed byte-exact against
+7.2.7; dialect-divergent error texts are pinned shape-only via `match`).
+Unimplemented Redis commands (functions, streams, geo, …) are pinned to
+byte-exact `unknown command` errors in `cases/95-unknown.txt` instead.
 
 ## How to run
 
@@ -134,7 +135,7 @@ OK
 
 ## Known-good divergences pinned by the suite
 
-Ultima-only expectations (`== targets: no-redis`): `COMMAND COUNT` (141 vs
+Ultima-only expectations (`== targets: no-redis`): `COMMAND COUNT` (146 vs
 Redis's ~240), `COMMAND INFO` entry shape (6 fields vs Redis's 10), and the
 `unknown.*` file (unimplemented commands error in Ultima, work in Redis).
 

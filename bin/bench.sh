@@ -133,3 +133,8 @@ if [[ "${BENCH_M5:-1}" != "0" ]]; then
 	echo "--- M5 maxmemory soak section ---"
 	sh bin/bench-m5.sh
 fi
+# M8 Lua scripting sweep (bin/bench-m8.sh); skip with BENCH_M8=0.
+if [[ "${BENCH_M8:-1}" != "0" ]]; then
+	echo "--- M8 Lua scripting section ---"
+	sh bin/bench-m8.sh
+fi

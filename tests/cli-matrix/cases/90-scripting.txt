@@ -1,0 +1,398 @@
+# Scripting-group cases (M8): EVAL, EVALSHA, EVAL_RO, EVALSHA_RO, SCRIPT.
+#
+# Every expectation here was probed byte-exact against redis-server 7.2.7
+# (the corpus in tests/differential/scripts_m8.go proves the same rows
+# reply-identical in Ultima), so all cases validate under -R.
+#
+# Runner notes:
+#   * The runner FLUSHALLs before each case but does NOT SCRIPT FLUSH — the
+#     script cache persists across cases (on ultima AND on the -R redis).
+#     Cache-sensitive cases start with SCRIPT FLUSH and end clean.
+#   * Lua sources use the redis-cli input grammar: double quotes group,
+#     single quotes inside are literal, \n inside double quotes is a real
+#     newline (multi-line scripts pin the @user_script:N line number).
+#   * Divergent dialects (docs/Redis-Errors.md §11) are covered only via
+#     'match' regexes that pin the byte-exact shape both engines share
+#     (scripting.eval-dialect-errors).
+
+== case: scripting.eval-scalars
+EVAL "return 1" 0
+EVAL "return 1.5" 0
+EVAL "return -1.5" 0
+EVAL "return 0/0" 0
+EVAL "return 1e30" 0
+EVAL "return 2^53" 0
+EVAL "return math.huge" 0
+EVAL "return -math.huge" 0
+EVAL "return 'x'" 0
+EVAL "return true" 0
+EVAL "return false" 0
+EVAL "return nil" 0
+EVAL "return 1,2,3" 0
+EVAL "return" 0
+--
+(integer) 1
+(integer) 1
+(integer) -1
+(integer) 0
+(integer) 9223372036854775807
+(integer) 9007199254740992
+(integer) 9223372036854775807
+(integer) -9223372036854775808
+"x"
+(integer) 1
+(nil)
+(nil)
+(integer) 1
+(nil)
+
+== case: scripting.eval-tables
+EVAL "return {}" 0
+EVAL "return {1,nil,3}" 0
+EVAL "return {1,2,{3,'four'}}" 0
+EVAL "return {a=1}" 0
+EVAL "return {false,true}" 0
+EVAL "return {{}}" 0
+EVAL "return {'a',{}}" 0
+EVAL "return {err='bad thing'}" 0
+EVAL "return {ok='fine'}" 0
+EVAL "return {ok='a', err='b'}" 0
+EVAL "return {err='x', 1}" 0
+--
+(empty array)
+1) (integer) 1
+1) (integer) 1
+2) (integer) 2
+3) 1) (integer) 3
+   2) "four"
+(empty array)
+1) (nil)
+2) (integer) 1
+1) (empty array)
+1) "a"
+2) (empty array)
+(error) bad thing
+fine
+(error) b
+(error) x
+
+== case: scripting.eval-map-set-double
+EVAL "return {map={a=1}}" 0
+EVAL "return {set={m1=true}}" 0
+EVAL "return {double=2.5}" 0
+EVAL "return {double=2}" 0
+EVAL "return {map={}}" 0
+EVAL "return {set={}}" 0
+--
+1) "a"
+2) (integer) 1
+1) "m1"
+"2.5"
+"2"
+(empty array)
+(empty array)
+== resp3
+--
+1# "a" => (integer) 1
+1~ "m1"
+(double) 2.5
+(double) 2
+(empty hash)
+(empty set)
+
+== case: scripting.eval-args-globals
+EVAL "return #KEYS" 0
+EVAL "return #ARGV" 1 k1 a1 a2
+EVAL "return KEYS[1]" 0
+EVAL "return {KEYS[1],KEYS[2],ARGV[1]}" 2 k1 k2 a1
+EVAL "return #ARGV" 0 extra1 extra2
+EVAL "return redis.LOG_WARNING" 0
+EVAL "return redis.REDIS_VERSION" 0
+EVAL "return redis.sha1hex('abc')" 0
+EVAL "return type(redis.call)" 0
+--
+(integer) 0
+(integer) 2
+(nil)
+1) "k1"
+2) "k2"
+3) "a1"
+(integer) 2
+(integer) 3
+"7.2.7"
+"a9993e364706816aba3e25717850c26c9cd0d89d"
+"function"
+
+== case: scripting.eval-redis-call
+EVAL "return redis.call('set',KEYS[1],ARGV[1])" 1 k v
+GET k
+EVAL "return redis.call('incr','ctr')" 0
+EVAL "return redis.call('lpush','l1','a','b')" 0
+EVAL "return redis.call('lrange','l1','0','-1')" 0
+EVAL "return redis.call('get','missing')" 0
+EVAL "return redis.call('get','missing') == false" 0
+EVAL "return redis.call('set','k2','v').ok" 0
+EVAL "return redis.call('type','k')" 0
+EVAL "redis.call('hset','h1','f','v') return redis.call('hgetall','h1')" 0
+EVAL "return redis.call('hgetall','missing')" 0
+EVAL "return redis.call('dbsize')" 0
+EVAL "return redis.call('ping')" 0
+EVAL "return redis.call('echo','hey')" 0
+--
+OK
+"v"
+(integer) 1
+(integer) 2
+1) "b"
+2) "a"
+(nil)
+(integer) 1
+"OK"
+string
+1) "f"
+2) "v"
+(empty array)
+(integer) 5
+PONG
+"hey"
+
+== case: scripting.eval-call-errors
+EVAL "return redis.call('get')" 0
+EVAL "return redis.call('nosuchcmd','x')" 0
+EVAL "return redis.call('subscribe','c')" 0
+EVAL "return redis.call('multi')" 0
+EVAL "local r = redis.pcall('get') return r" 0
+EVAL "local r = redis.pcall('get') return r.err" 0
+EVAL "local ok, err = pcall(function() return redis.call('get') end) return tostring(ok)" 0
+EVAL "return redis.error_reply('my err')" 0
+EVAL "return redis.status_reply('my status')" 0
+--
+(error) ERR Wrong number of args calling Redis command from script script: f187dee77f607f7cff00bbabc9df38507582c78d, on @user_script:1.
+(error) ERR Unknown Redis command called from script script: 23d3c711730047c054c75c0fc5cf507ab7b8a9b3, on @user_script:1.
+(error) ERR This Redis command is not allowed from script script: 7f02cffe90778c7abbcc0c8698c70a4ab5da2c45, on @user_script:1.
+(error) ERR This Redis command is not allowed from script script: c329a1a294be6bf95b44144f7502610661ae925a, on @user_script:1.
+(error) ERR Wrong number of args calling Redis command from script
+"ERR Wrong number of args calling Redis command from script"
+"false"
+(error) my err
+my status
+
+== case: scripting.eval-user-errors
+EVAL "return error('boom')" 0
+EVAL "local a = 1\nlocal b = 2\nerror('boom3')" 0
+EVAL "return error('ERR already')" 0
+EVAL "local r = redis.pcall('get') error(r) return 1" 0
+--
+(error) ERR user_script:1: boom script: 57b11f4c6516f4ef2661c6423451796106f8393a, on @user_script:1.
+(error) ERR user_script:3: boom3 script: 199cbe78b4c9148521a8166d293c61f18f1af10c, on @user_script:3.
+(error) ERR user_script:1: ERR already script: 773f2f687f83ae9b3f3b1f9174405f455d0729d7, on @user_script:1.
+(error) ERR Wrong number of args calling Redis command from script script: c07516c4c7d9d1d0885a10513835219ac9603e86, on @user_script:1.
+
+# Dialect-divergent texts (gopher-lua frontend/runtime ≠ PUC Lua,
+# docs/Redis-Errors.md §11): pin only the shape both engines share.
+== case: scripting.eval-dialect-errors
+== type: match
+EVAL "return 1 +" 0
+EVAL "local x = nil return x()" 0
+--
+\(error\) ERR Error compiling script \(new function\): .*
+\(error\) ERR user_script:1: .* script: [0-9a-f]{40}, on @user_script:1\.
+
+== case: scripting.eval-globals-guard
+EVAL "return undefined_global" 0
+EVAL "g = 5 return g" 0
+EVAL "return _G[nil]" 0
+EVAL "rawset(_G, 'g3', 1) return 1" 0
+EVAL "return rawget(_G, 'undefined_global') == nil" 0
+EVAL "string.foo = 1 return 1" 0
+EVAL "redis.error_reply = nil return 1" 0
+EVAL "KEYS[1] = 'x' return KEYS[1]" 1 k
+EVAL "local ok,e = pcall(function() g = 5 end) return {ok, e}" 0
+--
+(error) ERR user_script:1: Script attempted to access nonexistent global variable 'undefined_global' script: 66079c13a0dbe54bee8cb53ac72311504271983b, on @user_script:1.
+(error) ERR user_script:1: Attempt to modify a readonly table script: e6171b62b7cd4ba7b27a121602c4c3d08252017f, on @user_script:1.
+(error) ERR user_script:1: Second argument to luaProtectedTableError must be a string or number script: 5aa563dda31e442ac1f43271575fa39ef4c0a922, on @user_script:1.
+(error) ERR Attempt to modify a readonly table script: a1d0f17525b7373c28fd5dba66fa5ec07332a492, on @user_script:1.
+(integer) 1
+(error) ERR user_script:1: Attempt to modify a readonly table script: 61574b4b91ec75f725f3a3a2d314d3dcd1c1b577, on @user_script:1.
+(error) ERR user_script:1: Attempt to modify a readonly table script: 8b102b5e2f57297442e08fe32fec082407f85758, on @user_script:1.
+"x"
+1) (nil)
+2) "user_script:1: Attempt to modify a readonly table"
+
+== case: scripting.evalsha-noscript
+SCRIPT FLUSH
+EVALSHA deadbeef 0
+EVALSHA 0000000000000000000000000000000000000000 0
+SCRIPT LOAD "return 42"
+EVALSHA 1fa00e76656cc152ad327c13fe365858fd7be306 0
+EVAL "return 42" 0
+SCRIPT EXISTS 1fa00e76656cc152ad327c13fe365858fd7be306 deadbeef
+SCRIPT FLUSH
+SCRIPT EXISTS 1fa00e76656cc152ad327c13fe365858fd7be306
+--
+OK
+(error) NOSCRIPT No matching script. Please use EVAL.
+(error) NOSCRIPT No matching script. Please use EVAL.
+"1fa00e76656cc152ad327c13fe365858fd7be306"
+(integer) 42
+(integer) 42
+1) (integer) 1
+2) (integer) 0
+OK
+1) (integer) 0
+
+== case: scripting.script-errors
+SCRIPT
+SCRIPT KILL
+SCRIPT FOO
+SCRIPT foo
+SCRIPT FLUSH BADMODE
+SCRIPT FLUSH ASYNC extra
+SCRIPT EXISTS
+SCRIPT LOAD
+SCRIPT LOAD a b
+SCRIPT FLUSH SYNC
+SCRIPT FLUSH ASYNC
+SCRIPT FLUSH
+--
+(error) ERR wrong number of arguments for 'script' command
+(error) NOTBUSY No scripts in execution right now.
+(error) ERR unknown subcommand 'FOO'. Try SCRIPT HELP.
+(error) ERR unknown subcommand 'foo'. Try SCRIPT HELP.
+(error) ERR SCRIPT FLUSH only support SYNC|ASYNC option
+(error) ERR SCRIPT FLUSH only support SYNC|ASYNC option
+(error) ERR wrong number of arguments for 'script|exists' command
+(error) ERR wrong number of arguments for 'script|load' command
+(error) ERR wrong number of arguments for 'script|load' command
+OK
+OK
+OK
+
+== case: scripting.script-help
+SCRIPT HELP
+--
+ 1) SCRIPT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:
+ 2) DEBUG (YES|SYNC|NO)
+ 3)     Set the debug mode for subsequent scripts executed.
+ 4) EXISTS <sha1> [<sha1> ...]
+ 5)     Return information about the existence of the scripts in the script cache.
+ 6) FLUSH [ASYNC|SYNC]
+ 7)     Flush the Lua scripts cache. Very dangerous on replicas.
+ 8)     When called without the optional mode argument, the behavior is determined by the
+ 9)     lazyfree-lazy-user-flush configuration directive. Valid modes are:
+10)     * ASYNC: Asynchronously flush the scripts cache.
+11)     * SYNC: Synchronously flush the scripts cache.
+12) KILL
+13)     Kill the currently executing Lua script.
+14) LOAD <script>
+15)     Load a script into the scripts cache without executing it.
+16) HELP
+17)     Print this help.
+
+== case: scripting.eval-arg-validation
+EVAL "return 1" x
+EVAL "return 1" -1
+EVAL "return 1" 2 a
+EVAL "return 1" 0x
+EVAL "return 1" 1
+EVAL "return 1"
+EVAL
+EVALSHA 1fa00e76656cc152ad327c13fe365858fd7be306
+--
+(error) ERR value is not an integer or out of range
+(error) ERR Number of keys can't be negative
+(error) ERR Number of keys can't be greater than number of args
+(error) ERR value is not an integer or out of range
+(error) ERR Number of keys can't be greater than number of args
+(error) ERR wrong number of arguments for 'eval' command
+(error) ERR wrong number of arguments for 'eval' command
+(error) ERR wrong number of arguments for 'evalsha' command
+
+== case: scripting.eval-ro
+SET rok rov
+EVAL_RO "return redis.call('get','rok')" 0
+EVAL_RO "return redis.call('set','rk','v')" 0
+EVAL_RO "return redis.pcall('set','rk','v')" 0
+GET rk
+EVAL_RO "return 1+1" 0
+SCRIPT LOAD "return redis.call('get','rok')"
+EVALSHA_RO 8fe99e09af93d9dc6151ea29a4761853d21a836c 0
+EVALSHA_RO deadbeef 0
+SCRIPT FLUSH
+--
+OK
+"rov"
+(error) ERR Write commands are not allowed from read-only scripts. script: 67372e76f490973b7669649bca9fad9c4d8ea17b, on @user_script:1.
+(error) ERR Write commands are not allowed from read-only scripts.
+(nil)
+(integer) 2
+"8fe99e09af93d9dc6151ea29a4761853d21a836c"
+"rov"
+(error) NOSCRIPT No matching script. Please use EVAL.
+OK
+
+== case: scripting.eval-setresp
+HSET sh1 f1 v1
+SADD ss1 m1
+ZADD sz1 1.5 zm
+EVAL "redis.setresp(3) return redis.call('hgetall','sh1')" 0
+EVAL "redis.setresp(3) return redis.call('smembers','ss1')" 0
+EVAL "redis.setresp(3) return redis.call('zscore','sz1','zm')" 0
+EVAL "redis.setresp(3) return redis.call('get','missing')" 0
+EVAL "redis.setresp(3) return true" 0
+EVAL "redis.setresp(3) return {false,true}" 0
+EVAL "redis.setresp(3) redis.setresp(2) return false" 0
+EVAL "return redis.setresp(4)" 0
+EVAL "return redis.setresp('x')" 0
+--
+(integer) 1
+(integer) 1
+(integer) 1
+1) "f1"
+2) "v1"
+1) "m1"
+"1.5"
+(nil)
+(integer) 1
+1) (integer) 0
+2) (integer) 1
+(nil)
+(error) ERR RESP version must be 2 or 3. script: 921c0a48021d97dfd5884aeea41875972c7804d9, on @user_script:1.
+(error) ERR RESP version must be 2 or 3. script: 832d0a243114b515e35cb3f65c28e22af06cd822, on @user_script:1.
+== resp3
+--
+(integer) 1
+(integer) 1
+(integer) 1
+1# "f1" => "v1"
+1~ "m1"
+(double) 1.5
+(nil)
+(true)
+1) (false)
+2) (true)
+(nil)
+(error) ERR RESP version must be 2 or 3. script: 921c0a48021d97dfd5884aeea41875972c7804d9, on @user_script:1.
+(error) ERR RESP version must be 2 or 3. script: 832d0a243114b515e35cb3f65c28e22af06cd822, on @user_script:1.
+
+== case: scripting.eval-in-multi
+MULTI
+EVAL "return redis.call('set','tx1','a')" 0
+EVAL "return 1" 0
+SCRIPT LOAD "return 7"
+EXEC
+GET tx1
+EVALSHA 59b6ab2fbe0ee4b25733de0f62e6cda4899ef8e9 0
+SCRIPT FLUSH
+--
+OK
+QUEUED
+QUEUED
+QUEUED
+1) OK
+2) (integer) 1
+3) "59b6ab2fbe0ee4b25733de0f62e6cda4899ef8e9"
+"a"
+(integer) 7
+OK

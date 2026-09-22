@@ -438,13 +438,22 @@ ground truth is `docs/Redis-Errors.md`):
   (`host.VM.Kill`) unless the script already wrote (UNKILLABLE); the
   hard `script_hard_deadline_ms` watchdog kills even writers (S5
   divergence: partial effects persist). Host-seeded RNG (S6) and
-  host-side number formatting (S7). Ledgered divergences:
+  host-side number formatting (S7). M8d: the Redis script-environment
+  lockdown is byte-exact — the deps/lua readonly-table patch is ported
+  into the gopher-lua runtime (Table.readonly checked in
+  `luaV_settable`/`lua_rawset`/`lua_rawseti`) plus the `_G` `__index`
+  error metatable (`rt_protect_globals`; KEYS/ARGV stage inside a
+  `rt_globals_readonly` off-window, like Redis); enabled via
+  `host.WithGlobalsProtection` (docs/Redis-Errors.md §6a). Ledgered
+  divergences:
   `docs/Redis-Errors.md` §11 (no shared globals across EVALs, dialect
   texts, SCRIPT DEBUG refusal, wazero interpreter speed).
 - **gopher-lua additions consumed**: `rt_err_line` export, host
   `ScriptError.Line`, `VM.Kill`, `Engine.RegisterValue`,
-  `host.ValueError` (non-string raised values). Blob SHA pin
-  `27d9802a…` (`host/blob.go`, `testdiff/m6c_test.go`).
+  `host.ValueError` (non-string raised values); M8d:
+  `rt_protect_globals`/`rt_globals_readonly` exports + the readonly
+  runtime patch, `host.WithGlobalsProtection`. Blob SHA pin
+  `b4b7d2b7…` (`host/blob.go`, `testdiff/m6c_test.go`).
 - **Flush fan-out tokens**: `shard.FlushDBTok/FlushAllTok/DBSizeTok` —
   FLUSHDB/FLUSHALL/DBSIZE fan out shard tasks and must carry the
   caller's pause token under PauseAll (a latent MULTI+FLUSHALL+EXEC
@@ -586,8 +595,9 @@ tests/cli-matrix/    CLI command matrix: cases/*.txt drive every implemented com
                      bin/test-cli-matrix.sh; doc is docs/cli-matrix-testing.md
 bin/                 gen.sh (protoc), gen-api.sh (oapi-codegen + spec embed sync),
                      gen-build-stamp.sh (ldflags), bench.sh (M1 sweep,
-                     chains into bench-pubsub.sh for the M3 pub/sub benchmark and
-                     bench-m5.sh for the M5 maxmemory soak), gen-jwt-keys.sh
+                     chains into bench-pubsub.sh for the M3 pub/sub benchmark,
+                     bench-m5.sh for the M5 maxmemory soak, and bench-m8.sh
+                     for the M8 EVAL/EVALSHA sweep), gen-jwt-keys.sh
                      (M6a Ed25519 JWT key pair into ./keys, gitignored),
                      test-cli-matrix.sh (the CLI matrix runner)
 docs/                ULTIMA-DESIGN.md, pluto/ structure specs, benchmarks/ reports

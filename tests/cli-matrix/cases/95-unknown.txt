@@ -1,6 +1,6 @@
 # Unknown-group cases: byte-exact 'unknown command' errors for Redis 7.2.7
-# commands that ultima deliberately does NOT implement (Lua scripting,
-# functions, string range/bit ops, keyspace move/copy/dump, SORT, OBJECT,
+# commands that ultima deliberately does NOT implement (functions, string
+# range/bit ops, keyspace move/copy/dump, SORT, OBJECT,
 # LCS, streams, geo, HyperLogLog, ACL, replication, cluster, introspection
 # containers like LATENCY/MEMORY/MODULE/SLOWLOG).
 #
@@ -27,34 +27,6 @@
 #     (3-arg) and 'debug htstats*' — so unknown.lolwut uses 'match' with an
 #     optional "(error) " prefix and the memory/cluster/latency/debug cases
 #     simply use other subcommands.
-
-== case: unknown.eval
-== targets: no-redis
-eval
-eval return-1 0
-EVAL return-1 2 k1 k2
---
-(error) ERR unknown command 'eval', with args beginning with: 
-(error) ERR unknown command 'eval', with args beginning with: 'return-1' '0' 
-(error) ERR unknown command 'EVAL', with args beginning with: 'return-1' '2' 'k1' 'k2' 
-
-== case: unknown.evalsha
-== targets: no-redis
-evalsha
-EVALSHA deadbeef 1 mykey
---
-(error) ERR unknown command 'evalsha', with args beginning with: 
-(error) ERR unknown command 'EVALSHA', with args beginning with: 'deadbeef' '1' 'mykey' 
-
-== case: unknown.script
-== targets: no-redis
-script
-script load return-1
-SCRIPT EXISTS abc
---
-(error) ERR unknown command 'script', with args beginning with: 
-(error) ERR unknown command 'script', with args beginning with: 'load' 'return-1' 
-(error) ERR unknown command 'SCRIPT', with args beginning with: 'EXISTS' 'abc' 
 
 == case: unknown.function
 == targets: no-redis

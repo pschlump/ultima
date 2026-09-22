@@ -113,7 +113,13 @@ func New(cfg Config) (*Manager, error) {
 		cache:  map[string]*host.Script{},
 		runs:   map[*host.VM]*run{},
 	}
-	eng, err := host.NewEngine(host.WithMemoryBudgetBytes(int64(cfg.MaxMemoryMB) << 20))
+	eng, err := host.NewEngine(
+		host.WithMemoryBudgetBytes(int64(cfg.MaxMemoryMB)<<20),
+		// Redis 7.2.7 script environment lockdown (script_lua.c +
+		// deps/lua readonly patch): undefined-global reads and global
+		// writes raise the byte-exact probed errors.
+		host.WithGlobalsProtection(true),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("scripting: %w", err)
 	}

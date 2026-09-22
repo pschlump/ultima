@@ -204,7 +204,7 @@ CONFIG GET no-such-param
 == targets: no-redis
 COMMAND COUNT
 --
-(integer) 141
+(integer) 146
 
 == case: server.command-info
 == targets: no-redis

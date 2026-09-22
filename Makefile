@@ -2,7 +2,7 @@
 
 LDFLAGS := $(shell sh bin/gen-build-stamp.sh)
 
-.PHONY: gen_proto gen_api build build-cli test test-clients test-cli-matrix lint tidy clean run bench bench-m5 web test-web
+.PHONY: gen_proto gen_api build build-cli test test-clients test-cli-matrix lint tidy clean run bench bench-m5 bench-m8 web test-web
 
 gen_proto:
 	sh bin/gen.sh
@@ -68,3 +68,6 @@ bench:
 
 bench-m5:
 	sh bin/bench-m5.sh
+
+bench-m8:
+	sh bin/bench-m8.sh

@@ -201,7 +201,11 @@ func (m *Manager) RunErrorReply(sha string, err error) resp.Value {
 
 // CompileErrorReply wraps a frontend compile error in Redis's form. The
 // inner wording follows the gopher-lua frontend, not PUC Lua (ledgered
-// divergence — docs/Redis-Errors.md §11).
+// divergence — docs/Redis-Errors.md §11). The trailing newline the
+// frontend leaves on its message is stripped: RESP simple-string errors
+// can't carry it (the RESP writer sanitizes it to a space) and the
+// binary surfaces would render it as a stray blank line.
 func CompileErrorReply(err error) resp.Value {
-	return resp.Err(fmt.Sprintf("ERR Error compiling script (new function): %s", err.Error()))
+	return resp.Err(fmt.Sprintf("ERR Error compiling script (new function): %s",
+		strings.TrimSuffix(err.Error(), "\n")))
 }

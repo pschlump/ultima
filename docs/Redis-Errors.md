@@ -182,6 +182,29 @@ aggregate replies maps (`hgetall` → `%1` map reply when returned).
 0/1/2/3. `REDIS_VERSION` = `"7.2.7"`. `redis.log(level, msg)` writes to the
 server log.
 
+## 6a. Globals lockdown (probed 7.2.7; implemented M8d)
+
+Redis runs scripts with the globals table locked (script_lua.c +
+deps/lua's `readonly` table patch). Ultima's gopher-lua runtime ports the
+identical mechanism (Table.readonly flag checked in `luaV_settable` /
+`lua_rawset` / `lua_rawseti`, the `__index` error metatable, recursive
+protection of every table reachable from `_G`), so these are byte-exact:
+
+| Script | Reply (all runtime errors carry the ` script: <sha>, on @user_script:N.` suffix) |
+|---|---|
+| `return undefined_global` | `ERR user_script:1: Script attempted to access nonexistent global variable 'undefined_global'` |
+| `g = 5 return g` (create global) | `ERR user_script:1: Attempt to modify a readonly table` |
+| `redis = nil` / `redis.error_reply = nil` / `string.foo = 1` / `math.huge = 5` / `_G.pairs = nil` | same readonly text (recursive protection) |
+| `rawset(_G,'g3',1)` / `rawseti(_G,1,'x')` | `ERR Attempt to modify a readonly table` — **no position prefix** (the raise runs inside the C base function, so no Lua line is attributed) |
+| `return _G[nil]` | `ERR user_script:1: Second argument to luaProtectedTableError must be a string or number` |
+| `return rawget(_G,'undefined_global')` | `(nil)` — rawget bypasses the `__index` guard |
+| `KEYS[1] = 'x'` / `ARGV[1] = 'y'` | allowed (KEYS/ARGV are staged after the lockdown) |
+| `local t={} rawset(t,'k',1)` | allowed (user tables are not readonly) |
+| `pcall(function() return nosuchglobal end)` | catches; the message carries the `user_script:1: ` prefix |
+| `return _G` | empty array reply |
+| `return getmetatable(_G) ~= nil` | 1 (the guard metatable is visible) |
+| `rawseti` | not a 5.1 builtin at all — the guard's nonexistent-global error fires first |
+
 ## 7. BUSY / SCRIPT KILL (probed with `lua-time-limit 100`)
 
 | Situation | Reply |
@@ -233,8 +256,10 @@ the default INFO output.
   (`ERR Error compiling script (new function): …`), details do not.
 - Lua runtime-error texts follow the gopher-lua dialect
   (`attempt to call a non-function object`), not PUC/Redis texts
-  (`attempt to call a nil value` / Redis's patched
-  `Script attempted to access nonexistent global variable 'x'`).
+  (`attempt to call a nil value`). (The globals lockdown — Redis's
+  `Script attempted to access nonexistent global variable 'x'` /
+  `Attempt to modify a readonly table` — IS byte-exact since M8d; see
+  §6a.)
 - `tostring(0.1^2)` renders shortest-round-trip
   (`0.010000000000000002`) where PUC's `%.14g` gives `0.01`
   (gopher-lua divergence-ledger rows 38/40/48 family). Host-side reply
@@ -275,3 +300,11 @@ the default INFO output.
 - `redis.pcall`'s error table carries `ignore_error_stats_update=1`
   (reproduced); the metatable on raised strings is not (above).
 - `CONFIG GET *` exposes the Ultima-only `script-*` keys.
+- No `-LOADING` gate: Redis accepts connections during dataset load and
+  replies `LOADING Redis is loading the dataset in memory` to commands
+  (including EVAL); Ultima's restore-before-serve (§13.1) binds the
+  listeners but starts accepting only after restore, so a client can
+  never observe the loading state. Deliberate M5c design, unchanged.
+- Compile-error frontend messages end with a trailing newline inside
+  gopher-lua; Ultima strips it (`CompileErrorReply`) so the RESP and
+  binary surfaces render the same single-line error.

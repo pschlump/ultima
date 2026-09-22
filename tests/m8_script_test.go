@@ -139,18 +139,34 @@ func TestM8EvalWS(t *testing.T) {
 	}
 }
 
+// m8WaitBusy polls until the engine reports BUSY (a script running past
+// its soft lua-time-limit). Fixed sleeps race -race runs: wasm VM
+// instantiation slows enough that a script may not even have STARTED at
+// the old 400 ms marks. The probe is PING, never GET: a data command
+// sent BEFORE the gate trips parks in the paused shard queue (the
+// script holds PauseAll) and would never be answered — PING runs inline
+// and gets "-BUSY" once the gate trips.
+func m8WaitBusy(t *testing.T, c *m3Client) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		c.send(t, "PING")
+		if got := c.recv(t); strings.HasPrefix(got, "-BUSY") {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("engine never reported BUSY")
+}
+
 func TestM8BusyAndScriptKill(t *testing.T) {
 	addr, _ := m8RESP(t, scripting.Config{LuaTimeLimitMs: 100, HardDeadlineMs: 10000})
 	c1 := m3Dial(t, addr)
 	c2 := m3Dial(t, addr)
 
 	c1.send(t, "EVAL", "while true do end", "0") // parks until killed
-	time.Sleep(400 * time.Millisecond)           // past the 100 ms soft limit
+	m8WaitBusy(t, c2)
 
-	c2.send(t, "GET", "anything")
-	if got := c2.recv(t); got != "-BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE." {
-		t.Errorf("GET during BUSY = %q", got)
-	}
 	c2.send(t, "SCRIPT", "KILL")
 	if got := c2.recv(t); got != "+OK" {
 		t.Errorf("SCRIPT KILL = %q, want OK", got)
@@ -176,7 +192,7 @@ func TestM8UnkillableAfterWrite(t *testing.T) {
 	c2 := m3Dial(t, addr)
 
 	c1.send(t, "EVAL", "redis.call('set','wk','1') while true do end", "0")
-	time.Sleep(400 * time.Millisecond)
+	m8WaitBusy(t, c2)
 
 	c2.send(t, "SCRIPT", "KILL")
 	got := c2.recv(t)
@@ -224,6 +240,53 @@ func TestM8MemoryCap(t *testing.T) {
 	c.send(t, "SET", "alive", "1") // the daemon is unaffected
 	if got := c.recv(t); got != "+OK" {
 		t.Errorf("SET after OOM script = %q", got)
+	}
+}
+
+// CLIENT KILL of a scripting connection mid-run (M8d): the kill closes
+// the socket but does NOT interrupt the script (Redis semantics — only
+// SCRIPT KILL interrupts, and a write-having script is UNKILLABLE). The
+// run continues to the hard deadline; effects before the kill persist
+// (S5); the handler goroutine exits when the run ends. RESP has no
+// CLIENT KILL subcommand (the management API's POST /clients/{id}/kill
+// rides the same eng.KillClient), so the test calls the hook directly.
+func TestM8ClientKillMidScript(t *testing.T) {
+	addr, eng := m8RESP(t, scripting.Config{LuaTimeLimitMs: 100, HardDeadlineMs: 600})
+	c1 := m3Dial(t, addr)
+	c2 := m3Dial(t, addr)
+
+	c1.send(t, "CLIENT", "ID")
+	var id uint64
+	if _, err := fmt.Sscanf(c1.recv(t), ":%d", &id); err != nil || id == 0 {
+		t.Fatalf("CLIENT ID: %v", err)
+	}
+
+	c1.send(t, "EVAL", "redis.call('set','kk','1') while true do end", "0")
+	m8WaitBusy(t, c2) // parked in the loop, past the soft limit
+
+	found, killable := eng.KillClient(id)
+	if !found || !killable {
+		t.Errorf("KillClient(%d) = %v, %v", id, found, killable)
+	}
+	// the scripting connection is closed: its read end sees EOF
+	_ = c1.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c1.r.ReadByte(); err == nil {
+		t.Errorf("killed connection still readable")
+	}
+
+	// the BUSY gate is still up: the (unkillable) script keeps running
+	c2.send(t, "GET", "anything")
+	if got := c2.recv(t); !strings.HasPrefix(got, "-BUSY") {
+		t.Errorf("GET during zombie script = %q, want BUSY", got)
+	}
+
+	// the hard deadline retires the script; the pre-kill write persists
+	time.Sleep(800 * time.Millisecond)
+	if got := c2.do(t, "GET", "kk"); got != "1" {
+		t.Errorf("partial effect after kill = %q, want 1 (S5)", got)
+	}
+	if got := c2.do(t, "PING"); got != "+PONG" {
+		t.Errorf("PING after kill = %q", got)
 	}
 }
 

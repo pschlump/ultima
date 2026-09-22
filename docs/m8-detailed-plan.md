@@ -111,10 +111,31 @@ extra `script-*` CONFIG keys.
 
 ## Remaining (M8d/M8e)
 
-- M8d: CLI-matrix cases for the five commands, the loading-state gate
-  (EVAL during AOF restore), CLIENT KILL of a scripting connection,
-  overnight mixed-corpus soak, redis.sha1hex/log edge texts if they
-  surface.
+- M8d status:
+  - CLI-matrix cases for the five commands — DONE
+    (`tests/cli-matrix/cases/90-scripting.txt`, 16 cases, green with
+    `-R`; the stale `unknown.eval/evalsha/script` pins removed and
+    COMMAND COUNT bumped 141 → 146).
+  - Globals lockdown parity — DONE (found by the matrix): the Redis
+    deps/lua readonly-table patch + `_G` error metatable ported into the
+    gopher-lua runtime (`rt_protect_globals` / `rt_globals_readonly`,
+    host option `WithGlobalsProtection`, byte-exact texts incl. the
+    position-less rawset raise — docs/Redis-Errors.md §6a; differential
+    rows in `eval-globals-guard`, host tests in
+    `host/globals_protection_test.go`).
+  - Loading-state gate — NOT NEEDED: restore-before-serve (§13.1) means
+    no client can observe the loading state (ledgered in §11).
+  - CLIENT KILL of a scripting connection — DONE
+    (`TestM8ClientKillMidScript`: kill closes the socket, the
+    unkillable run continues to the hard deadline, effects persist).
+  - Compile-error trailing newline — FIXED (the gopher frontend's
+    trailing `\n` rendered as a stray blank line on the binary
+    surfaces; stripped in `CompileErrorReply`).
+  - Overnight mixed-corpus soak — harness DONE (`tests/m8_soak_test.go`,
+    `SOAK=1 SOAK_SECONDS=… go test ./tests -run TestM8Soak`: 8 workers
+    over a 10-leg mixed corpus with per-leg reply-class assertions,
+    randomized lua-time-limit, RSS trip-wire; 20–30 s smoke runs green).
+    The overnight run itself is an operator action before release.
 - M8e: EVAL throughput benchmarks vs 7.2.7 (`examples/bench` numbers,
   fresh-VM vs pooled), trip-wires, benchmark report in
   `docs/benchmarks/M8-<date>.md`. R3 (wazero interpreter speed) is the
