@@ -186,6 +186,12 @@ func cmdInfo(e *Engine, _ *ConnState, args [][]byte) resp.Value {
 			fmt.Fprintf(&sb, "script_time_limit_ms:%d\r\n", e.Scripts.TimeLimitMs())
 			fmt.Fprintf(&sb, "script_hard_deadline_ms:%d\r\n", e.Scripts.HardDeadlineMs())
 			fmt.Fprintf(&sb, "script_max_memory_mb:%d\r\n", e.ScriptMaxMemoryMB())
+			idle, hits, misses, recycles, evictions := e.Scripts.PoolStats()
+			fmt.Fprintf(&sb, "script_pool_vms:%d\r\n", idle)
+			fmt.Fprintf(&sb, "script_pool_hits:%d\r\n", hits)
+			fmt.Fprintf(&sb, "script_pool_misses:%d\r\n", misses)
+			fmt.Fprintf(&sb, "script_pool_recycles:%d\r\n", recycles)
+			fmt.Fprintf(&sb, "script_pool_evictions:%d\r\n", evictions)
 		} else {
 			sb.WriteString("loaded_scripts:0\r\n")
 		}
@@ -474,6 +480,40 @@ var configParams = []configParam{
 			}
 			return resp.Value{}, false
 		}},
+	// M8e R3 VM pool knobs (Ultima extensions) — read-only: the pool is
+	// built at scripting-engine construction.
+	{name: "script-vm-pool-size",
+		get: func(e *Engine) string {
+			if e.Scripts == nil {
+				return "0"
+			}
+			return fmt.Sprintf("%d", e.Scripts.VMPoolSize())
+		},
+		set: nil},
+	{name: "script-vm-pool-max",
+		get: func(e *Engine) string {
+			if e.Scripts == nil {
+				return "0"
+			}
+			return fmt.Sprintf("%d", e.Scripts.VMPoolMax())
+		},
+		set: nil},
+	{name: "script-vm-recycle-runs",
+		get: func(e *Engine) string {
+			if e.Scripts == nil {
+				return "0"
+			}
+			return fmt.Sprintf("%d", e.Scripts.VMRecycleRuns())
+		},
+		set: nil},
+	{name: "script-vm-recycle-pct",
+		get: func(e *Engine) string {
+			if e.Scripts == nil {
+				return "0"
+			}
+			return fmt.Sprintf("%d", e.Scripts.VMRecyclePct())
+		},
+		set: nil},
 	{name: "requirepass",
 		get: func(e *Engine) string { return e.RequirePass() }, // Redis 7.2 does not mask it
 		set: func(e *Engine, v string) (resp.Value, bool) {

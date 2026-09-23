@@ -142,6 +142,21 @@ var m8ConversionScripts = []script{
 		cmd("EVAL", "return type(redis.call)", "0"),
 		cmd("EVAL", "return type(redis.log)", "0"),
 	}},
+	{"eval-vm-reuse", []step{
+		// M8e R3 pool: a reused VM must reply identically on every run —
+		// no cross-run leakage of staged KEYS/ARGV, globals (the M8d
+		// lockdown), or error state. The same source runs repeatedly with
+		// different staging, interleaved with guard probes. tostring()
+		// avoids nil holes (length borders with nils are engine-defined).
+		cmd("EVAL", "return {#KEYS, #ARGV, tostring(KEYS[1]), tostring(ARGV[1])}", "1", "ka", "a1"),
+		cmd("EVAL", "return {#KEYS, #ARGV, tostring(KEYS[1]), tostring(ARGV[1])}", "2", "kb", "kc", "a2", "a3", "a4"),
+		cmd("EVAL", "return {#KEYS, #ARGV, tostring(KEYS[1]), tostring(ARGV[1])}", "0"),
+		cmd("EVAL", "return undefined_global", "0"),
+		cmd("EVAL", "g = 5 return g", "0"),
+		cmd("EVAL", "return rawget(_G, 'g') == nil", "0"),
+		cmd("EVAL", "return undefined_global", "0"),
+		cmd("EVAL", "return {#KEYS, #ARGV, tostring(KEYS[1]), tostring(ARGV[1])}", "1", "kz", "a9"),
+	}},
 	{"eval-runtime-errors", []step{
 		cmd("EVAL", "return error('boom')", "0"),
 		cmd("EVAL", "local a = 1\nlocal b = 2\nerror('boom3')", "0"), // line 3

@@ -10,10 +10,13 @@
 // script is injected per run as a CallPath closure (S10: this package
 // knows nothing about the command engine).
 //
-// Lifecycle (S4): a fresh host.VM per EVAL execution, created BEFORE the
-// shard pause (instantiation is the slow part and touches no keyspace);
-// only vm.Run runs under PauseAll. Compiled scripts (wasm bytes) are
-// cached process-wide by SHA-1.
+// Lifecycle (S4, amended by M8e R3): VMs come from a per-script pool
+// (pool.go) — a pooled bound VM is reused across runs (CheckoutVM /
+// ReleaseVM), recycled periodically because guest GC is stopped; a fresh
+// VM per run remains the pool-disabled fallback. Checkout happens BEFORE
+// the shard pause (a miss instantiates, which is the slow part and
+// touches no keyspace); only vm.Run runs under PauseAll. Compiled scripts
+// (wasm bytes) are cached process-wide by SHA-1.
 package scripting
 
 import (
@@ -55,6 +58,20 @@ type Config struct {
 	// CompatVersion is reported as redis.REDIS_VERSION.
 	CompatVersion string
 	Logger        *slog.Logger
+
+	// VMPoolSize is the per-script idle depth of the M8e R3 VM pool
+	// (pool.go); 0 disables pooling — the pre-M8e fresh-VM-per-run path.
+	VMPoolSize int
+	// VMPoolMax caps total idle pooled VMs across all scripts; the oldest
+	// idle VM is evicted (LRU) past the cap.
+	VMPoolMax int
+	// VMRecycleRuns recycles a pooled VM after this many runs — guest GC
+	// is stopped, so reuse without recycling grows the heap monotonically.
+	// 0 = no count-based recycling.
+	VMRecycleRuns int
+	// VMRecyclePct recycles a pooled VM whose heap (VM.UsedBytes) reaches
+	// this percent of the MaxMemoryMB budget. 0 = disabled.
+	VMRecyclePct int
 }
 
 // CallPath runs one command line from inside a script (redis.call /
@@ -84,6 +101,22 @@ type Manager struct {
 	// most one entry in v1; the shape survives a future lazy-pause.
 	runMu sync.Mutex
 	runs  map[*host.VM]*run
+
+	// budgetBytes is MaxMemoryMB in bytes — the pool's heap watermark base.
+	budgetBytes int64
+
+	// The M8e R3 per-script VM pool (pool.go). poolMu guards pool, vmMeta,
+	// poolEpoch, poolIdle, and closed; the counters are atomic.
+	poolMu        sync.Mutex
+	pool          map[string][]*poolEntry // SHA → idle bound VMs
+	vmMeta        map[*host.VM]*poolEntry // every pool-owned VM, idle or leased
+	poolEpoch     uint64                  // bumped by Flush; stales leased VMs
+	poolIdle      int
+	closed        bool
+	poolHits      atomic.Uint64
+	poolMisses    atomic.Uint64
+	poolRecycles  atomic.Uint64
+	poolEvictions atomic.Uint64
 }
 
 // run is one in-flight script execution.
@@ -112,6 +145,8 @@ func New(cfg Config) (*Manager, error) {
 		logger: logger,
 		cache:  map[string]*host.Script{},
 		runs:   map[*host.VM]*run{},
+		pool:   map[string][]*poolEntry{},
+		vmMeta: map[*host.VM]*poolEntry{},
 	}
 	eng, err := host.NewEngine(
 		host.WithMemoryBudgetBytes(int64(cfg.MaxMemoryMB)<<20),
@@ -138,14 +173,25 @@ func New(cfg Config) (*Manager, error) {
 		}
 	}
 	m.rngSeed.Store(seed)
+	m.budgetBytes = int64(cfg.MaxMemoryMB) << 20
 	if err := m.registerRedisSurface(); err != nil {
 		return nil, err
 	}
 	return m, nil
 }
 
-// Close shuts the engine down; live VMs finish their runs.
-func (m *Manager) Close() error { return m.eng.Close() }
+// Close shuts the engine down; live VMs finish their runs. Pooled idle VMs
+// are closed first; a VM leased at Close is closed on its release.
+func (m *Manager) Close() error {
+	m.poolMu.Lock()
+	m.closed = true
+	closers := m.drainPoolLocked()
+	m.poolMu.Unlock()
+	for _, vm := range closers {
+		_ = vm.Close()
+	}
+	return m.eng.Close()
+}
 
 // registerRedisSurface installs the redis.* Lua surface (functions +
 // constants) on the host engine. Must complete before the first VM.
@@ -189,13 +235,20 @@ func (m *Manager) registerRedisSurface() error {
 
 // Compile parses+lowers source (cached by SHA-1) and returns its script
 // identity. Compile errors are the frontend's message verbatim; the
-// caller wraps them in Redis's "Error compiling script" form.
+// caller wraps them in Redis's "Error compiling script" form. Pointer
+// identity per SHA-1 is guaranteed: concurrent Compiles of the same
+// source return the same *host.Script (the VM pool's one-script law,
+// host.ErrScriptBound, binds VMs by pointer).
 func (m *Manager) Compile(source []byte) (sha string, s *host.Script, err error) {
 	s, err = m.eng.Compile(source, ChunkName)
 	if err != nil {
 		return "", nil, err
 	}
 	m.mu.Lock()
+	if prev, ok := m.cache[s.SHA1]; ok {
+		m.mu.Unlock()
+		return prev.SHA1, prev, nil
+	}
 	m.cache[s.SHA1] = s
 	m.mu.Unlock()
 	return s.SHA1, s, nil
@@ -222,11 +275,24 @@ func (m *Manager) Exists(shas ...string) []bool {
 
 // Flush drops the cache (SCRIPT FLUSH). A script currently running keeps
 // its wasm bytes alive via its *host.Script reference — only future
-// lookups miss, matching Redis's tolerance of FLUSH mid-script.
+// lookups miss, matching Redis's tolerance of FLUSH mid-script. The VM
+// pool is invalidated with it: idle VMs are closed, the epoch bump recycles
+// leased VMs on release — otherwise a flushed script would keep executing
+// through pool hits.
 func (m *Manager) Flush() {
 	m.mu.Lock()
 	m.cache = map[string]*host.Script{}
 	m.mu.Unlock()
+	if m.cfg.VMPoolSize <= 0 {
+		return
+	}
+	m.poolMu.Lock()
+	m.poolEpoch++
+	closers := m.drainPoolLocked()
+	m.poolMu.Unlock()
+	for _, vm := range closers {
+		_ = vm.Close()
+	}
 }
 
 // Cached reports the number of cached scripts (INFO loaded_scripts).
@@ -253,6 +319,18 @@ func (m *Manager) RngSeedBase() int64 { return m.rngSeed.Load() }
 // SetRngSeedBase updates the seed base for future runs.
 func (m *Manager) SetRngSeedBase(v int64) { m.rngSeed.Store(v) }
 
+// VMPoolSize returns the per-script pool depth (script-vm-pool-size).
+func (m *Manager) VMPoolSize() int { return m.cfg.VMPoolSize }
+
+// VMPoolMax returns the global idle-VM cap (script-vm-pool-max).
+func (m *Manager) VMPoolMax() int { return m.cfg.VMPoolMax }
+
+// VMRecycleRuns returns the run-count recycling limit (script-vm-recycle-runs).
+func (m *Manager) VMRecycleRuns() int { return m.cfg.VMRecycleRuns }
+
+// VMRecyclePct returns the heap-watermark percent (script-vm-recycle-pct).
+func (m *Manager) VMRecyclePct() int { return m.cfg.VMRecyclePct }
+
 // NewVM builds a fresh script image. Slow (runtime + Lua state setup) —
 // callers create the VM BEFORE taking the shard pause.
 func (m *Manager) NewVM() (*host.VM, error) { return m.eng.NewVM() }
@@ -263,8 +341,8 @@ func (m *Manager) NewVM() (*host.VM, error) { return m.eng.NewVM() }
 // running state (the BUSY gate and SCRIPT KILL) for the duration. call is
 // the per-run redis.call bridge (nil in pure-script mode: redis.call then
 // fails with a clean error). The caller holds the shard pause (S3) and
-// must close vm itself. The returned respVer is the run's final reply
-// version (redis.setresp may switch it mid-run).
+// must return vm via ReleaseVM (CheckoutVM's pair). The returned respVer
+// is the run's final reply version (redis.setresp may switch it mid-run).
 func (m *Manager) RunOnVM(ctx context.Context, vm *host.VM, s *host.Script, keys, argv []string, ro bool, call CallPath) (host.Result, int, error) {
 	r := &run{vm: vm, sha: s.SHA1, ro: ro, call: call, start: time.Now(), respVer: 2}
 	m.runMu.Lock()

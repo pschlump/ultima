@@ -151,6 +151,10 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 		RunID:          eng.RunID,
 		CompatVersion:  commands.CompatVersion,
 		Logger:         logger,
+		VMPoolSize:     cfg.Script.VMPoolSize,
+		VMPoolMax:      cfg.Script.VMPoolMax,
+		VMRecycleRuns:  cfg.Script.VMRecycleRuns,
+		VMRecyclePct:   cfg.Script.VMRecyclePct,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("scripting: %w", err)

@@ -7,9 +7,10 @@ package commands
 // PauseAll token, so it is atomic across shards; effects replicate
 // per-command through the bridge (S2 — EVAL itself is never logged).
 //
-// Cost split: the host VM (wazero runtime + Lua state) is created BEFORE
-// the pause — instantiation is the slow part (~ms) and touches no
-// keyspace; only the compiled script's run happens inside the pause.
+// Cost split: the host VM (wazero runtime + Lua state) is checked out of
+// the per-script pool BEFORE the pause (M8e R3) — a pool miss pays the
+// ~44 ms instantiation, which touches no keyspace and must not happen
+// under PauseAll; only the compiled script's run happens inside the pause.
 
 import (
 	"context"
@@ -87,14 +88,18 @@ func evalImpl(e *Engine, cs *ConnState, args [][]byte, input evalInputKind, ro b
 		argv = append(argv, string(a))
 	}
 
-	// VM creation before the pause: it needs no keyspace and is the slow
-	// part (the S4 fresh-VM lifecycle).
-	vm, err := e.Scripts.NewVM()
+	// VM checkout before the pause: a pool hit is µs; a miss is the slow
+	// wazero instantiation, which must not happen under PauseAll.
+	vm, err := e.Scripts.CheckoutVM(script)
 	if err != nil {
 		e.logger().Error("scripting: VM creation failed", "err", err)
 		return resp.Err("ERR Internal error running script")
 	}
-	defer func() { _ = vm.Close() }()
+	// discard is set when the run ends in an error class that leaves the
+	// VM unfit for reuse (kill/deadline/OOM/trap — scripting.IsVMFatal);
+	// ReleaseVM then closes it instead of returning it to the pool.
+	discard := false
+	defer func() { e.Scripts.ReleaseVM(vm, script.SHA1, discard) }()
 
 	// Atomicity (S3): take PauseAll exactly like cmdExec — unless the
 	// connection already holds a pause (EVAL queued inside MULTI, now
@@ -120,6 +125,7 @@ func evalImpl(e *Engine, cs *ConnState, args [][]byte, input evalInputKind, ro b
 	}
 	res, respVer, rerr := e.Scripts.RunOnVM(context.Background(), vm, script, keys, argv, ro, call)
 	if rerr != nil {
+		discard = scripting.IsVMFatal(rerr)
 		return e.Scripts.RunErrorReply(sha, rerr)
 	}
 	return scripting.ToReply(res, respVer)

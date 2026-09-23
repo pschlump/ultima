@@ -11,6 +11,8 @@
 # until that wall-clock time (checked between legs — the in-flight leg
 # finishes, nothing new starts after the deadline) and the report gains one
 # results table per sweep.
+# BENCH_M8_POOL_SIZE sets script_vm_pool_size on the benchmarked Ultima
+# (default 1, the M8e R3 pool); 0 = the pre-M8e fresh-VM-per-run control.
 #
 # Battery gate: between legs the battery is checked with the sibling
 # battery-check tool — below BENCH_M8_BATTERY_LOW (50) the soak pauses until
@@ -107,7 +109,7 @@ go build -ldflags "$(sh bin/gen-build-stamp.sh)" -o ./ultima-server ./cmd/ultima
 
 CFG=$(mktemp /tmp/ultima-bench-m8-XXXX.json)
 cat > "$CFG" <<EOF
-{"server":{"resp_addr":"127.0.0.1:$UPORT","grpc_addr":"127.0.0.1:0","http_addr":"127.0.0.1:0","log_level":"error"}}
+{"server":{"resp_addr":"127.0.0.1:$UPORT","grpc_addr":"127.0.0.1:0","http_addr":"127.0.0.1:0","log_level":"error"},"script":{"script_vm_pool_size":${BENCH_M8_POOL_SIZE:-1}}}
 EOF
 
 ./ultima-server --cfg "$CFG" 2>/tmp/ultima-bench-m8.log &
@@ -181,15 +183,17 @@ report_header() {
 	echo "# M8 Benchmark Report — $(date +%Y-%m-%d)$1"
 	echo
 	echo "Milestone M8e: EVAL/EVALSHA throughput vs Redis 7.2.7"
-	echo "(docs/m8-detailed-plan.md). Ultima runs every script in a FRESH"
-	echo "gopher-lua wasm VM (decision S4: wazero instantiation + stdlib open"
-	echo "per run, no shared state); Redis compiles once and re-runs the"
-	echo "cached function in its shared PUC state. Every row's gap is the"
-	echo "VM-lifecycle cost (~43 ms/run — EVALSHA ≈ EVAL confirms it is"
-	echo "instantiation, not compile); at 1k loop iterations R3 (wazero's"
-	echo "interpreter backend on darwin/arm64) barely registers next to it"
-	echo "and dominates only for CPU-heavy scripts. A per-script VM pool is"
-	echo "the sketched mitigation (docs/m8-detailed-plan.md M8e)."
+	echo "(docs/m8-detailed-plan.md). Ultima runs scripts through the R3"
+	echo "per-script VM pool (lib/scripting/pool.go): a hit re-runs on the"
+	echo "bound wasm image (~16-31 µs per-run floor) instead of repaying the"
+	echo "~44 ms wazero instantiation of the pre-M8e S4 fresh-VM lifecycle"
+	echo "(BENCH_M8_POOL_SIZE=0 reproduces that as the control). Redis"
+	echo "compiles once and re-runs the cached function in its shared PUC"
+	echo "state. Guest GC is stopped, so pooled VMs are recycled on run"
+	echo "count and a heap watermark (script_vm_recycle_runs/_pct,"
+	echo "note/m8e-pool.md). What remains vs Redis: the wasm string tax"
+	echo "(~10-20x interp on darwin/arm64 wazero, the worst-case host) and"
+	echo "PauseAll serialization (S3)."
 	echo
 	echo "## Environment"
 	echo
@@ -197,6 +201,7 @@ report_header() {
 	echo "- Ultima: \`$UV\`"
 	echo "- Redis: \`$RV\` (via REDIS_BIN=$REDIS_BIN; \`--save '' --appendonly no\`)"
 	echo "- Driver: \`$BV\`, -n $REQUESTS per run (-c 1 rows: $((REQUESTS / 10)))"
+	echo "- Ultima VM pool: script_vm_pool_size=${BENCH_M8_POOL_SIZE:-1} (0 = pre-M8e fresh-VM-per-run)"
 }
 
 report_table() {

@@ -70,8 +70,10 @@ points:
   `@user_script`; the gopher frontend renders the name verbatim).
 - **CONFIG**: `lua-time-limit` (live, byte-exact SET errors) plus
   Ultima-only `script-hard-deadline-ms` (immutable at runtime),
-  `script-max-memory-mb` (immutable), `script-rng-seed` (live). Config
-  group `script` in `lib/config`.
+  `script-max-memory-mb` (immutable), `script-rng-seed` (live), and the
+  M8e R3 pool knobs `script-vm-pool-size` / `script-vm-pool-max` /
+  `script-vm-recycle-runs` / `script-vm-recycle-pct` (all read-only).
+  Config group `script` in `lib/config`.
 - **INFO**: no `# Script` section in plain INFO (7.2.7 has none; the
   differential mInfo gate compares section sets) — scripting counters
   only under explicit `INFO script`.
@@ -141,3 +143,18 @@ extra `script-*` CONFIG keys.
   `docs/benchmarks/M8-<date>.md`. R3 (wazero interpreter speed) is the
   headline perf risk; a per-script VM pool is the sketched mitigation
   and would also enable Redis's shared-globals mode if ever wanted.
+  - R3 VM pool — DONE (`lib/scripting/pool.go`): per-SHA pools of bound
+    VMs (the host one-script law), checkout pre-pause / release post-run
+    in `evalImpl`; recycling (guest GC is stopped, so heap grows
+    monotonically) on run count (`script_vm_recycle_runs`, 100), heap
+    watermark (`script_vm_recycle_pct`, 75% of the budget via the new
+    `host.VM.UsedBytes` over the blob's `rt_mem_used_bytes`), fatal run
+    errors (`IsVMFatal`: kill/hard-deadline/OOM/trap), stale epoch
+    (SCRIPT FLUSH), and Close; per-SHA depth `script_vm_pool_size` (1;
+    0 = pre-M8e fresh-VM path), global idle cap `script_vm_pool_max`
+    (64, LRU). Found en route: `host.Engine.Compile`'s check-then-act
+    race handed two `*Script` pointers for one source under concurrent
+    EVAL (ErrScriptBound wedges) — fixed host-side and in
+    `Manager.Compile`, regression tests in both repos. Reuse parity is
+    gated by the `eval-vm-reuse` differential script (globals lockdown
+    prevents cross-run leakage; docs/Redis-Errors.md §11).

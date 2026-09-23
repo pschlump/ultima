@@ -280,8 +280,11 @@ the default INFO output.
 - **Scripts do not share globals across EVAL calls** (decision S4):
   Redis runs all scripts in one global lua_State (`EVAL "g=42 return 1" 0`
   then `EVAL "return g" 0` → 42); Ultima's fresh-VM-per-run lifecycle
-  gives every script a clean _G (nil). Pooled-VM-per-script deployment
-  (the M8e performance item) can revisit this.
+  gives every script a clean _G (nil). The M8e R3 pool reuses VMs across
+  runs, but the divergence stands: the §6a globals lockdown makes _G and
+  every reachable table readonly, so a reused VM cannot carry script
+  globals between runs (the `eval-vm-reuse` differential script gates
+  this). Revisiting shared-globals mode remains a separate decision.
 - `SCRIPT DEBUG` is refused (`ERR SCRIPT DEBUG is not supported by this
   server.`); 7.2.7 answers `OK` and enters ldb (the wasm backend exposes
   no debug hooks).

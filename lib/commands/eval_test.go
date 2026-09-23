@@ -21,6 +21,7 @@ func newScriptEngine(t *testing.T) (*Engine, *ConnState) {
 	m, err := scripting.New(scripting.Config{
 		LuaTimeLimitMs: 5000, HardDeadlineMs: 2000, MaxMemoryMB: 16,
 		CompatVersion: CompatVersion, RunID: e.RunID,
+		VMPoolSize: 1, VMPoolMax: 16, VMRecycleRuns: 100, VMRecyclePct: 75,
 	})
 	if err != nil {
 		t.Fatal(err)

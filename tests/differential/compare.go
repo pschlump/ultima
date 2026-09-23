@@ -30,10 +30,13 @@ func startUltima(t *testing.T, requirepass string) string {
 	}
 	// M8: the scripting manager (EVAL/SCRIPT) with a generous hard
 	// deadline — KILL/BUSY scripts must behave like Redis's (killable by
-	// SCRIPT KILL long before the watchdog would fire).
+	// SCRIPT KILL long before the watchdog would fire). The M8e R3 VM pool
+	// is on with production defaults so every differential row runs through
+	// pooled reuse — the byte-exactness gate for the pool.
 	scr, err := scripting.New(scripting.Config{
 		LuaTimeLimitMs: 5000, HardDeadlineMs: 30000, MaxMemoryMB: 64,
 		CompatVersion: commands.CompatVersion, RunID: eng.RunID,
+		VMPoolSize: 1, VMPoolMax: 64, VMRecycleRuns: 100, VMRecyclePct: 75,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {

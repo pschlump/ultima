@@ -418,8 +418,9 @@ ground truth is `docs/Redis-Errors.md`):
 
 - **Scripting** (`lib/scripting`, decisions S1–S10 of the gopher-lua
   integration guide): wraps `gopher-lua/host` (wazero + the SHA-pinned
-  `lua51_prod.wasm` blob; scripts compile to wasm). Fresh VM per EVAL
-  (S4 — created BEFORE the pause; instantiation is the slow part), run
+  `lua51_prod.wasm` blob; scripts compile to wasm). VMs come from the M8e
+  R3 per-script pool (`pool.go`; S4 amended — checkout BEFORE the pause;
+  a miss pays the ~44 ms instantiation, a hit is ~16-31 µs), run
   under `PauseAll` like EXEC (S3 — reused, not re-taken, when EVAL runs
   inside EXEC since txMu is not reentrant). Effects-only AOF: EVAL is
   never logged; `redis.call` inner commands ride
@@ -448,11 +449,29 @@ ground truth is `docs/Redis-Errors.md`):
   divergences:
   `docs/Redis-Errors.md` §11 (no shared globals across EVALs, dialect
   texts, SCRIPT DEBUG refusal, wazero interpreter speed).
+- **VM pool** (`lib/scripting/pool.go`, M8e R3): per-SHA idle queues of
+  bound VMs (the host one-script law, `host.ErrScriptBound`, binds by
+  `*host.Script` pointer — `Manager.Compile` and `host.Engine.Compile`
+  both dedup concurrent compiles of one source to one pointer). Guest GC
+  is permanently stopped (host v1 law), so pooled VMs are recycled on:
+  run count (`script_vm_recycle_runs`, default 100), heap watermark
+  (`script_vm_recycle_pct`, default 75% of `script_max_memory_mb`, via
+  the new `host.VM.UsedBytes`), fatal run errors (`IsVMFatal`: kill /
+  hard deadline / "not enough memory" / trap), stale epoch (SCRIPT FLUSH
+  mid-run), and pool shutdown. Depth per SHA is `script_vm_pool_size`
+  (default 1 — PauseAll serializes scripts; 0 disables pooling → the
+  pre-M8e fresh-VM path), total idle cap `script_vm_pool_max` (default
+  64, LRU eviction). CONFIG exposes the four knobs read-only; INFO script
+  gains `script_pool_vms/hits/misses/recycles/evictions`. Behavior is
+  byte-exact by construction (globals lockdown + per-run staging/reseed)
+  and the differential harness runs with the pool on.
 - **gopher-lua additions consumed**: `rt_err_line` export, host
   `ScriptError.Line`, `VM.Kill`, `Engine.RegisterValue`,
   `host.ValueError` (non-string raised values); M8d:
   `rt_protect_globals`/`rt_globals_readonly` exports + the readonly
-  runtime patch, `host.WithGlobalsProtection`. Blob SHA pin
+  runtime patch, `host.WithGlobalsProtection`; M8e: `VM.UsedBytes`
+  (wraps the blob's `rt_mem_used_bytes`) + the `Engine.Compile`
+  concurrent pointer-identity fix. Blob SHA pin
   `b4b7d2b7…` (`host/blob.go`, `testdiff/m6c_test.go`).
 - **Flush fan-out tokens**: `shard.FlushDBTok/FlushAllTok/DBSizeTok` —
   FLUSHDB/FLUSHALL/DBSIZE fan out shard tasks and must carry the

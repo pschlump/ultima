@@ -43,6 +43,20 @@ type ScriptConfig struct {
 	// RngSeed bases math.random seeding inside scripts (S6); 0 = derive
 	// from the server run-id.
 	RngSeed int64 `json:"script_rng_seed" default:"0"`
+	// VMPoolSize is the per-script idle depth of the M8e R3 VM pool
+	// (lib/scripting/pool.go). 0 disables pooling — the pre-M8e
+	// fresh-VM-per-run path.
+	VMPoolSize int `json:"script_vm_pool_size" default:"1"`
+	// VMPoolMax caps total idle pooled VMs across all scripts (LRU
+	// eviction past the cap) so ad-hoc EVAL source churn is bounded.
+	VMPoolMax int `json:"script_vm_pool_max" default:"64"`
+	// VMRecycleRuns recycles a pooled VM after this many runs — guest GC
+	// is stopped, so reuse without recycling grows the heap monotonically.
+	// 0 = no count-based recycling.
+	VMRecycleRuns int `json:"script_vm_recycle_runs" default:"100"`
+	// VMRecyclePct recycles a pooled VM whose heap reaches this percent of
+	// script_max_memory_mb (measured via host VM.UsedBytes). 0 = disabled.
+	VMRecyclePct int `json:"script_vm_recycle_pct" default:"75"`
 }
 
 // PersistConfig is the persistence section (M5c, §13.1): Redis-parity

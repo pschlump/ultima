@@ -40,6 +40,14 @@ func m8Engine(t *testing.T, cfg scripting.Config) *commands.Engine {
 	if cfg.CompatVersion == "" {
 		cfg.CompatVersion = commands.CompatVersion
 	}
+	// M8e R3: the pool on by default in tests (the unit suite covers the
+	// disabled path).
+	if cfg.VMPoolSize == 0 {
+		cfg.VMPoolSize = 1
+		cfg.VMPoolMax = 64
+		cfg.VMRecycleRuns = 100
+		cfg.VMRecyclePct = 75
+	}
 	cfg.RunID = eng.RunID
 	m, err := scripting.New(cfg)
 	if err != nil {
