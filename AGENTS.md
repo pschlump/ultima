@@ -6,621 +6,165 @@ knowledge of the project.
 ## Project Overview
 
 **Ultima** is a superset clone of Redis written in Go: a drop-in replacement
-for the Redis wire protocol and command set, plus additional binary access
-protocols (gRPC and WebSocket/protobuf) and, later, a web management UI. The
-driving goal is **substantially higher throughput than Redis** by replacing
-Redis's single-threaded command execution with a parallel, goroutine-based
+for the Redis wire protocol and command set, plus gRPC and
+WebSocket/protobuf front-ends and a web management UI. The driving goal is
+**substantially higher throughput than Redis** by replacing Redis's
+single-threaded command execution with a parallel, goroutine-based
 architecture.
 
-The authoritative reference is the design document `docs/ULTIMA-DESIGN.md`
-(sections are cited throughout the code as `§N.N`, e.g. `design doc §5.2`).
-Follow it — it records settled decisions (§15, D1–D20) that must not be
-silently reversed. Milestones M0–M9 are defined in §14.4.
-
-**Current status**: M0 (skeleton, three listeners), M1 (shard engine,
-RESP front-end, P0 commands), M2 (P1 collections: hash/list/set/zset,
-differential-green on H/L/S/Z) and M3 (P2: MULTI/EXEC/WATCH transactions,
-classic pub/sub, blocking list/zset ops; differential-green) are
-implemented and committed. M4 (binary front-ends) is **done**: the gRPC
-front-end (typed Command envelope, Exec bidi stream, ExecBatch,
-ExecGeneric, Subscribe pub/sub push stream, Monitor stream fed by
-`Engine.AddMonitor`) and the WebSocket front-end (`lib/wssrv`, binary
-protobuf frames at `/ws/v1`, pub/sub pushes as unsolicited seq-0 frames)
-both ride the shared `lib/envelope` bridge. Exit criteria met: Go client
-round-trip (tests use the generated gRPC client), TypeScript round-trip
-(`tests/ts-roundtrip`, protobuf-es over `/ws/v1`, strict `tsc` typecheck),
-and a RESP↔gRPC wire-byte parity gate (`tests/m4_parity_test.go`). The
-parity gate also smoked out a P0 gap closed in M4: INCRBYFLOAT. M5 is
-under way per `docs/m5-detailed-plan.md`: **M5a is done** — keyspace
-notifications (`notify-keyspace-events`, K/E classes on
-`__keyspace@<db>__`/`__keyevent@<db>__` channels over the M3 broker,
-differential-green incl. expiry events) and expiry hardening (time-boxed
-adaptive sweep). **M5b is done** — maxmemory eviction (all 8 Redis
-policies, per-shard memory accounting and eviction loops, the OOM gate
-with byte-exact `OOM`/`EXECABORT` replies; differential-green on the
-gate strings). **M5c is done** — persistence (`lib/persist`: own-format
-snapshot + per-shard AOF with global sequence merge at replay,
-SAVE/BGSAVE/LASTSAVE/BGREWRITEAOF, restore-before-serve, crash-recovery
-tested; M5c also closed the P0 gap EXPIREAT/PEXPIREAT, needed by the
-AOF's PEXPIREAT rewrite). **M5d is done** — the maxmemory soak
-(`bin/bench-m5.sh`, `make bench-m5`): sustained SET load at 20x keyspace
-oversubscription against a bounded maxmemory under all 8 eviction
-policies, gating on bounded `used_memory`, advancing `evicted_keys`, and
-the byte-exact OOM/probe behavior; report in `docs/benchmarks/M5-<date>.md`;
-memo in `note/M5-implemented.md`. M6 is under way per
-`docs/m6-detailed-plan.md`: **M6a is done** — the auth core (§9):
-`lib/auth` (bcrypt account store with atomic JSON persistence, Ed25519
-EdDSA JWT access tokens per D20 via `golang-jwt/jwt/v5`, rotating
-refresh-token families with theft detection, TOTP 2FA via
-`pschlump/htotp`), the `/api/v1/auth/*` + `/api/v1/admin/users*`
-endpoints (now in `lib/httpapi/auth_handlers.go`), Bearer gating of
-`/api/v1/*`, gRPC
-interceptors (`authorization: bearer` metadata), and WS upgrade auth
-(`?access_token=` or `Sec-WebSocket-Protocol: bearer, <token>`), all
-behind the `auth.enabled` config gate (off = pre-M6 behavior). **M6b is
-done** — resumable WS sessions (§9.4, D18): `lib/wssession` (per-session
-replay buffer + `push_seq` handshake; subscription retention across
-drops; SESSION_EXPIRED/ABORTED frames), wired into `lib/wssrv`. **M6c is
-done** — the HTTP management API (§10.1, D7/D11): `api/openapi.yaml` is
-the contract source of truth, regenerated into `gen/httpapi/` by
-`sh bin/gen-api.sh` (`make gen_api`; also syncs the embed copy
-`lib/httpapi/openapi.yaml`); `lib/httpapi` implements the generated
-chi-server bindings (auth routes migrated from the deleted
-`lib/handler/auth.go`, plus /info, /shards, /clients+kill, /slowlog,
-/latency, /config GET|PUT, /flushdb, /save family, /keys/scan,
-/key/{key}, /metrics with the `server.metrics_allow` IP allowlist), the
-spec is served at `/api/openapi.yaml` with Swagger UI at `/api/docs`,
-and the middleware chain is request-id → logging → Recoverer → Timeout →
-Prometheus → JWT gate (chi's deprecated RealIP deliberately omitted — it
-would defeat the /metrics allowlist). **M6d is done** — the web UI
-(§10.2): `web/` is a React+TS+vite app (bun; `make web` → `web/dist`,
-embedded via `//go:embed` in `web/embed.go` — a committed placeholder
-dist keeps bun-less builds working; served with SPA fallback by
-`web.Handler()` on the chi `/*` catch-all) with login/TOTP, token
-auto-refresh, dashboard, key browser, live monitor, slowlog, config
-editor, pub/sub inspector, account admin (QR enrollment), and an
-interactive console over `/ws/v1` with push-mode rendering and §9.4
-session recovery. M6d also closed two follow-ups: the **MONITOR command**
-(`lib/commands/monitor.go` — push-feed of other connections' commands,
-needed by the web monitor screen) and the **WS origin policy**
-(`server.ws_origin_allow`; enforced only when auth is enabled —
-same-origin and no-Origin always pass). **M7 is done** — client
-libraries + examples (§11, `docs/m7-detailed-plan.md`): the Go client
-`clients/go/ultima` (RESP/gRPC/WS/REST behind one umbrella client, typed
-helpers, §9.4 session recovery on WS, shared token manager) with the
-three operator CLIs (`cmd/ultima-cli`, `cmd/ultima-ws-cli`,
-`cmd/ultima-grpc-cli` — thin shells over it, §6.4), the TypeScript
-client `clients/typescript` (`@ultima/client` — the web UI was
-refactored onto it, making it the §11.2 first consumer), the plain-JS
-ESM/CJS distribution `clients/javascript`, and the leaderboard + chat
-example apps under `examples/` (§11.4, e2e-tested in
-`tests/m7_examples_test.go`). **M8 scripting is done** — Lua-lite
-(§7 P3, D12, `docs/m8-detailed-plan.md`): EVAL/EVALSHA/EVAL_RO/
-EVALSHA_RO + SCRIPT LOAD/EXISTS/FLUSH/KILL/HELP on the gopher-lua wasm
-engine (`lib/scripting` over `gopher-lua/host`, pure Go, no cgo),
-atomic under PauseAll like EXEC, effects-only AOF capture per
-`redis.call` (S2), BUSY phase + SCRIPT KILL, hard-deadline watchdog
-(S5), per-VM memory budget, host-seeded RNG (S6), and the probed
-byte-exact conversion/error surface (`docs/Redis-Errors.md` — RESP3
-`setresp` wrapper tables included). Differential-green
-(`tests/differential/scripts_m8.go`); crash-recovery tested
-(`tests/m8_aof_test.go`). The rest of the M8 tail (streams, bitfield,
-geo, PF*, SSUBSCRIBE) landed earlier.
+The authoritative reference is `docs/ULTIMA-DESIGN.md` (cited in code as
+`§N.N`); it records settled decisions (§15, D1–D20) that must not be
+silently reversed. Milestones M0–M9 are defined in §14.4. **M0–M8 are
+done** (M8e included); the milestone-by-milestone narrative and per-
+milestone architecture journals live in `docs/implementation-history.md` —
+consult it when working in an area whose design was settled by an earlier
+milestone (transaction/pause model M3, eviction M5b, persistence M5c,
+auth/WS sessions M6b, scripting M8, VM pool M8e).
 
 ## Technology Stack
 
-- **Go 1.27** (module `github.com/pschlump/ultima`).
-- Key dependencies (see `go.mod`):
-  - `github.com/pschlump/pluto` — generic data-structure library (thread-safe
-    `_ts` variants). **Pulled in via `replace` directive to the sibling
-    checkout `../pluto`** — that directory must exist for the module to
-    build. Its per-structure specs live in `docs/pluto/`. **Standing
-    permission**: when the efficient way to implement something is to add a
-    feature to `../pluto` (e.g. `lru_ts`, `lfu_ts`), add it to the data-structure
-    library — with tests there — rather than working around its API here.
-    Update the matching `docs/pluto/` spec when you do.
-  - `github.com/go-chi/chi/v5` — HTTP router for the management surface.
-  - `github.com/gorilla/websocket` — WebSocket endpoint.
-  - `google.golang.org/grpc` + `protobuf` — gRPC front-end.
-  - `go.uber.org/goleak` — goroutine-leak detection in tests.
-  - `github.com/golang-jwt/jwt/v5` + `golang.org/x/crypto` (bcrypt) — M6a
-    JWT (Ed25519/EdDSA, D20) and password hashing.
-  - `github.com/pschlump/htotp` — TOTP 2FA (D17). **Pulled in via `replace`
-    to the sibling checkout `../htotp`**, like pluto — that directory must
-    exist for the module to build.
-  - `github.com/pschlump/gopher-lua` — M8 Lua scripting (D12): the `host`
-    package (wazero runtime + the SHA-pinned `lua51_prod.wasm` blob;
-    scripts compile to wasm). **Pulled in via `replace` to the sibling
-    checkout `../gopher-lua`**, like pluto/htotp — pure Go, no cgo; the
-    daemon consumes only the Go host package and the embedded blob (S1),
-    enforced by `CGO_ENABLED=0 go build ./...`.
-- **No CGo**, no Docker/CI config currently in the repo.
-- `note/redis/` (gitignored) holds a Redis source checkout used as a
-  reference; `note/` is scratch material, excluded from lint.
+- **Go 1.27** (module `github.com/pschlump/ultima`). **No CGo** — enforced
+  by `CGO_ENABLED=0 go build ./...`; no Docker/CI config in the repo.
+- Sibling checkouts pulled in via `replace` directives — they must exist
+  for the module to build:
+  - `../pluto` — `github.com/pschlump/pluto`, generic data-structure
+    library (thread-safe `_ts` variants); per-structure specs in
+    `docs/pluto/`. **Standing permission**: when the efficient way to
+    implement something is to add a feature to `../pluto` (e.g. `lru_ts`),
+    add it there — with tests — rather than working around its API here,
+    and update the matching `docs/pluto/` spec. The same applies to
+    `../gopher-lua`'s `host` package for scripting needs.
+  - `../htotp` — `github.com/pschlump/htotp`, TOTP 2FA (D17).
+  - `../gopher-lua` — `github.com/pschlump/gopher-lua`, M8 Lua scripting
+    (D12): the `host` package (wazero runtime + SHA-pinned
+    `lua51_prod.wasm` blob; scripts compile to wasm).
+- Other key deps (`go.mod`): `go-chi/chi/v5` (HTTP router),
+  `gorilla/websocket`, `google.golang.org/grpc` + `protobuf`,
+  `go.uber.org/goleak` (leak detection in tests), `golang-jwt/jwt/v5` +
+  `golang.org/x/crypto` (Ed25519 EdDSA JWTs per D20, bcrypt).
+- `note/` is scratch/reference (incl. a Redis source checkout under
+  `note/redis/`); gitignored, lint-excluded.
 
 ## Runtime Architecture
 
 One binary (`ultima-server`), one process, **three network surfaces**
-(design doc §3), all wired in `cmd/ultima-server/startup.go`:
+(§3), all wired in `cmd/ultima-server/startup.go`:
 
 | Surface        | Default addr | Implementation                          |
 |----------------|--------------|------------------------------------------|
 | RESP (Redis protocol) | `:6379` | `lib/resp` (vendored redcon fork) → `lib/commands.Engine` |
 | gRPC           | `:6380`      | `lib/grpcsrv` on generated `gen/go/ultima/v1` code; server reflection on |
-| HTTP/WebSocket | `:6381`      | `lib/httpapi` (M6c management API) + `lib/wssrv` mounted on a chi mux (`cmd/ultima-server/router.go`) |
+| HTTP/WebSocket | `:6381`      | `lib/httpapi` (management API) + `lib/wssrv` on a chi mux (`cmd/ultima-server/router.go`) |
 
 Request flow: each front-end parses its wire format, calls
 `commands.Engine.Execute(ConnState, args)`, and renders the returned
-`resp.Value` (decision D3: one command engine, three front-ends).
+`resp.Value` (D3: one command engine, three front-ends).
 
-- **Sharding** (`lib/shard`): the keyspace of each logical DB lives in one
-  pluto `sharded_hash_ts.ShardedHash` whose stripe count equals the shard
-  count; key → shard routing is Fibonacci hashing,
+- **Sharding** (`lib/shard`): each logical DB lives in one pluto
+  `sharded_hash_ts.ShardedHash` whose stripe count equals the shard count;
+  key → shard routing is Fibonacci hashing,
   `(crc64(key)*0x9E3779B97F4A7C15) >> (64-log2 N)` — identical to the
   table's internal stripe routing, so stripe i is shard i (raw CRC bits
-  cluster for short/structured keys; do not "simplify" this). Each shard
-  has an owner goroutine draining a task queue (`Engine.Do` / `DoMulti` /
-  `DoShard`); all data-mutating work runs inside the owning shard's
-  goroutine — no caller-side locks on the hot path. Multi-shard fan-out
-  closures (`DoMulti`) run concurrently — shared writes must be
-  synchronized or slot-indexed. Shard-count helpers
-  only run inside the shard goroutine (see the comment block at
-  `lib/shard/shard.go:380`).
+  cluster for structured keys; do not "simplify" this). Each shard has an
+  owner goroutine draining a task queue (`Engine.Do`/`DoMulti`/`DoShard`);
+  all data-mutating work runs inside the owning shard's goroutine — no
+  caller-side locks on the hot path. `DoMulti` fan-out closures run
+  concurrently — shared writes must be synchronized or slot-indexed.
+- **Cross-shard atomicity**: `shard.Engine.PauseAll` parks every shard
+  goroutine; only token-carrying tasks run. EXEC and EVAL take it (S3);
+  fan-out tasks issued under a pause must carry the caller's token
+  (`shard.FlushDBTok/FlushAllTok/DBSizeTok`) or they deadlock.
 - **Expiry**: passive on access plus an exact per-shard min-heap
-  (`heap_ts`) swept periodically by the shard goroutine (D5).
+  (`heap_ts`) swept periodically by the shard goroutine (D5), time-boxed
+  with adaptive cadence.
+- **Blocking ops**: waiters register in the owning shard's FIFO registry;
+  the connection goroutine parks on a channel — never a shard goroutine.
+- **Pub/sub**: `lib/pubsub` broker, delivery on the publisher's goroutine
+  into per-connection bounded push queues; full queue = slow consumer →
+  connection closed.
+- **Persistence** (`lib/persist`, D9 own formats): per-(db,shard) snapshot
+  segments + per-shard seq-stamped AOF with global sequence merge at
+  replay; restore-before-serve.
+- **Scripting** (`lib/scripting`, D12): gopher-lua wasm host; EVAL runs
+  under PauseAll; VMs come from the per-script pool (`pool.go` — guest GC
+  is stopped, so pooled VMs are recycled on run count / heap watermark /
+  fatal errors / SCRIPT FLUSH; knobs `script_vm_pool_size` (0 disables),
+  `script_vm_pool_max`, `script_vm_recycle_runs`, `script_vm_recycle_pct`).
 - Shard count: config `shard_count`, `0` = 4×GOMAXPROCS, rounded up to a
   power of two (`shard.ResolveShardCount`).
 - Graceful shutdown: SIGINT/SIGTERM → drain gRPC, close HTTP and RESP,
-  stop shard goroutines (10 s cap).
+  persist close, stop shard goroutines (10 s cap).
 
-**Commands implemented so far**: M1/P0 — connection (PING, ECHO, HELLO,
-AUTH, SELECT, QUIT), strings (SET/GET family, INCR/DECR family +
-INCRBYFLOAT (M4), APPEND,
-STRLEN, MGET/MSET/MSETNX), keyspace (DEL, EXISTS, EXPIRE/PEXPIRE/
-EXPIREAT/PEXPIREAT (M5c), TTL/PTTL,
-PERSIST, TYPE, SCAN, KEYS), server (INFO, DBSIZE, FLUSHDB/FLUSHALL, CONFIG,
-CLIENT, COMMAND, SAVE/BGSAVE/LASTSAVE/BGREWRITEAOF (M5c)). M2/P1 — hashes (HSET/HGET/HMSET/HMGET/HGETALL/HDEL/
-HEXISTS/HLEN/HKEYS/HVALS/HINCRBY/HINCRBYFLOAT/HSETNX/HSTRLEN/HRANDFIELD/
-HSCAN), lists (LPUSH/RPUSH/LPUSHX/RPUSHX/LPOP/RPOP/LLEN/LRANGE/LINDEX/
-LSET/LINSERT/LREM/LTRIM/RPOPLPUSH/LPOS/LMOVE), sets (SADD/SREM/SMEMBERS/
-SISMEMBER/SMISMEMBER/SCARD/SPOP/SRANDMEMBER/SMOVE/SINTER/SUNION/SDIFF/
-SINTERSTORE/SUNIONSTORE/SDIFFSTORE/SINTERCARD/SSCAN) and sorted sets
-(ZADD/ZSCORE/ZMSCORE/ZINCRBY/ZRANK/ZREVRANK/ZRANGE/ZRANGEBYSCORE/
-ZRANGEBYLEX/ZREVRANGE/ZREVRANGEBYSCORE/ZREMRANGEBYRANK/ZREMRANGEBYSCORE/
-ZREMRANGEBYLEX/ZCARD/ZCOUNT/ZLEXCOUNT/ZREM/ZPOPMIN/ZPOPMAX/ZRANDMEMBER/
-ZDIFF/ZINTER/ZUNION/ZINTERSTORE/ZUNIONSTORE/ZSCAN). M3/P2 — transactions
-(MULTI/EXEC/DISCARD/WATCH/UNWATCH, RESET), pub/sub (SUBSCRIBE/UNSUBSCRIBE/
-PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH/PUBSUB; SSUBSCRIBE deferred to M8) and
-blocking ops (BLPOP/BRPOP/BLMPOP/
-BLMOVE/BRPOPLPUSH, BZPOPMIN/BZPOPMAX/BZMPOP). M5a adds
-`notify-keyspace-events` keyspace notifications (CONFIG key, off by
-default). M6d adds MONITOR. M8 adds scripting (EVAL/EVALSHA/EVAL_RO/
-EVALSHA_RO, SCRIPT LOAD/EXISTS/FLUSH/KILL/HELP). Value types: strings
-plus the four collections (`lib/types`). Ultima reports Redis compatibility
-version 7.2.7 (`commands.CompatVersion`).
-
-M3 architecture notes:
-
-- **Transactions**: MULTI queues on `ConnState`; EXEC takes
-  `shard.Engine.PauseAll` (parks every shard goroutine in id order;
-  only token-carrying tasks run — §4.2's strict cross-shard path) and
-  runs the queue under the token. WATCH uses per-key `Entry.Version`
-  counters plus per-shard delete tombstones and per-DB epochs
-  (`Shard.WatchVersion`/`WatchDirty`); every in-place mutation path
-  calls `Shard.Touch`.
-- **Pub/sub**: `lib/pubsub` broker (no goroutines; delivery on the
-  publisher's goroutine) → per-connection buffered push queues in
-  `lib/respserver` drained by a writer goroutine via the fork's
-  mutex-guarded `Conn.PushValue`; full queue = slow consumer →
-  connection closed. Subscribe-mode gating (RESP2-only, like Redis) is
-  in `Engine.Execute`.
-- **Blocking**: waiters register in the owning shard's FIFO registry
-  (check-and-register in one shard task, so no missed wakeups); pushes
-  call `Shard.WakeWaiter`; the connection goroutine parks on a channel
-  — never a shard goroutine. `shard.Engine.Closing()` unparks everyone
-  on shutdown.
-
-M5a architecture notes:
-
-- **Keyspace notifications** (`lib/commands/notify.go`): `notify-keyspace-events`
-  class bitmask on `commands.Engine` (parsed per Redis 7.2.7 letters
-  `Ag$lshzxeKEtmdn`; CONFIG GET re-renders from the bitmask like Redis —
-  `KEA` → `AKE`). Handlers call `Engine.notifyKeyspace(db, key, event)`
-  after their shard closures return (deterministic arg order), EXCEPT
-  commands whose mutation calls `Shard.WakeWaiter` (list pushes, LMOVE/BLMOVE
-  dest, ZADD/ZINCRBY, and the blocking pops themselves): those publish
-  inside the shard closure BEFORE waking, because the woken connection
-  goroutine can otherwise pop and publish its own event first (Redis's
-  single-threaded order guarantees pusher-event-before-woken-pop-event;
-  the publish itself is broker-mutex-guarded and non-blocking, safe from
-  a shard goroutine). It publishes over the M3 broker to
-  `__keyspace@<db>__:<key>` (K, payload = event; published first, like
-  Redis) and `__keyevent@<db>__:<event>` (E, payload = key). Expiry
-  deletions reach it via `Shard.OnKeyGone` (reason `expired`; M5b will
-  reuse it for `evicted`). Known divergence: `SET k v PXAT <past>` —
-  Ultima deletes inline at command time (no later lazy `expired` event;
-  replies match Redis).
-- **Expiry hardening**: `Shard.sweep` is time-boxed (`SweepTimeBox`, 1 ms)
-  in addition to the `SweepMax` pop cap, and the cadence is adaptive —
-  halving toward `SweepFloor` (10 ms) while sweeps stop with due work
-  left, relaxing back to `SweepInterval` (100 ms) when clean
-  (`nextSweepInterval`; the `active_expire_effort` analogue, §5.2).
-
-M5b architecture notes:
-
-- **Memory accounting**: `shard.Entry` caches `memBytes` (key + value +
-  overhead estimate, D10 — monotone and comparable, never Redis-exact);
-  collections track their content bytes incrementally
-  (`lib/types/memusage.go`, O(1) `MemUsage()`). Choke points `Store`
-  (new − old), `Touch` (recompute; signature is now
-  `Touch(db, key, e)`), `Delete`/expiry (subtract) update per-DB
-  `usedBytes` plus a shard-total rollup; `Engine.UsedBytes()` sums shard
-  totals. FLUSHDB zeroes its DB share. INFO `used_memory` is the
-  keyspace counter (Go heap moved to `used_memory_process`);
-  `maxmemory_policy` is live; stats gained `evicted_keys`.
-- **Eviction** (`lib/shard/evict.go`): `maybeEvict` runs after every
-  shard task (run + park loops) while `maxmemory > 0` and policy ≠
-  noeviction, evicting to the per-shard quota (maxmemory/shardCount).
-  Always-on per-shard trackers keyed by `(db, key)`: exact LRU via pluto
-  `lru_ts` (D14; `Oldest`/`PopOldest` added to pluto for this), LFU via
-  `lfu_ts` Morris counters with `maxmemory-samples`-style candidate
-  sampling (new pluto `sharded_hash_ts.SampleStripe`, per-stripe since
-  stripe i == shard i), volatile-* twins holding TTL'd keys only (added
-  `Store`/`PushExpire`-via-`trackAccess`), volatile-ttl pops the expiry
-  heap. FlushDB purges the flushed DB's entries from all four trackers
-  AND rebuilds the expiry heap without them (M5d: a whole flushed DB's
-  stale entries exhaust the small victim-validation budgets and wedge
-  eviction); the remaining self-heal-at-validation path covers the
-  slow-drip cases (TTL dropped on overwrite). Victims emit
-  `evicted` via the M5a `OnKeyGone` sink; an overdue candidate is
-  expired, not evicted.
-- **OOM gate** (`lib/commands/engine.go`, probed against 7.2.7): over
-  limit → denyoom commands get `OOM command not allowed when used memory
-  > 'maxmemory'.`; EVERY command queued in MULTI is OOM-rejected at
-  queue time (dirties EXEC → generic EXECABORT); EXEC of a tx containing
-  a denyoom command aborts with the OOM reason embedded. Non-noeviction
-  policies get a synchronous `Engine.EvictNow(cs.tok)` attempt first
-  (performEvictions analogue) — rejection only when eviction can't get
-  under the limit. EvictNow's verdict is per-shard, checked inside each
-  shard goroutine right after its eviction pass: a global re-check races
-  other connections' in-flight writes (a shard is legitimately over
-  quota for the microseconds between a write's Store and its post-task
-  maybeEvict — at saturation some shard is always in that window, so a
-  global verdict spuriously OOMs under load; M5d soak found it).
-  `maxmemory-policy` CONFIG with byte-exact enum error;
-  `Engine.EvictSamples` = Redis maxmemory-samples default (5).
-
-M5d architecture notes:
-
-- **Soak harness** (`bin/bench-m5.sh`, `make bench-m5`, chained from
-  `bin/bench.sh` unless `BENCH_M5=0`): all 8 eviction policies on Ultima
-  and redis-server, `SET key:__rand_int__` over a ~20x oversubscribed
-  random keyspace; gates on bounded `used_memory` (5% slack for
-  cross-connection in-flight skew), advancing `evicted_keys`, and the
-  byte-exact OOM/OK probe. Report: `docs/benchmarks/M5-<date>.md`.
-  Gotcha: `redis-benchmark` EXITS on the first error reply (7.2.7), so
-  one stray OOM fails a whole run, and no throughput summary is printed
-  for runs with errors.
-- **Bugs the M5d soak smoked out** (all fixed, regression tests in
-  `lib/shard/evict_test.go` + pluto): (1) FlushDB left the eviction
-  trackers and expiry heap fully stale → post-FLUSHALL eviction stall →
-  OOM storm; (2) pluto `sharded_hash_ts` bucket placement masked the raw
-  hash's low bits, and CRC-64/ISO holds its low ~28 bits constant on
-  sequential decimal keys (`key:000000123456`) — whole stripes collapsed
-  into one bucket chain, starving `SampleStripe` eviction sampling;
-  bucket indexing now mixes via murmur3 fmix64 (`mix64`), and
-  SampleStripe's attempt budget scales with stripe sparsity.
-
-M5c architecture notes:
-
-- **Snapshot** (`lib/persist/snapshot.go`, own format per D9): magic
-  `ULTIMA01`, header, one segment per (db, shard) with CRC-64/XZ (pluto
-  `crc`) per segment + whole-file trailer; payloads optionally
-  LZW-compressed (pluto `quicklist.LZWCodec()`, `snapshot_compress`).
-  Each segment is serialized inside its shard goroutine via
-  `Shard.DumpDB` (walks only stripe i through the new pluto
-  `sharded_hash_ts.StripeWalk`, skipping passively-expired keys) — a
-  consistent per-shard point-in-time with no pause. SAVE takes
-  `PauseAll` + `WriteSnapshotTok` (a tok-0 dump under the pause
-  DEADLOCKS — parked shards stash non-token tasks); BGSAVE runs
-  unstopped per-shard staggered tasks (divergence from fork-RDB,
-  documented). tmp+rename atomicity, `snapshot.manifest` JSON sidecar.
-- **AOF** (`lib/persist/aof.go`): per-shard logs `appendonlydir/
-  shard-<i>.aof` + manifest. Every record is self-contained and
-  seq-stamped — `["ULTIMAREC","<db>","<seq>",cmd,args...]` — seq from a
-  set-wide atomic counter; broadcasts (FLUSHDB/FLUSHALL) share ONE seq
-  across all logs. Replay (`replay.go`) merges all logs by seq
-  (sort-merge over collected records) and executes each seq once — a
-  file-at-a-time replay would re-execute broadcasts once per shard and
-  clobber keys restored from earlier logs (found by unit test). Post-
-  restart seqs resume above the replayed max. fsync: `always` syncs
-  after each append, `everysec` via the manager's 1s ticker, `no`.
-- **Capture** (`lib/commands/aof.go`): `Execute` reports every
-  successful write-flagged command post-handler; EXEC is skipped there
-  and `cmdExec` captures each queued command individually (7.2.7's AOF
-  has no MULTI/EXEC framing — probed). Redis-exact rewrites (probed
-  against live 7.2.7 AOF bytes): relative expires → absolute
-  (`PEXPIREAT key abs [cond]` — condition kept; SET … EX/PX/EXAT →
-  PXAT; GETEX → PEXPIREAT/PERSIST), blocking pops → plain effect on the
-  replied key (BLPOP→LPOP, BLMOVE→LMOVE sans timeout, BLMPOP→1-key
-  LMPOP, BZ* likewise), SPOP → SREM of the replied members, null/timeout
-  → nothing. Expiry/eviction deletions arrive via `OnKeyGone` →
-  synthesized DEL. v1 limitation: record order follows per-connection
-  completion order; same-key writes racing across connections can
-  replay in the other relative order (apply-time seq assignment is the
-  M8 answer).
-- **BGREWRITEAOF** dumps state as SET/RPUSH/SADD/ZADD/HSET + PEXPIREAT
-  under PauseAll after draining write commands caught between mutation
-  and capture (`commands.Engine.PersistQuiesced` — the
-  persistInFlight/persistShardTasks/blockParked counters; EXEC excluded
-  from tracking since it blocks on txMu). Stop-the-world rewrite — the
-  documented divergence from fork+COW. Redis single-child rule mirrored:
-  rewrite rejects BGSAVE (byte-exact "Another child process is
-  active…" error), BGSAVE-in-progress makes BGREWRITEAOF reply
-  "scheduled".
-- **Restore/wiring**: `Manager.Start` restores synchronously BEFORE the
-  serve loops start (listeners bound first, accepting after) — AOF when
-  appendonly and logs exist, else snapshot; `loading:1` in INFO during
-  restore. Replay feeds argv through `Engine.Execute` with a synthetic
-  authed ConnState per record db. Shutdown: listeners → `persist.Close`
-  (final fsync; shutdown snapshot when save rules configured, appendonly
-  off, unsaved writes) → `shards.Close`. CONFIG gained `appendfsync`
-  (live), `dir`/`dbfilename` (protected in 7.2.7 — byte-exact SET
-  error; default dbfilename `dump.rdb` for GET parity); `appendonly`
-  and `save` SETs are now live (open/close AOF, reschedule auto-save).
-  HTTP triggers: POST `/api/v1/save`, `/bgsave`, `/bgrewriteaof`.
-  Crash-recovery tests: `tests/m5_test.go` (subprocess, SIGKILL, three
-  variants); unit round-trips in `lib/persist/persist_test.go`.
-
-M6 architecture notes (detail in `docs/m6-detailed-plan.md`):
-
-- **M6a auth core**: `lib/auth` (bcrypt accounts + refresh families,
-  Ed25519 EdDSA JWTs per D20, TOTP via htotp), enforced on
-  `/api/v1/*` (chi middleware), gRPC (interceptors), and WS upgrade
-  (`?access_token=` / bearer subprotocol); everything gated by
-  `auth.enabled` (off = pre-M6 behavior). `ConnState.User` carries the
-  account on the JWT surfaces.
-- **M6b resumable WS sessions** (`lib/wssession`, §9.4, D18): the
-  session's `Deliver` func is the stable broker-facing funnel — stamping
-  (`push_seq`), buffering, and live enqueue under one lock, so
-  subscriptions survive reconnects with no re-registration and no
-  reorder. `Session.Attach` is atomic: gap check → takeover close →
-  handshake-OK head → replay → install sink → hand off aborted seqs.
-  Sessioned WS teardown detaches (ConnState + broker subs retained) with
-  a retention timer (`auth.ws_replay_buffer_ms`); expiry calls
-  `eng.CloseConn`. Command replies are never replayed — lost ones
-  (queued/refused/write-failed at drop) come back as `ABORTED` error
-  frames by seq. Sessions bind to the creating account; a foreign resume
-  is SESSION_EXPIRED. Sessionless WS connections behave exactly as M4.
-- **M6c HTTP management API** (`lib/httpapi`, §10.1, D7/D11):
-  `api/openapi.yaml` is the contract; `lib/httpapi` implements the
-  oapi-codegen chi-server bindings (`gen/httpapi`). Handlers run engine
-  commands through `Execute` on synthetic, unregistered ConnStates
-  (`syntheticConn` — never `NewConnState`, which would list them as
-  clients). `JsonBody` = decode (empty body lenient) →
-  `config.SetDefaults` → validator/v10 over the generated `validate:`
-  tags. Auth replies keep the M6a sentinel→status mapping byte-identical.
-  The embedded spec copy (`lib/httpapi/openapi.yaml`, synced by
-  `bin/gen-api.sh`) is served at `/api/openapi.yaml` + Swagger UI at
-  `/api/docs` (both public; chi v5.3 Mount does not strip prefixes, so
-  swagger.go uses http.StripPrefix); a doc-drift test pins the copies.
-  `/metrics` uses a dedicated `prometheus.Registry` (PromMiddleware +
-  scrape-time engine collector) guarded by the `server.metrics_allow`
-  CIDR list (parsed in cmd; empty = loopback-only) — JWT-exempt.
-  Middleware: request-id → logging → Recoverer → Timeout(60s) →
-  Prometheus → path-aware JWT gate (admin prefix → RequireAdmin);
-  chi's RealIP is deliberately omitted (deprecated, IP spoofing — and it
-  would defeat the metrics allowlist). `/ws/v1` stays outside the
-  Timeout/Prometheus group to preserve Unwrap/Hijack.
-
-M8 architecture notes (detail in `docs/m8-detailed-plan.md`; the probing
-ground truth is `docs/Redis-Errors.md`):
-
-- **Scripting** (`lib/scripting`, decisions S1–S10 of the gopher-lua
-  integration guide): wraps `gopher-lua/host` (wazero + the SHA-pinned
-  `lua51_prod.wasm` blob; scripts compile to wasm). VMs come from the M8e
-  R3 per-script pool (`pool.go`; S4 amended — checkout BEFORE the pause;
-  a miss pays the ~44 ms instantiation, a hit is ~16-31 µs), run
-  under `PauseAll` like EXEC (S3 — reused, not re-taken, when EVAL runs
-  inside EXEC since txMu is not reentrant). Effects-only AOF: EVAL is
-  never logged; `redis.call` inner commands ride
-  `commands.runScriptCommand` (the cmdExec inner path + S9 gates:
-  noscript/arity/read-only/OOM) with per-command capture and the
-  `[db lua]` monitor form. Scripts compile under chunk name
-  `user_script` so error texts render byte-exact, with the
-  ` script: <sha>, on @user_script:N.` suffix (N from gopher-lua's new
-  `rt_err_line`). `redis.call` raises a plain error string (Redis's
-  metatagged error-object class — recognized textually,
-  `isErrorCodePrefixed`); `redis.pcall` returns
-  `{err, ignore_error_stats_update=1}`; `redis.setresp` switches the
-  RESP3 wrapper conversions (`{map=}/{set=}/{double=}`). BUSY gate in
-  `Execute` after the soft `lua-time-limit` (only SCRIPT KILL and the
-  allow_busy commands pass); SCRIPT KILL trips the VM deadline flag
-  (`host.VM.Kill`) unless the script already wrote (UNKILLABLE); the
-  hard `script_hard_deadline_ms` watchdog kills even writers (S5
-  divergence: partial effects persist). Host-seeded RNG (S6) and
-  host-side number formatting (S7). M8d: the Redis script-environment
-  lockdown is byte-exact — the deps/lua readonly-table patch is ported
-  into the gopher-lua runtime (Table.readonly checked in
-  `luaV_settable`/`lua_rawset`/`lua_rawseti`) plus the `_G` `__index`
-  error metatable (`rt_protect_globals`; KEYS/ARGV stage inside a
-  `rt_globals_readonly` off-window, like Redis); enabled via
-  `host.WithGlobalsProtection` (docs/Redis-Errors.md §6a). Ledgered
-  divergences:
-  `docs/Redis-Errors.md` §11 (no shared globals across EVALs, dialect
-  texts, SCRIPT DEBUG refusal, wazero interpreter speed).
-- **VM pool** (`lib/scripting/pool.go`, M8e R3): per-SHA idle queues of
-  bound VMs (the host one-script law, `host.ErrScriptBound`, binds by
-  `*host.Script` pointer — `Manager.Compile` and `host.Engine.Compile`
-  both dedup concurrent compiles of one source to one pointer). Guest GC
-  is permanently stopped (host v1 law), so pooled VMs are recycled on:
-  run count (`script_vm_recycle_runs`, default 100), heap watermark
-  (`script_vm_recycle_pct`, default 75% of `script_max_memory_mb`, via
-  the new `host.VM.UsedBytes`), fatal run errors (`IsVMFatal`: kill /
-  hard deadline / "not enough memory" / trap), stale epoch (SCRIPT FLUSH
-  mid-run), and pool shutdown. Depth per SHA is `script_vm_pool_size`
-  (default 1 — PauseAll serializes scripts; 0 disables pooling → the
-  pre-M8e fresh-VM path), total idle cap `script_vm_pool_max` (default
-  64, LRU eviction). CONFIG exposes the four knobs read-only; INFO script
-  gains `script_pool_vms/hits/misses/recycles/evictions`. Behavior is
-  byte-exact by construction (globals lockdown + per-run staging/reseed)
-  and the differential harness runs with the pool on.
-- **gopher-lua additions consumed**: `rt_err_line` export, host
-  `ScriptError.Line`, `VM.Kill`, `Engine.RegisterValue`,
-  `host.ValueError` (non-string raised values); M8d:
-  `rt_protect_globals`/`rt_globals_readonly` exports + the readonly
-  runtime patch, `host.WithGlobalsProtection`; M8e: `VM.UsedBytes`
-  (wraps the blob's `rt_mem_used_bytes`) + the `Engine.Compile`
-  concurrent pointer-identity fix. Blob SHA pin
-  `b4b7d2b7…` (`host/blob.go`, `testdiff/m6c_test.go`).
-- **Flush fan-out tokens**: `shard.FlushDBTok/FlushAllTok/DBSizeTok` —
-  FLUSHDB/FLUSHALL/DBSIZE fan out shard tasks and must carry the
-  caller's pause token under PauseAll (a latent MULTI+FLUSHALL+EXEC
-  deadlock smoked out by `redis.call('flushall')`).
+**Commands**: the registry is `lib/commands/table.go`. Coverage: P0
+(connection/strings/keyspace/server), P1 (hash/list/set/zset incl. scans),
+P2 (transactions, classic pub/sub, blocking list/zset ops), keyspace
+notifications (M5a), MONITOR (M6d), Lua scripting (EVAL*/SCRIPT, M8), and
+the M8 tail (streams, bitfield, geo, PF*). Ultima reports Redis
+compatibility version 7.2.7 (`commands.CompatVersion`).
 
 ## Code Organization
 
 ```
-cmd/ultima-server/   main binary: main.go, startup.go (wiring), router.go (chi), version.go (build-stamp vars)
-cmd/ultima-cli/      operator CLIs (M7, §6.4) — RESP (redis-cli analogue),
-cmd/ultima-ws-cli/   WebSocket, and gRPC front-ends respectively; thin shells
-cmd/ultima-grpc-cli/ over clients/go/ultima (one-shot + REPL, push streaming)
-clients/go/ultima/   Go client library (M7, §11.1): RESP/gRPC/WS/REST behind
-                     one umbrella Client; typed helpers for the hot commands,
-                     §9.4 session recovery on WS, shared token manager,
-                     redis-cli-style render.go used by the CLIs
-clients/typescript/  @ultima/client (M7, §11.2): framework-agnostic TS client
-                     (WS with §9.4 recovery + REST + auth token manager, react
-                     hooks subpath); the web UI consumes it via a file: dep
-clients/javascript/  plain-JS ESM+CJS distribution of @ultima/client (M7,
-                     §11.3): bun build bundles + emitted .d.ts
-examples/            M7 example apps (§11.4): leaderboard (ZADD + pub/sub,
-                     Go score submitter serves the page) and chat (pub/sub
-                     topics, list history, keyspace-notification presence,
-                     Go bot serves the page); each with a README chapter
-lib/config/          JSON config: `default:"..."` struct tags via reflection + `$ENV$NAME` env substitution (D6)
-lib/resp/            vendored + extended fork of tidwall/redcon v1.6.4 (D2); adds RESP3 emitters,
+cmd/ultima-server/   main binary: main.go, startup.go (wiring), router.go (chi), version.go (build stamp)
+cmd/ultima-cli/      operator CLIs (§6.4) — RESP, WebSocket, gRPC; thin shells
+cmd/ultima-ws-cli/   over clients/go/ultima (one-shot + REPL, push streaming)
+cmd/ultima-grpc-cli/
+clients/go/ultima/   Go client library (§11.1): RESP/gRPC/WS/REST behind one umbrella
+                     Client, typed helpers, §9.4 session recovery on WS, token manager
+clients/typescript/  @ultima/client (§11.2): framework-agnostic TS client (WS + REST +
+                     auth); the web UI consumes it via a file: dep
+clients/javascript/  plain-JS ESM+CJS distribution of @ultima/client (§11.3)
+examples/            leaderboard + chat example apps (§11.4), e2e-tested in tests/m7_examples_test.go
+lib/config/          JSON config: `default:"..."` struct tags via reflection + `$ENV$NAME` substitution (D6)
+lib/resp/            vendored + extended fork of tidwall/redcon v1.6.4 (D2); RESP3 emitters,
                      per-connection protocol versioning; kept close to upstream — excluded from lint
-lib/respserver/      shared RESP front-end wiring (§6.1, D3): builds the *resp.Server with the
-                     accept/handler/closed closures bridging to commands.Engine; used by
-                     cmd/ultima-server and both test harnesses
+lib/respserver/      shared RESP front-end wiring (§6.1, D3); used by cmd and both test harnesses
 lib/shard/           sharded keyspace engine, owner goroutines, routing, expiry heap,
-                     WATCH dirty tracking (tombstones/epochs), EXEC pause (PauseAll),
-                     blocking-waiter FIFO registry; evict.go (M5b maxmemory: per-shard
-                     accounting, LRU/LFU/ttl/random eviction loops, policy enum)
-lib/types/           collection value types in Entry.Obj (M2): Hash (insertion-ordered
-                     slice → slice+map past hash-max-listpack-*), List (pluto
-                     quicklist_ts wrapped with a byte counter, §5.3 #10), Set (sorted
-                     int64 slice intset → map past
-                     set-max-intset-entries), ZSet (skip_list_ts + member→score map,
-                     §5.3 #1). Promotion is one-way, like Redis. memusage.go (M5b):
-                     O(1) per-type memory estimators fed by tracked content bytes.
-lib/pubsub/          classic pub/sub broker (M3): channel/pattern subscription maps,
-                     delivery on the publisher's goroutine into per-conn push queues
-lib/commands/        front-end-agnostic command engine; table.go is the command registry
+                     WATCH tracking, PauseAll, blocking-waiter registry; evict.go (maxmemory)
+lib/types/           collection value types (Hash/List/Set/ZSet, Redis-like promotion
+                     thresholds); memusage.go: O(1) per-type memory estimators
+lib/pubsub/          classic pub/sub broker
+lib/commands/        front-end-agnostic command engine; table.go is the registry
                      (def(name, arity, flags, first, last, step, group, handler));
-                     hash.go/list.go/set.go/zset.go hold the P1 handlers, coll.go the
-                     shared parsing helpers (string2d-exact floats, range bounds);
-                     tx.go (M3 MULTI/EXEC/WATCH), pubsub.go (M3 subscriptions + gate),
-                     block.go (M3 blocking ops, park/wake engine),
-                     notify.go (M5a notify-keyspace-events: class parser,
-                     notifyKeyspace emission point), aof.go (M5c Persister
-                     interface + capture/rewrite rules), persist.go (M5c
-                     SAVE/BGSAVE/LASTSAVE/BGREWRITEAOF)
-lib/envelope/        shared bridge (M4): protobuf Command → engine argv, resp.Value ↔
-                     protobuf Value (RESP3 mirror; FromProto is the inverse, used by
-                     the RESP↔gRPC wire-byte parity gate); used by grpcsrv and wssrv (D3/D15)
-lib/grpcsrv/         gRPC front-end (M4: Exec bidi stream, ExecBatch, ExecGeneric, Ping,
-                     Subscribe pub/sub push stream, Monitor stream over Engine.AddMonitor)
-lib/wssrv/           WebSocket front-end (M4, §6.3): binary protobuf Command frames at
-                     /ws/v1, one frame per command, seq-correlated replies; pub/sub
-                     pushes as unsolicited seq-0 frames over a bounded queue (slow
-                     consumer → close, as in lib/respserver); M6b: resumable-session
-                     handshake (§9.4), push_seq stamping, SESSION_EXPIRED/ABORTED
-lib/wssession/       WS resumable sessions (M6b, §9.4, D18): session registry,
-                     bounded per-session replay buffer (ws_replay_buffer_ms/
-                     max_msgs), atomic attach/takeover with replay, retention
-                     expiry releasing the retained ConnState
-lib/handler/         shared HTTP middleware: RequestLogger (slog) +
-                     statusRecorder (Unwrap/Hijack — the /ws/v1 upgrader
-                     contract). The API routes moved to lib/httpapi in M6c
-lib/httpapi/         HTTP management API (M6c, §10.1, D7/D11): implements
-                     the generated httpapi.ServerInterface from gen/httpapi
-                     (auth routes, /info, /shards, /clients+kill, /slowlog,
-                     /latency, /config GET|PUT, /flushdb, /save family,
-                     /keys/scan, /key/{key}, /metrics); jsonbody.go (decode
-                     → config.SetDefaults → validator/v10 over the
-                     generated validate: tags); metrics.go (dedicated
-                     prometheus.Registry, PromMiddleware, scrape-time
-                     engine collector, metrics_allow IP guard); swagger.go
-                     (embedded openapi.yaml at /api/openapi.yaml, Swagger
-                     UI at /api/docs); Server.Register mounts the §10.1
-                     middleware chain (used by cmd and tests alike)
-lib/auth/            M6a auth core (§9, D17/D20): keys.go (Ed25519 PKCS#8/
-                     PKIX PEM load, both files required), accounts.go
-                     (bcrypt account store + refresh-token families with
-                     rotation/theft detection, atomic JSON write-through,
-                     last-admin/bootstrap-admin guards), tokens.go (EdDSA
-                     JWT issue/verify), service.go (login/refresh/logout/
-                     password/TOTP/CRUD facade), middleware.go (RequireAuth/
-                     RequireAdmin, gRPC unary+stream interceptors)
-lib/persist/         persistence (M5c, §13.1, D9 own formats): format.go
-                     (snapshot codec, CRC-64/XZ, LZW payloads), snapshot.go
-                     (per-(db,shard) segments via Shard.DumpDB; WriteSnapshot[Tok]
-                     + LoadSnapshot), aof.go (per-shard seq-stamped logs +
-                     BGREWRITEAOF dump), replay.go (seq merge + broadcast
-                     dedup), manager.go (save rules, fsync policies,
-                     restore-before-serve, INFO persistence fields)
-lib/scripting/       Lua scripting (M8, §7 P3, D12, decisions S1–S10):
-                     scripting.go (Manager: host.Engine wrapper, SHA-1 script
-                     cache, per-run VM lifecycle, BUSY/KILL state, soft/hard
-                     deadlines, seeded RNG), bridge.go (the redis.* host
-                     functions: call/pcall/error_reply/status_reply/sha1hex/
-                     log/setresp + error mapping), convert.go (the probed
-                     Lua⇄RESP conversion rules incl. the RESP3 setresp
-                     {map=}/{set=}/{double=} wrappers; host-side number
-                     formatting, S7)
-web/                 M6d web UI (§10.2): React+TS+vite app (bun; src/ screens,
-                     src/lib/ws.ts is the /ws/v1 client with §9.4 session
-                     recovery, src/lib/api.ts the REST wrappers) plus the Go
-                     embedding: embed.go (//go:embed all:dist; the committed
-                     placeholder dist/index.html keeps bun-less builds
-                     working) and handler.go (SPA fallback; unmatched machine
-                     paths 404; index.html no-cache, /assets immutable).
-                     Build with `make web`, then `make build` embeds it.
+                     coll.go shared parsing helpers; tx.go, pubsub.go, block.go,
+                     notify.go (keyspace notifications), aof.go (capture/rewrite),
+                     persist.go (SAVE family), monitor.go, eval.go + script.go (M8)
+lib/envelope/        protobuf Command → engine argv, resp.Value ↔ protobuf Value (D3/D15)
+lib/grpcsrv/         gRPC front-end: Exec bidi stream, ExecBatch, ExecGeneric, Ping,
+                     Subscribe push stream, Monitor stream
+lib/wssrv/           WebSocket front-end (§6.3): binary protobuf frames at /ws/v1,
+                     seq-correlated replies, pub/sub pushes as seq-0 frames
+lib/wssession/       resumable WS sessions (§9.4, D18): replay buffer, atomic
+                     attach/takeover, retention expiry
+lib/handler/         shared HTTP middleware: RequestLogger (slog) + statusRecorder
+lib/httpapi/         HTTP management API (§10.1, D7/D11) implementing gen/httpapi;
+                     jsonbody.go (decode → SetDefaults → validator/v10), metrics.go
+                     (dedicated prometheus.Registry + metrics_allow IP guard),
+                     swagger.go (embedded openapi.yaml + Swagger UI)
+lib/auth/            auth core (§9, D17/D20): Ed25519 JWTs, bcrypt account store with
+                     refresh-token rotation/theft detection, TOTP, middleware +
+                     gRPC interceptors; gated by auth.enabled
+lib/persist/         persistence (§13.1, D9): format.go (snapshot codec), snapshot.go,
+                     aof.go (per-shard logs + BGREWRITEAOF), replay.go (seq merge),
+                     manager.go (save rules, fsync policies, restore-before-serve)
+lib/scripting/       Lua scripting (§7 P3, D12): scripting.go (Manager: script cache,
+                     run state, BUSY/KILL, deadlines, RNG), pool.go (M8e R3 VM pool +
+                     recycling), bridge.go (redis.* host functions), convert.go
+                     (Lua⇄RESP conversion, S7)
+web/                 web UI (§10.2): React+TS+vite (bun); embed.go (//go:embed all:dist
+                     with committed placeholder) + handler.go (SPA fallback).
+                     `make web` builds, `make build` embeds
 proto/ultima/v1/     protobuf IDL
-gen/go/ultima/v1/    generated protobuf Go bindings (do not hand-edit)
-gen/ts/ultima/v1/    generated protobuf TypeScript bindings (protobuf-es; do not hand-edit)
-gen/httpapi/         generated oapi-codegen chi-server bindings + models for the
-                     management API (do not hand-edit; source is api/openapi.yaml)
-tests/               integration_test.go (three surfaces, ephemeral ports), m3_test.go
-                     (M3 real-socket pub/sub + blocking + WATCH/EXEC stress tests),
-                     m4_grpc_test.go / m4_ws_test.go (M4 front-ends), m4_parity_test.go
-                     (RESP↔gRPC wire-byte diff), m4_ts_test.go (TS round-trip driver),
-                     m5_test.go (M5c crash recovery: subprocess + SIGKILL,
-                     snapshot/AOF/AOF-rewrite variants), m6_test.go (M6a auth
-                     flows: HTTP login/refresh/TOTP/admin, gRPC + WS JWT
-                     enforcement), m8_script_test.go (M8 EVAL over three
-                     surfaces, BUSY/KILL, hard deadline, memory cap,
-                     concurrent stress), m8_aof_test.go (M8 S2 crash
-                     recovery of script effects; no EVAL verb in the AOF)
-tests/ts-roundtrip/  protobuf-es TS client script (bun; `bun install` first) — the M4
-                     go+ts round-trip exit criterion; strict tsc typecheck via tsconfig
-tests/differential/  harness diffs replies against a real redis-server (the parity gate);
-                     multi-connection scripts, push frames and blocking wakeups supported
-tests/cli-matrix/    CLI command matrix: cases/*.txt drive every implemented command
-                     through redis-cli + the three operator CLIs against a live
-                     ultima-server in both security modes; runner is
-                     bin/test-cli-matrix.sh; doc is docs/cli-matrix-testing.md
-bin/                 gen.sh (protoc), gen-api.sh (oapi-codegen + spec embed sync),
-                     gen-build-stamp.sh (ldflags), bench.sh (M1 sweep,
-                     chains into bench-pubsub.sh for the M3 pub/sub benchmark,
-                     bench-m5.sh for the M5 maxmemory soak, and bench-m8.sh
-                     for the M8 EVAL/EVALSHA sweep), gen-jwt-keys.sh
-                     (M6a Ed25519 JWT key pair into ./keys, gitignored),
-                     test-cli-matrix.sh (the CLI matrix runner)
-docs/                ULTIMA-DESIGN.md, pluto/ structure specs, benchmarks/ reports
-note/                scratch/reference (Redis checkout, benchmarks); gitignored, lint-excluded
+gen/                 generated bindings (do not hand-edit; sources: proto/, api/openapi.yaml)
+tests/               integration + milestone tests (m3–m8), real sockets, ephemeral ports
+tests/ts-roundtrip/  protobuf-es TS round-trip (bun; `bun install` first)
+tests/differential/  the parity gate: scripted diffs of replies incl. error strings
+                     against a real redis-server
+tests/cli-matrix/    CLI command matrix (cases/*.txt) through redis-cli + the three CLIs
+bin/                 gen.sh, gen-api.sh, gen-build-stamp.sh, bench*.sh, gen-jwt-keys.sh,
+                     test-cli-matrix.sh
+docs/                ULTIMA-DESIGN.md, implementation-history.md, pluto/ specs, benchmarks/
+note/                scratch/reference; gitignored, lint-excluded
 ```
 
 Adding a new command: implement a handler in the appropriate
@@ -632,45 +176,28 @@ Adding a new command: implement a handler in the appropriate
 
 All via the Makefile (default goal is `build`):
 
-- `make build` — builds `./ultima-server` with git/build-stamp ldflags
-  (`bin/gen-build-stamp.sh` → `-X main.Version=` etc.; `--version` prints it).
-- `make run` — builds and runs with `ultima.cfg.json` (reads password from
-  `$ENV$ultima_password`).
+- `make build` — `./ultima-server` with git/build-stamp ldflags
+  (`--version` prints it). `make run` runs with `ultima.cfg.json`.
 - `make test` — `go test ./...` (unit + integration + differential).
 - `make lint` — `golangci-lint run` (v2 config in `.golangci.yml`).
-- `make web` — build the M6d web UI (`cd web && bun install && bun run
-  build` → `web/dist`); the next `make build` embeds it. `make test-web`
-  runs the UI's strict `tsc` typecheck. Note: bun *copies* the
-  `file:../clients/typescript` dependency — after editing
-  `clients/typescript`, rerun `bun install` in `web/` before building.
-- `make build-cli` — build the three M7 operator CLIs (`./ultima-cli`,
-  `./ultima-ws-cli`, `./ultima-grpc-cli`; `make clean` removes them).
-  `make test-clients` runs the Go client tests and the TS client
-  typecheck/build + JS dist build.
-- `make test-cli-matrix` — the CLI command matrix (tests/cli-matrix):
-  every implemented command through redis-cli + ultima-cli + ultima-ws-cli +
-  ultima-grpc-cli against a live server, in noauth and auth modes;
-  `MATRIX_FLAGS=-R` also validates expectations against a real redis-server.
-  See docs/cli-matrix-testing.md. Requires redis-cli + GNU timeout.
-- `make gen_proto` — regenerate protobuf bindings from `proto/` into
-  `gen/go`; requires `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`.
-  Also emits `gen/ts` (protobuf-es) via `bin/gen-ts.sh`, which no-ops with
-  a hint if the TS plugin isn't installed (`bun install` in
-  `tests/ts-roundtrip` provides it).
-- `make gen_api` — regenerate the management-API chi-server bindings from
-  `api/openapi.yaml` into `gen/httpapi` and sync the embed copy
-  `lib/httpapi/openapi.yaml` (requires oapi-codegen v2).
-- `make bench` — `bin/bench.sh`: Ultima vs local `redis-server` via
-  `redis-benchmark`; writes a report to `docs/benchmarks/M1-<date>.md`,
-  then runs `bin/bench-pubsub.sh` (M3 pub/sub sweep, subscribers are the
-  `note/pubsub-bench-sub` Go driver; skip with `BENCH_PUBSUB=0`), which
-  writes `docs/benchmarks/M3-<date>.md`, then `bin/bench-m5.sh` (M5
-  maxmemory soak over all 8 eviction policies, gated on bounded memory;
-  skip with `BENCH_M5=0`), which writes `docs/benchmarks/M5-<date>.md`.
-  Tunable via `REDIS_BIN`, `BENCH_BIN`, `BENCH_*_PORT`, `BENCH_REQUESTS`,
-  `BENCH_SUBS`, `BENCH_SINGLE_REQUESTS`; the soak has its own
-  `BENCH_M5_*` knobs (requests, maxmemory MB, datasize, keyspace, TTL).
-- `make bench-m5` — just the M5 maxmemory soak.
+- `make web` / `make test-web` — build the web UI / strict `tsc`
+  typecheck. Note: bun *copies* the `file:../clients/typescript` dep —
+  after editing `clients/typescript`, rerun `bun install` in `web/`.
+- `make build-cli` / `make test-clients` — the three operator CLIs /
+  client-library tests and TS+JS builds.
+- `make test-cli-matrix` — the CLI command matrix in both security modes;
+  `MATRIX_FLAGS=-R` also validates against a real redis-server
+  (docs/cli-matrix-testing.md). Requires redis-cli + GNU timeout.
+- `make gen_proto` / `make gen_api` — regenerate `gen/` from `proto/` /
+  `api/openapi.yaml` (gen_api also syncs the embed copy
+  `lib/httpapi/openapi.yaml`).
+- `make bench` — `bin/bench.sh`: Ultima vs local redis-server, then
+  chains `bench-pubsub.sh` (`BENCH_PUBSUB=0` skips), `bench-m5.sh`
+  (`BENCH_M5=0` skips), `bench-m8.sh`. Reports land in
+  `docs/benchmarks/<M>-<date>.md`. bench-m8.sh knobs: `BENCH_M8_REQUESTS`,
+  `BENCH_M8_UNTIL=HH:MM` (time-boxed soak), `BENCH_M8_POOL_SIZE` (VM-pool
+  A/B), battery gate via `../battery-check` (pauses below 50%, resumes at
+  60%).
 - `make tidy`, `make clean`.
 
 Configuration: JSON file (`ultima.cfg.json` by default). Defaults come
@@ -681,30 +208,25 @@ values are expanded from the environment (`lib/config/config.go`).
 
 1. **Unit tests** colocated with code (`lib/**/*_test.go`); goleak guards
    against goroutine leaks in engine tests.
-2. **Integration tests** (`tests/integration_test.go`): boot all three
-   listener surfaces on `127.0.0.1:0` and exercise them with real clients;
-   RESP wiring comes from the shared `lib/respserver` package (D3).
-   `tests/m3_test.go` adds real-socket pub/sub, blocking, and WATCH/EXEC
-   stress tests (M3 exit criterion).
+2. **Integration tests** (`tests/`): boot all three surfaces on
+   `127.0.0.1:0` and exercise them with real clients; RESP wiring comes
+   from the shared `lib/respserver` package (D3).
 3. **Differential tests** (`tests/differential/`): scripted command
-   sequences run against Ultima (in-process, ephemeral port) and a real
-   `redis-server` subprocess; decoded replies **including error strings**
-   are diffed — this is the primary parity gate. Requires `redis-server`
-   on PATH (or `REDIS_BIN`); skipped under `-short` or `DIFFERENTIAL=0`.
+   sequences run against Ultima (in-process) and a real `redis-server`
+   subprocess; decoded replies **including error strings** are diffed —
+   this is the primary parity gate. Requires `redis-server` on PATH (or
+   `REDIS_BIN`); skipped under `-short` or `DIFFERENTIAL=0`.
    **Standing permission**: `redis-server` and `redis-cli` may be run on
    this machine at any time for probing behavior (there is no data on the
    local Redis that can be broken). Prefer probing the live installed
    server (7.2.7, the compat target) over reading `note/redis/`, which is
-   a newer 8.x source checkout and can diverge from 7.2.7 behavior.
-   Scripts live in `scripts.go` (P0), `scripts_p1.go` (P1), `scripts_m3.go`
-   (P2: transactions, pub/sub, blocking — uses the multi-connection
-   `cmdOn`/`sendOn`/`recvOn`/`expectPush` step constructors documented in
-   `compare.go`), `scripts_m5.go` (M5a: keyspace notifications — notify
-   scripts must reset `notify-keyspace-events ""` at the end; config
-   persists across scripts; M5b: OOM gate + policy CONFIG; M5c:
-   SAVE/BGSAVE/LASTSAVE/BGREWRITEAOF reply shapes + persist CONFIG keys —
-   the harness's Ultima gets a temp-dir persist manager and its redis a
-   temp `--dir`); extend the appropriate file when adding commands.
+   a newer 8.x checkout and can diverge from 7.2.7 behavior. Scripts live
+   in `scripts.go` (P0), `scripts_p1.go` (P1), `scripts_m3.go` (P2),
+   `scripts_m5.go` (M5), `scripts_m8.go` (M8) — extend the appropriate
+   file when adding commands; multi-connection step constructors are
+   documented in `compare.go`. Gotcha: config persists across scripts
+   within a run — keyspace-notification scripts must reset
+   `notify-keyspace-events ""` at the end.
 
 Running `go test ./...` also compiles `note/grpc-vs-text-benchmark` and
 `note/crc-probe` (scratch modules kept for reference).
@@ -717,37 +239,39 @@ Running `go test ./...` also compiles `note/grpc-vs-text-benchmark` and
 - Lint/format **exclusions**: `gen/`, `note/`, `docs/`, and `lib/resp/`
   (vendored redcon fork — keep it close to upstream; do not restyle it).
 - Package doc comments reference design-doc sections (`design doc §N.N`)
-  and decision numbers (D1–D19); keep that convention, and update or add
+  and decision numbers (D1–D20); keep that convention, and update or add
   references when implementing a documented section.
 - Comments explain the *why* (Redis-semantics notes, invariants such as
   "call only from inside the shard goroutine"). Byte-exact Redis error
   messages are a hard requirement, validated by the differential harness.
-- Never hand-edit files under `gen/`; change `proto/` and run
-  `make gen_proto`.
+- Never hand-edit files under `gen/`; change `proto/` or
+  `api/openapi.yaml` and run `make gen_proto` / `make gen_api`.
+- If you change anything this file documents, update this file to match —
+  and if the change alters a settled milestone design, also update
+  `docs/implementation-history.md`.
 
 ## Security Considerations
 
 - `requirepass` auth: when set, the command engine gates every command
   except AUTH/HELLO/QUIT behind `NOAUTH` (`lib/commands/engine.go`).
-- `Config.CheckStartupPosture` (`lib/config/config.go:142`) warns when the
-  RESP listener binds all interfaces with no `requirepass` and no TLS.
+- `Config.CheckStartupPosture` warns when the RESP listener binds all
+  interfaces with no `requirepass` and no TLS.
 - Config secrets are injected via `$ENV$NAME` substitution — do not commit
   real credentials to config files.
 - Command renaming (Redis's `rename-command`) is deliberately **excluded**
-  as security by obscurity (design doc §1.2); protection comes from auth
-  and, later, ACLs.
-- M6a auth (`lib/auth`, `auth.enabled`): JWT access/refresh tokens signed
-  Ed25519 (EdDSA, `golang-jwt/jwt/v5`) with the key pair read from config
-  file paths (D20 — no shared-secret mode, no auto-generated keys;
-  `bin/gen-jwt-keys.sh` writes `./keys/`, gitignored), TOTP 2FA via
-  `pschlump/htotp`. When enabled, `/api/v1/*` (except login/refresh) and
-  the gRPC surface require a Bearer access token, and the `/ws/v1` upgrade
-  requires `?access_token=` or the `bearer, <token>` subprotocol, and the
-  M6d origin policy applies: browser upgrades must be same-origin or on
-  `server.ws_origin_allow` (comma-separated origins/hosts, `*` = any);
-  requests without an Origin header always pass. When auth is disabled
-  (default), the WebSocket endpoint still has no origin policy
-  (`CheckOrigin: true`) and no upgrade-time auth.
+  as security by obscurity (§1.2); protection comes from auth and, later,
+  ACLs.
+- M6 auth (`lib/auth`, `auth.enabled`): JWT access/refresh tokens signed
+  Ed25519 (D20 — key pair read from config file paths, no shared-secret
+  mode, no auto-generated keys; `bin/gen-jwt-keys.sh` writes `./keys/`,
+  gitignored), TOTP 2FA via `pschlump/htotp`. When enabled, `/api/v1/*`
+  (except login/refresh) and the gRPC surface require a Bearer access
+  token, the `/ws/v1` upgrade requires `?access_token=` or the
+  `bearer, <token>` subprotocol, and the origin policy applies: browser
+  upgrades must be same-origin or on `server.ws_origin_allow`
+  (comma-separated origins/hosts, `*` = any; no Origin header always
+  passes). When auth is disabled (default), the WS endpoint has no origin
+  policy (`CheckOrigin: true`) and no upgrade-time auth.
   `note/redis-security-overview.md` is the security reference.
 - Command execution must never panic on client input; all errors are reply
   values (`Engine.Execute` contract).
