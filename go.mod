@@ -41,7 +41,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 )
 
-replace github.com/pschlump/pluto => ../pluto
+// replace github.com/pschlump/pluto => ../pluto
 
 // replace github.com/pschlump/htotp => ../htotp
 
