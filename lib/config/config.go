@@ -101,6 +101,11 @@ type ServerConfig struct {
 	// GET /metrics (M6c, §10.1); parsed into []*net.IPNet at startup,
 	// bare IPs become /32 or /128.
 	MetricsAllow string `json:"metrics_allow" default:"127.0.0.0/8,::1"`
+	// PprofEnabled mounts net/http/pprof under /debug/pprof/ on the HTTP
+	// surface (M9a, §14.2 — benchmark profiles attach to reports). Guarded
+	// by metrics_allow plus a Bearer token when auth.enabled; off by
+	// default.
+	PprofEnabled bool `json:"pprof_enabled" default:"false"`
 	// WSOriginAllow is the comma-separated Origin allowlist for the
 	// /ws/v1 upgrade (M6d, §10.2), consulted only when auth.enabled:
 	// entries match a full Origin ("https://admin.example.com") or its

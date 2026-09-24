@@ -36,6 +36,9 @@ func TestFromFileAppliesDefaults(t *testing.T) {
 	if cfg.Server.LogLevel != "info" {
 		t.Errorf("log_level = %q, want info", cfg.Server.LogLevel)
 	}
+	if cfg.Server.PprofEnabled {
+		t.Error("pprof_enabled = true, want default false")
+	}
 }
 
 func TestFromFileFileOverridesDefaults(t *testing.T) {
@@ -62,6 +65,16 @@ func TestFromFileFileOverridesDefaults(t *testing.T) {
 	// Untouched fields keep their defaults.
 	if cfg.Server.GrpcAddr != ":6380" {
 		t.Errorf("grpc_addr = %q, want default :6380", cfg.Server.GrpcAddr)
+	}
+}
+
+func TestFromFilePprofEnabledOverride(t *testing.T) {
+	var cfg Config
+	if err := FromFile(writeCfg(t, `{"server": {"pprof_enabled": true}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Server.PprofEnabled {
+		t.Error("pprof_enabled = false, want true from file")
 	}
 }
 

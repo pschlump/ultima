@@ -140,7 +140,21 @@ func New(addr string, eng *commands.Engine) *resp.Server {
 			cs = eng.NewConnState(conn.RemoteAddr())
 			attach(conn, cs)
 		}
-		v := eng.Execute(cs, cmd.Args)
+		// M9b burst coalescing: when the read burst holds more pipelined
+		// commands, ExecuteBurst runs them all (grouping same-shard runs
+		// of single-key commands into one shard task) and the fork's loop
+		// drops the consumed remainder. vals carries every reply (plus any
+		// outbox frames) in issue order.
+		var vals []resp.Value
+		if rest := conn.PeekPipeline(); len(rest) > 0 {
+			var n int
+			vals, n = eng.ExecuteBurst(cs, cmd.Args, rest)
+			if n > 0 {
+				conn.ReadPipeline()
+			}
+		} else {
+			vals = []resp.Value{eng.Execute(cs, cmd.Args)}
+		}
 		if cs.Proto != conn.ProtocolVersion() {
 			conn.SetProtocolVersion(cs.Proto)
 		}
@@ -148,12 +162,16 @@ func New(addr string, eng *commands.Engine) *resp.Server {
 		if deliver := cs.DeliverFunc(); deliver != nil {
 			// Push mode: route everything through the queue so replies
 			// and async pushes keep strict issue order.
-			deliver(v)
+			for _, v := range vals {
+				deliver(v)
+			}
 			for _, o := range outbox {
 				deliver(o)
 			}
 		} else {
-			conn.WriteValue(v)
+			for _, v := range vals {
+				conn.WriteValue(v)
+			}
 			for _, o := range outbox {
 				conn.WriteValue(o)
 			}

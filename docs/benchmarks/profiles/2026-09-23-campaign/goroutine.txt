@@ -1,0 +1,157 @@
+goroutine profile: total 123
+44 @ 0x1025d4598 0x1025ae998 0x102a848dc 0x1025dc0f4
+#	0x102a848db	github.com/pschlump/ultima/lib/shard.(*Shard).run+0xdb	/Users/philip/go/src/github.com/pschlump/ultima/lib/shard/shard.go:687
+
+21 @ 0x1025d4598 0x102595aa0 0x1025d37d0 0x102642408 0x1026433ec 0x1026433dd 0x102702ea8 0x102710514 0x10280ba58 0x102a6b9a8 0x102a699fc 0x102a69ba5 0x1025dc0f4
+#	0x1025d37cf	internal/poll.runtime_pollWait+0x9f					/opt/homebrew/Cellar/go/1.27.0/libexec/src/runtime/netpoll.go:351
+#	0x102642407	internal/poll.(*pollDesc).wait+0x27					/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_poll_runtime.go:84
+#	0x1026433eb	internal/poll.(*pollDesc).waitRead+0x22b				/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_poll_runtime.go:89
+#	0x1026433dc	internal/poll.(*FD).Read+0x21c						/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_unix.go:170
+#	0x102702ea7	net.(*netFD).Read+0x27							/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/fd_posix.go:68
+#	0x102710513	net.(*conn).Read+0x33							/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/net.go:196
+#	0x10280ba57	bufio.(*Reader).Read+0x187						/opt/homebrew/Cellar/go/1.27.0/libexec/src/bufio/bufio.go:245
+#	0x102a6b9a7	github.com/pschlump/ultima/lib/resp.(*Reader).readCommands+0x177	/Users/philip/go/src/github.com/pschlump/ultima/lib/resp/redcon.go:1040
+#	0x102a699fb	github.com/pschlump/ultima/lib/resp.handle.func2+0xbb			/Users/philip/go/src/github.com/pschlump/ultima/lib/resp/redcon.go:446
+#	0x102a69ba4	github.com/pschlump/ultima/lib/resp.handle+0x264			/Users/philip/go/src/github.com/pschlump/ultima/lib/resp/redcon.go:477
+
+20 @ 0x1025d4598 0x102563af0 0x102563644 0x102c3cb54 0x102c3c3c4 0x102d9cb68 0x102a69a50 0x102a69ba5 0x1025dc0f4
+#	0x102c3cb53	github.com/pschlump/ultima/lib/commands.(*Engine).execSegment+0x5a3	/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/burst.go:140
+#	0x102c3c3c3	github.com/pschlump/ultima/lib/commands.(*Engine).ExecuteBurst+0x403	/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/burst.go:90
+#	0x102d9cb67	github.com/pschlump/ultima/lib/respserver.New.func2+0x107		/Users/philip/go/src/github.com/pschlump/ultima/lib/respserver/respserver.go:151
+#	0x102a69a4f	github.com/pschlump/ultima/lib/resp.handle.func2+0x10f			/Users/philip/go/src/github.com/pschlump/ultima/lib/resp/redcon.go:464
+#	0x102a69ba4	github.com/pschlump/ultima/lib/resp.handle+0x264			/Users/philip/go/src/github.com/pschlump/ultima/lib/resp/redcon.go:477
+
+18 @ 0x1025d4598 0x1025af464 0x1025af445 0x1025d6068 0x1025e4704 0x102c35d90 0x102c35d89 0x102c35d39 0x102c3fe40 0x102c7782c 0x102a84900 0x1025dc0f4
+#	0x1025d6067	internal/sync.runtime_SemacquireMutex+0x27					/opt/homebrew/Cellar/go/1.27.0/libexec/src/runtime/sema.go:95
+#	0x1025e4703	internal/sync.(*Mutex).lockSlow+0x173						/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/sync/mutex.go:149
+#	0x102c35d8f	internal/sync.(*Mutex).Lock+0x7f						/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/sync/mutex.go:70
+#	0x102c35d88	sync.(*Mutex).Lock+0x78								/opt/homebrew/Cellar/go/1.27.0/libexec/src/sync/mutex.go:46
+#	0x102c35d38	github.com/pschlump/ultima/lib/scripting.(*Manager).BusyTimeout+0x28		/Users/philip/go/src/github.com/pschlump/ultima/lib/scripting/scripting.go:393
+#	0x102c3fe3f	github.com/pschlump/ultima/lib/commands.(*Engine).Execute+0xaaf			/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/engine.go:489
+#	0x102c7782b	github.com/pschlump/ultima/lib/commands.(*Engine).execSegment.func1+0x12b	/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/burst.go:133
+#	0x102a848ff	github.com/pschlump/ultima/lib/shard.(*Shard).run+0xff				/Users/philip/go/src/github.com/pschlump/ultima/lib/shard/shard.go:695
+
+8 @ 0x1025d4598 0x102595aa0 0x1025d37d0 0x102642408 0x1026433ec 0x1026433dd 0x102702ea8 0x102710514 0x10280b9bc 0x102a6b9a8 0x102a699fc 0x102a69ba5 0x1025dc0f4
+#	0x1025d37cf	internal/poll.runtime_pollWait+0x9f					/opt/homebrew/Cellar/go/1.27.0/libexec/src/runtime/netpoll.go:351
+#	0x102642407	internal/poll.(*pollDesc).wait+0x27					/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_poll_runtime.go:84
+#	0x1026433eb	internal/poll.(*pollDesc).waitRead+0x22b				/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_poll_runtime.go:89
+#	0x1026433dc	internal/poll.(*FD).Read+0x21c						/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_unix.go:170
+#	0x102702ea7	net.(*netFD).Read+0x27							/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/fd_posix.go:68
+#	0x102710513	net.(*conn).Read+0x33							/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/net.go:196
+#	0x10280b9bb	bufio.(*Reader).Read+0xeb						/opt/homebrew/Cellar/go/1.27.0/libexec/src/bufio/bufio.go:231
+#	0x102a6b9a7	github.com/pschlump/ultima/lib/resp.(*Reader).readCommands+0x177	/Users/philip/go/src/github.com/pschlump/ultima/lib/resp/redcon.go:1040
+#	0x102a699fb	github.com/pschlump/ultima/lib/resp.handle.func2+0xbb			/Users/philip/go/src/github.com/pschlump/ultima/lib/resp/redcon.go:446
+#	0x102a69ba4	github.com/pschlump/ultima/lib/resp.handle+0x264			/Users/philip/go/src/github.com/pschlump/ultima/lib/resp/redcon.go:477
+
+1 @ 0x1025920bc 0x1025d3314 0x1029b3c84 0x1029b3930 0x1029b1194 0x102cb6034 0x102da05c8 0x10287e5f8 0x1028943cc 0x10287e5f8 0x102d57630 0x10287e5f8 0x102892598 0x102897384 0x10287e5f8 0x1028943cc 0x10287e5f8 0x102cbca6c 0x10287e5f8 0x102d56d0c 0x10287e5f8 0x102cbce00 0x10287e5f8 0x102892558 0x10288c160 0x10287cca0 0x1025dc0f4
+#	0x1029b3c83	runtime/pprof.writeRuntimeProfile+0xb3						/opt/homebrew/Cellar/go/1.27.0/libexec/src/runtime/pprof/pprof.go:848
+#	0x1029b392f	runtime/pprof.writeGoroutine+0x4f						/opt/homebrew/Cellar/go/1.27.0/libexec/src/runtime/pprof/pprof.go:781
+#	0x1029b1193	runtime/pprof.(*Profile).WriteTo+0x143						/opt/homebrew/Cellar/go/1.27.0/libexec/src/runtime/pprof/pprof.go:405
+#	0x102cb6033	net/http/pprof.handler.ServeHTTP+0x433						/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/http/pprof/pprof.go:272
+#	0x102da05c7	github.com/pschlump/ultima/lib/httpapi.(*Server).RegisterPprof.func1.1+0x57	/Users/philip/go/src/github.com/pschlump/ultima/lib/httpapi/pprof.go:30
+#	0x10287e5f7	net/http.HandlerFunc.ServeHTTP+0x37						/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/http/server.go:2338
+#	0x1028943cb	github.com/go-chi/chi/v5.(*Mux).routeHTTP+0x3ab					/Users/philip/go/pkg/mod/github.com/go-chi/chi/v5@v5.3.2/mux.go:483
+#	0x10287e5f7	net/http.HandlerFunc.ServeHTTP+0x37						/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/http/server.go:2338
+#	0x102d5762f	github.com/pschlump/ultima/lib/httpapi.(*Server).pprofGuard.func1+0xaf		/Users/philip/go/src/github.com/pschlump/ultima/lib/httpapi/pprof.go:53
+#	0x10287e5f7	net/http.HandlerFunc.ServeHTTP+0x37						/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/http/server.go:2338
+#	0x102892597	github.com/go-chi/chi/v5.(*Mux).ServeHTTP+0x2a7					/Users/philip/go/pkg/mod/github.com/go-chi/chi/v5@v5.3.2/mux.go:73
+#	0x102897383	github.com/go-chi/chi/v5.(*Mux).Mount.func1+0x1b3				/Users/philip/go/pkg/mod/github.com/go-chi/chi/v5@v5.3.2/mux.go:327
+#	0x10287e5f7	net/http.HandlerFunc.ServeHTTP+0x37						/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/http/server.go:2338
+#	0x1028943cb	github.com/go-chi/chi/v5.(*Mux).routeHTTP+0x3ab					/Users/philip/go/pkg/mod/github.com/go-chi/chi/v5@v5.3.2/mux.go:483
+#	0x10287e5f7	net/http.HandlerFunc.ServeHTTP+0x37						/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/http/server.go:2338
+#	0x102cbca6b	github.com/go-chi/chi/v5/middleware.Recoverer.func1+0x6b			/Users/philip/go/pkg/mod/github.com/go-chi/chi/v5@v5.3.2/middleware/recoverer.go:45
+#	0x10287e5f7	net/http.HandlerFunc.ServeHTTP+0x37						/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/http/server.go:2338
+#	0x102d56d0b	github.com/pschlump/ultima/lib/handler.RequestLogger.func1.1+0xbb		/Users/philip/go/src/github.com/pschlump/ultima/lib/handler/handler.go:49
+#	0x10287e5f7	net/http.HandlerFunc.ServeHTTP+0x37						/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/http/server.go:2338
+#	0x102cbcdff	github.com/go-chi/chi/v5/middleware.RequestID.func1+0x1df			/Users/philip/go/pkg/mod/github.com/go-chi/chi/v5@v5.3.2/middleware/request_id.go:76
+#	0x10287e5f7	net/http.HandlerFunc.ServeHTTP+0x37						/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/http/server.go:2338
+#	0x102892557	github.com/go-chi/chi/v5.(*Mux).ServeHTTP+0x267					/Users/philip/go/pkg/mod/github.com/go-chi/chi/v5@v5.3.2/mux.go:90
+#	0x10288c15f	net/http.serverHandler.ServeHTTP+0xaf						/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/http/server.go:3413
+#	0x10287cc9f	net/http.(*conn).serve+0x59f							/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/http/server.go:2137
+
+1 @ 0x102596b30 0x1025d6dc4 0x1026d3dbc 0x1025dc0f4
+#	0x1025d6dc3	os/signal.signal_recv+0x103	/opt/homebrew/Cellar/go/1.27.0/libexec/src/runtime/sigqueue.go:149
+#	0x1026d3dbb	os/signal.loop+0x1b		/opt/homebrew/Cellar/go/1.27.0/libexec/src/os/signal/signal_unix.go:23
+
+1 @ 0x1025d4598 0x102563af0 0x102563644 0x102d9d9c4 0x10259bde0 0x1025dc0f4
+#	0x102d9d9c3	main.main+0x513		/Users/philip/go/src/github.com/pschlump/ultima/cmd/ultima-server/main.go:47
+#	0x10259bddf	runtime.main+0x37f	/opt/homebrew/Cellar/go/1.27.0/libexec/src/runtime/proc.go:302
+
+1 @ 0x1025d4598 0x102595aa0 0x1025d37d0 0x102642408 0x102646020 0x102646011 0x1027044a8 0x102718b04 0x102717f7c 0x1028813e8 0x102da02d8 0x1025dc0f4
+#	0x1025d37cf	internal/poll.runtime_pollWait+0x9f		/opt/homebrew/Cellar/go/1.27.0/libexec/src/runtime/netpoll.go:351
+#	0x102642407	internal/poll.(*pollDesc).wait+0x27		/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_poll_runtime.go:84
+#	0x10264601f	internal/poll.(*pollDesc).waitRead+0x20f	/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_poll_runtime.go:89
+#	0x102646010	internal/poll.(*FD).Accept+0x200		/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_unix.go:618
+#	0x1027044a7	net.(*netFD).accept+0x27			/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/fd_unix.go:149
+#	0x102718b03	net.(*TCPListener).accept+0x23			/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/tcpsock_posix.go:159
+#	0x102717f7b	net.(*TCPListener).Accept+0x2b			/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/tcpsock.go:387
+#	0x1028813e7	net/http.(*Server).Serve+0x2a7			/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/http/server.go:3551
+#	0x102da02d7	main.start.func3+0x37				/Users/philip/go/src/github.com/pschlump/ultima/cmd/ultima-server/startup.go:243
+
+1 @ 0x1025d4598 0x102595aa0 0x1025d37d0 0x102642408 0x102646020 0x102646011 0x1027044a8 0x102718b04 0x102717f7c 0x102a0d8d0 0x102da03ec 0x1025dc0f4
+#	0x1025d37cf	internal/poll.runtime_pollWait+0x9f		/opt/homebrew/Cellar/go/1.27.0/libexec/src/runtime/netpoll.go:351
+#	0x102642407	internal/poll.(*pollDesc).wait+0x27		/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_poll_runtime.go:84
+#	0x10264601f	internal/poll.(*pollDesc).waitRead+0x20f	/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_poll_runtime.go:89
+#	0x102646010	internal/poll.(*FD).Accept+0x200		/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_unix.go:618
+#	0x1027044a7	net.(*netFD).accept+0x27			/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/fd_unix.go:149
+#	0x102718b03	net.(*TCPListener).accept+0x23			/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/tcpsock_posix.go:159
+#	0x102717f7b	net.(*TCPListener).Accept+0x2b			/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/tcpsock.go:387
+#	0x102a0d8cf	google.golang.org/grpc.(*Server).Serve+0x3af	/Users/philip/go/pkg/mod/google.golang.org/grpc@v1.83.2/server.go:934
+#	0x102da03eb	main.start.func2+0x2b				/Users/philip/go/src/github.com/pschlump/ultima/cmd/ultima-server/startup.go:208
+
+1 @ 0x1025d4598 0x102595aa0 0x1025d37d0 0x102642408 0x102646020 0x102646011 0x1027044a8 0x102718b04 0x102717f7c 0x102a69190 0x102a69104 0x102da049c 0x1025dc0f4
+#	0x1025d37cf	internal/poll.runtime_pollWait+0x9f				/opt/homebrew/Cellar/go/1.27.0/libexec/src/runtime/netpoll.go:351
+#	0x102642407	internal/poll.(*pollDesc).wait+0x27				/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_poll_runtime.go:84
+#	0x10264601f	internal/poll.(*pollDesc).waitRead+0x20f			/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_poll_runtime.go:89
+#	0x102646010	internal/poll.(*FD).Accept+0x200				/opt/homebrew/Cellar/go/1.27.0/libexec/src/internal/poll/fd_unix.go:618
+#	0x1027044a7	net.(*netFD).accept+0x27					/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/fd_unix.go:149
+#	0x102718b03	net.(*TCPListener).accept+0x23					/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/tcpsock_posix.go:159
+#	0x102717f7b	net.(*TCPListener).Accept+0x2b					/opt/homebrew/Cellar/go/1.27.0/libexec/src/net/tcpsock.go:387
+#	0x102a6918f	github.com/pschlump/ultima/lib/resp.serve+0x5f			/Users/philip/go/src/github.com/pschlump/ultima/lib/resp/redcon.go:379
+#	0x102a69103	github.com/pschlump/ultima/lib/resp.(*Server).Serve+0x173	/Users/philip/go/src/github.com/pschlump/ultima/lib/resp/redcon.go:344
+#	0x102da049b	main.start.func1+0x2b						/Users/philip/go/src/github.com/pschlump/ultima/cmd/ultima-server/startup.go:200
+
+1 @ 0x1025d4598 0x1025ae998 0x1026d41b4 0x1025dc0f4
+#	0x1026d41b3	os/signal.NotifyContext.func1+0x73	/opt/homebrew/Cellar/go/1.27.0/libexec/src/os/signal/signal.go:304
+
+1 @ 0x1025d4598 0x1025ae998 0x102d97a00 0x1025dc0f4
+#	0x102d979ff	github.com/pschlump/ultima/lib/persist.(*Manager).tick+0xbf	/Users/philip/go/src/github.com/pschlump/ultima/lib/persist/manager.go:368
+
+1 @ 0x1025d7680 0x102c3c898 0x102c3c3c4 0x102d9cb68 0x102a69a50 0x102a69ba5 0x1025dc0f4
+#	0x102c3c897	github.com/pschlump/ultima/lib/commands.(*Engine).execSegment+0x2e7	/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/burst.go:120
+#	0x102c3c3c3	github.com/pschlump/ultima/lib/commands.(*Engine).ExecuteBurst+0x403	/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/burst.go:90
+#	0x102d9cb67	github.com/pschlump/ultima/lib/respserver.New.func2+0x107		/Users/philip/go/src/github.com/pschlump/ultima/lib/respserver/respserver.go:151
+#	0x102a69a4f	github.com/pschlump/ultima/lib/resp.handle.func2+0x10f			/Users/philip/go/src/github.com/pschlump/ultima/lib/resp/redcon.go:464
+#	0x102a69ba4	github.com/pschlump/ultima/lib/resp.handle+0x264			/Users/philip/go/src/github.com/pschlump/ultima/lib/resp/redcon.go:477
+
+1 @ 0x1025dc0f4
+
+1 @ 0x102a87964 0x102a8aaa8 0x102a8a9ed 0x102a84d48 0x102c84460 0x102c3f184 0x102c5d2b4 0x102c40604 0x102c7782c 0x102a84900 0x1025dc0f4
+#	0x102a87963	github.com/pschlump/ultima/lib/shard.(*Engine).newKeyspace.func1+0x63		/Users/philip/go/src/github.com/pschlump/ultima/lib/shard/shard.go:241
+#	0x102a8aaa7	github.com/pschlump/pluto/sharded_hash_ts.(*stripeTab[...]).find+0x1a7		/Users/philip/go/pkg/mod/github.com/pschlump/pluto@v0.1.5/sharded_hash_ts/sharded_hash.go:186
+#	0x102a8a9ec	github.com/pschlump/pluto/sharded_hash_ts.(*ShardedHash[...]).Search+0xec	/Users/philip/go/pkg/mod/github.com/pschlump/pluto@v0.1.5/sharded_hash_ts/sharded_hash.go:422
+#	0x102a84d47	github.com/pschlump/ultima/lib/shard.(*Shard).Lookup+0x57			/Users/philip/go/src/github.com/pschlump/ultima/lib/shard/shard.go:780
+#	0x102c8445f	github.com/pschlump/ultima/lib/commands.cmdSet.func1+0x5f			/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/strings.go:116
+#	0x102c3f183	github.com/pschlump/ultima/lib/commands.(*Engine).do+0x123			/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/engine.go:382
+#	0x102c5d2b3	github.com/pschlump/ultima/lib/commands.cmdSet+0x333				/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/strings.go:115
+#	0x102c40603	github.com/pschlump/ultima/lib/commands.(*Engine).Execute+0x1273		/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/engine.go:545
+#	0x102c7782b	github.com/pschlump/ultima/lib/commands.(*Engine).execSegment.func1+0x12b	/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/burst.go:133
+#	0x102a848ff	github.com/pschlump/ultima/lib/shard.(*Shard).run+0xff				/Users/philip/go/src/github.com/pschlump/ultima/lib/shard/shard.go:695
+
+1 @ 0x102a94c44 0x102a8989c 0x102a8987d 0x102a948a4 0x102a948a9 0x102a939dc 0x102a92b18 0x102a85048 0x102a855f4 0x102c84660 0x102c3f184 0x102c5d2b4 0x102c40604 0x102c7782c 0x102a84900 0x1025dc0f4
+#	0x102a94c43	hash/maphash.comparableHash[...]+0x63						/opt/homebrew/Cellar/go/1.27.0/libexec/src/hash/maphash/maphash.go:350
+#	0x102a8989b	hash/maphash.Comparable[...]+0x3b						/opt/homebrew/Cellar/go/1.27.0/libexec/src/hash/maphash/maphash.go:302
+#	0x102a8987c	github.com/pschlump/pluto/lfu.NewLfuWithClock[...].func2+0x1c			/Users/philip/go/pkg/mod/github.com/pschlump/pluto@v0.1.5/lfu/lfu.go:111
+#	0x102a948a3	github.com/pschlump/pluto/hash_grow.(*HashTab[...]).hashOf+0x63			/Users/philip/go/pkg/mod/github.com/pschlump/pluto@v0.1.5/hash_grow/hash_tab.go:182
+#	0x102a948a8	github.com/pschlump/pluto/hash_grow.(*HashTab[...]).Insert+0x68			/Users/philip/go/pkg/mod/github.com/pschlump/pluto@v0.1.5/hash_grow/hash_tab.go:203
+#	0x102a939db	github.com/pschlump/pluto/lfu.(*Lfu[...]).Touch+0x12b				/Users/philip/go/pkg/mod/github.com/pschlump/pluto@v0.1.5/lfu/lfu.go:158
+#	0x102a92b17	github.com/pschlump/pluto/lfu_ts.(*Lfu[...]).Touch+0x97				/Users/philip/go/pkg/mod/github.com/pschlump/pluto@v0.1.5/lfu_ts/lfu.go:160
+#	0x102a85047	github.com/pschlump/ultima/lib/shard.(*Shard).trackAccess+0x67			/Users/philip/go/src/github.com/pschlump/ultima/lib/shard/shard.go:814
+#	0x102a855f3	github.com/pschlump/ultima/lib/shard.(*Shard).Store+0x253			/Users/philip/go/src/github.com/pschlump/ultima/lib/shard/shard.go:875
+#	0x102c8465f	github.com/pschlump/ultima/lib/commands.cmdSet.func1+0x25f			/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/strings.go:141
+#	0x102c3f183	github.com/pschlump/ultima/lib/commands.(*Engine).do+0x123			/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/engine.go:382
+#	0x102c5d2b3	github.com/pschlump/ultima/lib/commands.cmdSet+0x333				/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/strings.go:115
+#	0x102c40603	github.com/pschlump/ultima/lib/commands.(*Engine).Execute+0x1273		/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/engine.go:545
+#	0x102c7782b	github.com/pschlump/ultima/lib/commands.(*Engine).execSegment.func1+0x12b	/Users/philip/go/src/github.com/pschlump/ultima/lib/commands/burst.go:133
+#	0x102a848ff	github.com/pschlump/ultima/lib/shard.(*Shard).run+0xff				/Users/philip/go/src/github.com/pschlump/ultima/lib/shard/shard.go:695
+

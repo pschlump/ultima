@@ -10,7 +10,7 @@ gen_proto:
 gen_api:
 	sh bin/gen-api.sh
 
-build:
+build: build-cli
 	go build -ldflags "$(LDFLAGS)" -o ./ultima-server ./cmd/ultima-server
 
 # web builds the M6d management UI (§10.2) into web/dist, which the next

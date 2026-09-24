@@ -82,6 +82,11 @@ func (e *Engine) Persist() Persister { return e.persister }
 // the handler returns, on the connection goroutine; name is the lowercased
 // command name. EXEC is excluded here — cmdExec captures its queued
 // commands individually (they bypass Execute, tx.go).
+//
+// M9b: with appendonly off the AOF record is never written, so the
+// rewrite runs in check-only mode (build=false — no argv cloning, same
+// mutation decision) and LogCommand receives a nil argv, which the
+// Manager reduces to its save-rule dirty bump (lib/persist).
 func (e *Engine) capturePersist(cs *ConnState, def *CmdDef, name string, args [][]byte, v resp.Value) {
 	p := e.persister
 	if p == nil || name == "exec" {
@@ -90,8 +95,13 @@ func (e *Engine) capturePersist(cs *ConnState, def *CmdDef, name string, args []
 	if !slices.Contains(def.Flags, "write") || v.Kind == resp.KindError {
 		return
 	}
-	argv, keyHint, ok := rewriteForPersist(name, args, v)
+	build := p.AppendOnly()
+	argv, keyHint, ok := rewriteForPersist(name, args, v, build)
 	if !ok {
+		return
+	}
+	if !build {
+		p.LogCommand(0, cs.DB, nil) // dirty-count only; no AOF record
 		return
 	}
 	hint := -1
@@ -104,14 +114,19 @@ func (e *Engine) capturePersist(cs *ConnState, def *CmdDef, name string, args []
 // rewriteForPersist maps (command, reply) to the deterministic argv to
 // log. ok == false logs nothing (no mutation: timeouts, conditional
 // failures, read-only GETEX). keyHint is the key to route the record by
-// (nil = broadcast to all shard logs).
-func rewriteForPersist(name string, args [][]byte, v resp.Value) (argv [][]byte, keyHint []byte, ok bool) {
+// (nil = broadcast to all shard logs). With build == false (appendonly
+// off, M9b) only the ok decision is computed — argv and keyHint are nil
+// and no cloning happens.
+func rewriteForPersist(name string, args [][]byte, v resp.Value, build bool) (argv [][]byte, keyHint []byte, ok bool) {
 	switch name {
 	case "blpop", "brpop":
 		// Reply [key, value]; a timeout (null) logs nothing.
 		key, got := popReplyKey(v)
 		if !got {
 			return nil, nil, false
+		}
+		if !build {
+			return nil, nil, true
 		}
 		op := "LPOP"
 		if name == "brpop" {
@@ -124,6 +139,9 @@ func rewriteForPersist(name string, args [][]byte, v resp.Value) (argv [][]byte,
 		if !got {
 			return nil, nil, false
 		}
+		if !build {
+			return nil, nil, true
+		}
 		op := "ZPOPMIN"
 		if name == "bzpopmax" {
 			op = "ZPOPMAX"
@@ -135,6 +153,9 @@ func rewriteForPersist(name string, args [][]byte, v resp.Value) (argv [][]byte,
 		if !got {
 			return nil, nil, false
 		}
+		if !build {
+			return nil, nil, true
+		}
 		// BLMPOP timeout numkeys key… LEFT|RIGHT [COUNT n]
 		return mpopRewrite("LMPOP", args, key), key, true
 
@@ -143,36 +164,51 @@ func rewriteForPersist(name string, args [][]byte, v resp.Value) (argv [][]byte,
 		if !got {
 			return nil, nil, false
 		}
+		if !build {
+			return nil, nil, true
+		}
 		// BZMPOP timeout numkeys key… MIN|MAX [COUNT n]
 		return mpopRewrite("ZMPOP", args, key), key, true
 
 	case "blmove":
 		// BLMOVE src dst from to timeout → LMOVE src dst from to
+		if !build {
+			return nil, nil, true
+		}
 		argv := [][]byte{[]byte("LMOVE"), args[1], args[2], args[3], args[4]}
 		return argv, args[1], true
 
 	case "brpoplpush":
 		// BRPOPLPUSH src dst timeout → RPOPLPUSH src dst
+		if !build {
+			return nil, nil, true
+		}
 		return [][]byte{[]byte("RPOPLPUSH"), args[1], args[2]}, args[1], true
 
 	case "spop":
 		// SPOP is random: log the popped members as SREM.
-		var members [][]byte
 		switch v.Kind {
 		case resp.KindBlobString:
-			members = [][]byte{v.Blob}
+			if !build {
+				return nil, nil, true
+			}
+			return [][]byte{[]byte("SREM"), args[1], v.Blob}, args[1], true
 		case resp.KindSet, resp.KindArray:
+			if len(v.Arr) == 0 {
+				return nil, nil, false
+			}
+			if !build {
+				return nil, nil, true
+			}
+			members := make([][]byte, 0, len(v.Arr))
 			for _, m := range v.Arr {
 				members = append(members, m.Blob)
 			}
-			if len(members) == 0 {
-				return nil, nil, false
-			}
+			argv := append([][]byte{[]byte("SREM"), args[1]}, members...)
+			return argv, args[1], true
 		default:
 			return nil, nil, false
 		}
-		argv := append([][]byte{[]byte("SREM"), args[1]}, members...)
-		return argv, args[1], true
 
 	case "expire", "pexpire", "expireat", "pexpireat":
 		// Only an applied expire mutates (reply 1); reply 0 (missing key,
@@ -183,6 +219,9 @@ func rewriteForPersist(name string, args [][]byte, v resp.Value) (argv [][]byte,
 		n, okN := parseIntStrict(args[2])
 		if !okN {
 			return nil, nil, false
+		}
+		if !build {
+			return nil, nil, true
 		}
 		abs := expireAbsMs(name, n)
 		argv := [][]byte{[]byte("PEXPIREAT"), args[1], []byte(strconv.FormatInt(abs, 10))}
@@ -197,6 +236,9 @@ func rewriteForPersist(name string, args [][]byte, v resp.Value) (argv [][]byte,
 		}
 		opt := strings.ToLower(string(args[2]))
 		if opt == "persist" {
+			if !build {
+				return nil, nil, true
+			}
 			return [][]byte{[]byte("PERSIST"), args[1]}, args[1], true
 		}
 		if len(args) < 4 {
@@ -206,6 +248,14 @@ func rewriteForPersist(name string, args [][]byte, v resp.Value) (argv [][]byte,
 		if !okN {
 			return nil, nil, false
 		}
+		switch opt {
+		case "ex", "px", "exat", "pxat":
+		default:
+			return nil, nil, false
+		}
+		if !build {
+			return nil, nil, true
+		}
 		var abs int64
 		switch opt {
 		case "ex":
@@ -214,16 +264,17 @@ func rewriteForPersist(name string, args [][]byte, v resp.Value) (argv [][]byte,
 			abs = expireAbsMs("pexpire", n)
 		case "exat":
 			abs = expireAbsMs("expireat", n)
-		case "pxat":
+		default: // pxat
 			abs = n
-		default:
-			return nil, nil, false
 		}
 		return [][]byte{[]byte("PEXPIREAT"), args[1], []byte(strconv.FormatInt(abs, 10))}, args[1], true
 
 	case "set":
 		// Relative expire options become absolute PXAT; every other
 		// option (NX/XX/GET/KEEPTTL) is deterministic and stays verbatim.
+		if !build {
+			return nil, nil, true
+		}
 		argv := cloneArgs(args)
 		for i := 3; i+1 < len(argv); i++ {
 			var rel string
@@ -248,6 +299,9 @@ func rewriteForPersist(name string, args [][]byte, v resp.Value) (argv [][]byte,
 	}
 	// Verbatim: every other write command is deterministic (DEL, INCR,
 	// HSET, LPUSH/RPUSH, ZADD, SINTERSTORE, FLUSHDB/FLUSHALL, …).
+	if !build {
+		return nil, nil, true
+	}
 	argv = cloneArgs(args)
 	if def := table[name]; def != nil && def.FirstKey > 0 && len(args) > def.FirstKey {
 		return argv, args[def.FirstKey], true

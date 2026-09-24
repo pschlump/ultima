@@ -336,12 +336,34 @@ func (e *Engine) DoShard(i int, fn func(s *Shard)) {
 // DoTok is DoShard with an explicit pause token: tok == 0 is exactly
 // DoShard, while a token from PauseAll lets the task run inside a parked
 // shard. Callers with a nonzero tok must hold that pause.
+//
+// The done channel is pooled (M9b): one buffered allocation is reused
+// across handoffs, and the shard goroutine's completion SEND never blocks
+// (run/park send rather than close, so a returned channel is reusable).
 func (e *Engine) DoTok(tok uint64, i int, fn func(s *Shard)) {
-	s := e.shard[i]
-	done := make(chan struct{})
-	s.queue <- task{fn: fn, done: done, tok: tok}
+	done := e.DoTokAsync(tok, i, fn)
 	<-done
+	donePool.Put(done)
 }
+
+// DoTokAsync is DoTok without the wait: it submits the task and returns
+// its pooled completion channel. The caller must receive from the channel
+// exactly once (task finished) and then recycle it with PutDone. Burst
+// coalescing (M9b) uses it to fan a pipelined burst out to several shards
+// without a wrapper goroutine per shard.
+func (e *Engine) DoTokAsync(tok uint64, i int, fn func(s *Shard)) chan struct{} {
+	done := donePool.Get().(chan struct{})
+	e.shard[i].queue <- task{fn: fn, done: done, tok: tok}
+	return done
+}
+
+// PutDone recycles a completion channel returned by DoTokAsync.
+func PutDone(done chan struct{}) { donePool.Put(done) }
+
+// donePool recycles the buffered completion channels DoTok hands to shard
+// tasks (M9b). Capacity 1 lets the shard goroutine signal without waiting
+// for the submitter to be scheduled.
+var donePool = sync.Pool{New: func() any { return make(chan struct{}, 1) }}
 
 // DoMulti runs fn once per shard over the keys hashing to it (§4.2 fast
 // path): same-shard keys execute as one task; cross-shard runs as joined
@@ -671,7 +693,7 @@ func (s *Shard) run() {
 				s.park(t.tok)
 			} else {
 				t.fn(s)
-				close(t.done)
+				t.done <- struct{}{} // send, not close: DoTok pools channels (M9b)
 				s.maybeEvict()
 			}
 		case <-timer.C:
@@ -719,7 +741,7 @@ func (s *Shard) park(tok uint64) {
 	drain := func() {
 		for _, st := range stash {
 			st.fn(s)
-			close(st.done)
+			st.done <- struct{}{} // send, not close: DoTok pools channels (M9b)
 			s.maybeEvict()
 		}
 	}
@@ -732,7 +754,7 @@ func (s *Shard) park(tok uint64) {
 			}
 			if t.tok == tok {
 				t.fn(s)
-				close(t.done)
+				t.done <- struct{}{} // send, not close: DoTok pools channels (M9b)
 				s.maybeEvict()
 			} else {
 				stash = append(stash, t)

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # bench.sh — M1 benchmark sweep: Ultima vs local redis-server, same
 # machine (design doc §14.2 make bench, §14.3 #5). Writes the report to
-# docs/benchmarks/M1-<date>.md, then chains into bin/bench-pubsub.sh for
-# the M3 pub/sub benchmark (skip with BENCH_PUBSUB=0) and bin/bench-m5.sh
-# for the M5 maxmemory soak (skip with BENCH_M5=0).
+# docs/benchmarks/M1-<date>.md, then chains bin/bench-pubsub.sh (M3
+# pub/sub, skip BENCH_PUBSUB=0), bin/bench-m5.sh (M5 maxmemory soak, skip
+# BENCH_M5=0), bin/bench-m8.sh (M8 Lua scripting, skip BENCH_M8=0) and
+# bin/bench-m9.sh (M9 target-workload matrix, skip BENCH_M9=0).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -137,4 +138,10 @@ fi
 if [[ "${BENCH_M8:-1}" != "0" ]]; then
 	echo "--- M8 Lua scripting section ---"
 	sh bin/bench-m8.sh
+fi
+# M9 target-workload matrix (bin/bench-m9.sh, median-of-reps + payload
+# sweep + pprof capture); skip with BENCH_M9=0.
+if [[ "${BENCH_M9:-1}" != "0" ]]; then
+	echo "--- M9 target-workload matrix section ---"
+	sh bin/bench-m9.sh
 fi

@@ -233,7 +233,7 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 	}
 
 	s.httpSrv = &http.Server{
-		Handler:           newRouter(logger, eng, s.persist, authSvc, s.wssess, metricsAllow, originAllow),
+		Handler:           newRouter(logger, eng, s.persist, authSvc, s.wssess, metricsAllow, originAllow, cfg.Server.PprofEnabled),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	// One http.Server over every bound listener; Shutdown(ctx) closes them

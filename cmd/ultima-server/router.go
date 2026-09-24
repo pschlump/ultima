@@ -26,10 +26,16 @@ import (
 // auth service (nil when auth.enabled is false): it gates /api/v1/*
 // behind Bearer tokens (§10.1) and the WS upgrade behind an access token
 // (§9.3). reg is the M6b resumable-session registry (§9.4). metricsAllow
-// is the parsed server.metrics_allow list.
-func newRouter(logger *slog.Logger, eng *commands.Engine, p commands.Persister, authSvc *auth.Service, reg *wssession.Registry, metricsAllow []*net.IPNet, originAllow []string) http.Handler {
+// is the parsed server.metrics_allow list. pprofEnabled (M9a,
+// server.pprof_enabled) mounts net/http/pprof under /debug/pprof/, guarded
+// by metricsAllow plus Bearer auth when authSvc is non-nil.
+func newRouter(logger *slog.Logger, eng *commands.Engine, p commands.Persister, authSvc *auth.Service, reg *wssession.Registry, metricsAllow []*net.IPNet, originAllow []string, pprofEnabled bool) http.Handler {
 	r := chi.NewRouter()
-	httpapi.NewServer(eng, p, authSvc, logger, metricsAllow).Register(r)
+	apiSrv := httpapi.NewServer(eng, p, authSvc, logger, metricsAllow)
+	apiSrv.Register(r)
+	if pprofEnabled {
+		apiSrv.RegisterPprof(r)
+	}
 	r.Get("/ws/v1", wssrv.Handler(eng, authSvc, reg, logger, originAllow))
 	// M6d web UI (§10.2): the embedded SPA catch-all comes last; chi's
 	// exact/static routes above always win over the wildcard, and the

@@ -70,6 +70,13 @@ Request flow: each front-end parses its wire format, calls
   all data-mutating work runs inside the owning shard's goroutine — no
   caller-side locks on the hot path. `DoMulti` fan-out closures run
   concurrently — shared writes must be synchronized or slot-indexed.
+  Pipelined RESP bursts are coalesced (M9b): `commands.Engine.ExecuteBurst`
+  (`lib/commands/burst.go`) groups whitelisted single-key segments into
+  per-shard tasks via `shard.DoTokAsync` (pooled completion channels) and
+  `do()` runs inline through a per-shard `ConnState.inls` slot; coalescing
+  is disabled with maxmemory configured (EvictNow self-deadlock) and in
+  MULTI. Extend `burstInlineable` only with handlers verified to use
+  `e.do` exclusively (no doMulti/PauseAll/blocking/ConnState mutation).
 - **Cross-shard atomicity**: `shard.Engine.PauseAll` parks every shard
   goroutine; only token-carrying tasks run. EXEC and EVAL take it (S3);
   fan-out tasks issued under a pause must carry the caller's token
@@ -128,6 +135,7 @@ lib/commands/        front-end-agnostic command engine; table.go is the registry
                      (def(name, arity, flags, first, last, step, group, handler));
                      coll.go shared parsing helpers; tx.go, pubsub.go, block.go,
                      notify.go (keyspace notifications), aof.go (capture/rewrite),
+                     burst.go (M9b pipelined-burst coalescing),
                      persist.go (SAVE family), monitor.go, eval.go + script.go (M8)
 lib/envelope/        protobuf Command → engine argv, resp.Value ↔ protobuf Value (D3/D15)
 lib/grpcsrv/         gRPC front-end: Exec bidi stream, ExecBatch, ExecGeneric, Ping,
@@ -140,6 +148,8 @@ lib/handler/         shared HTTP middleware: RequestLogger (slog) + statusRecord
 lib/httpapi/         HTTP management API (§10.1, D7/D11) implementing gen/httpapi;
                      jsonbody.go (decode → SetDefaults → validator/v10), metrics.go
                      (dedicated prometheus.Registry + metrics_allow IP guard),
+                     pprof.go (M9a /debug/pprof/*, mounted by server.pprof_enabled,
+                     metrics_allow + JWT-guarded),
                      swagger.go (embedded openapi.yaml + Swagger UI)
 lib/auth/            auth core (§9, D17/D20): Ed25519 JWTs, bcrypt account store with
                      refresh-token rotation/theft detection, TOTP, middleware +
@@ -193,11 +203,15 @@ All via the Makefile (default goal is `build`):
   `lib/httpapi/openapi.yaml`).
 - `make bench` — `bin/bench.sh`: Ultima vs local redis-server, then
   chains `bench-pubsub.sh` (`BENCH_PUBSUB=0` skips), `bench-m5.sh`
-  (`BENCH_M5=0` skips), `bench-m8.sh`. Reports land in
-  `docs/benchmarks/<M>-<date>.md`. bench-m8.sh knobs: `BENCH_M8_REQUESTS`,
-  `BENCH_M8_UNTIL=HH:MM` (time-boxed soak), `BENCH_M8_POOL_SIZE` (VM-pool
-  A/B), battery gate via `../battery-check` (pauses below 50%, resumes at
-  60%).
+  (`BENCH_M5=0` skips), `bench-m8.sh`, `bench-m9.sh` (`BENCH_M9=0` skips).
+  Reports land in `docs/benchmarks/<M>-<date>.md`. bench-m8.sh knobs:
+  `BENCH_M8_REQUESTS`, `BENCH_M8_UNTIL=HH:MM` (time-boxed soak),
+  `BENCH_M8_POOL_SIZE` (VM-pool A/B), battery gate via `../battery-check`
+  (pauses below 50%, resumes at 60%). bench-m9.sh (M9a harness) knobs:
+  `BENCH_REPS` (median-of-N, default 3), `BENCH_PAYLOADS`, `BENCH_MEMTIER=0`,
+  `BENCH_PROFILE=0`, `BENCH_M9_TAG`; captures pprof snapshots into
+  `docs/benchmarks/profiles/` via the `server.pprof_enabled`
+  `/debug/pprof/` endpoints.
 - `make tidy`, `make clean`.
 
 Configuration: JSON file (`ultima.cfg.json` by default). Defaults come

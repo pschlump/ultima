@@ -817,13 +817,15 @@ type Reader struct {
 	start int
 	end   int
 	cmds  []Command
+	marks []int // fork: scratch for the '*' parse loop (M9b), avoids a per-command alloc
 }
 
 // NewReader returns a command reader which will read RESP or telnet commands.
 func NewReader(rd io.Reader) *Reader {
 	return &Reader{
-		rd:  bufio.NewReader(rd),
-		buf: make([]byte, 4096),
+		rd:    bufio.NewReader(rd),
+		buf:   make([]byte, 4096),
+		marks: make([]int, 0, 32),
 	}
 }
 
@@ -937,7 +939,7 @@ func (rd *Reader) readCommands(leftover *int) ([]Command, error) {
 			}
 		case '*':
 			// resp formatted command
-			marks := make([]int, 0, 16)
+			marks := rd.marks[:0] // fork: per-Reader scratch (M9b)
 		outer2:
 			for i := 1; i < len(b); i++ {
 				if b[i] == '\n' {
@@ -984,6 +986,7 @@ func (rd *Reader) readCommands(leftover *int) ([]Command, error) {
 						}
 					}
 					if len(marks) == count*2 {
+						rd.marks = marks // fork: retain grown scratch (M9b)
 						var cmd Command
 						if rd.rd != nil {
 							// make a raw copy of the entire command when

@@ -59,6 +59,21 @@ type ConnState struct {
 	// executes a transaction under EXEC (§4.2); 0 outside EXEC.
 	tok uint64
 
+	// inls implements pipelined-burst coalescing (M9b, ExecuteBurst): a
+	// lazily allocated per-shard slot table. While a burst group task runs
+	// on shard i's goroutine it holds inls[i], and do() for a key on shard
+	// i runs fn directly instead of a DoTok round trip (which would
+	// self-deadlock). Concurrent group tasks of one connection touch
+	// distinct slots, so the table needs no synchronization.
+	inls []*shard.Shard
+
+	// Burst scratch (M9b): reused across ExecuteBurst's segments so the
+	// fan-out doesn't allocate per burst. Single-connection use; group
+	// tasks write only their own out positions.
+	burstGroups map[int][]int
+	burstOut    []resp.Value
+	burstDones  []chan struct{}
+
 	// inExec marks the execution phase of EXEC; blocking commands (M3
 	// part 5) consult it to take their non-blocking fast path.
 	inExec bool
@@ -351,12 +366,24 @@ func (cs *ConnState) DeliverFunc() func(resp.Value) { return cs.deliver }
 // connection's transaction pause token (0 outside EXEC, §4.2). All
 // command handlers submit per-key work through do/doMulti so EXEC can
 // run them inside the paused engine.
+//
+// M9b: when a burst group task already runs on the key's shard goroutine
+// (cs.inls slot set by ExecuteBurst), fn executes inline — the DoTok round
+// trip would be a self-deadlock. A key routing to a different shard (never
+// for burst-whitelisted commands) falls back to a normal handoff.
 func (e *Engine) do(cs *ConnState, key []byte, fn func(s *shard.Shard)) {
 	if cs.trackPersist {
 		e.persistShardTasks.Add(1)
 		defer e.persistShardTasks.Add(-1)
 	}
-	e.Shards.DoTok(cs.tok, e.Shards.ShardIndex(key), fn)
+	idx := e.Shards.ShardIndex(key)
+	if inls := cs.inls; inls != nil {
+		if s := inls[idx]; s != nil {
+			fn(s)
+			return
+		}
+	}
+	e.Shards.DoTok(cs.tok, idx, fn)
 }
 
 // doMulti is the multi-key form of do (see shard.Engine.DoMultiTok).

@@ -153,7 +153,12 @@ func (m *Manager) LogCommand(shardHint, db int, argv [][]byte) {
 	m.aofMu.Lock()
 	aof := m.aof
 	m.aofMu.Unlock()
-	if aof == nil {
+	// aof == nil: appendonly off — the dirty bump above is the whole
+	// effect (M9b check-only capture passes a nil argv in this state).
+	// The argv guard also covers the CONFIG SET appendonly race: a
+	// check-only capture that started before the AOF opened must not
+	// append a recordless frame.
+	if aof == nil || len(argv) == 0 {
 		return
 	}
 	var err error
