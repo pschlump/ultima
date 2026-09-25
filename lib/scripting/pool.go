@@ -35,7 +35,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pschlump/gopher-lua/host"
+	"github.com/yuin/gopher-lua/host"
 )
 
 // poolEntry is one pooled VM: bound to entry.sha on its first Run.

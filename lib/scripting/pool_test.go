@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pschlump/gopher-lua/host"
+	"github.com/yuin/gopher-lua/host"
 )
 
 func newPoolManager(t *testing.T, cfg Config) *Manager {

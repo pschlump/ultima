@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/pschlump/gopher-lua/host"
+	"github.com/yuin/gopher-lua/host"
 	"github.com/pschlump/ultima/lib/resp"
 )
 

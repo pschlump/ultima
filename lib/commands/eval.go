@@ -15,7 +15,7 @@ package commands
 import (
 	"context"
 
-	"github.com/pschlump/gopher-lua/host"
+	"github.com/yuin/gopher-lua/host"
 	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/scripting"
 )
