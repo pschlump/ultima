@@ -1,7 +1,8 @@
 // ultima-cli is the RESP operator CLI (design doc §6.4): the redis-cli
 // analogue against the RESP surface. One-shot mode runs the positional
-// args as one command; with no args it is a line-oriented REPL (no
-// readline dependency). SUBSCRIBE/PSUBSCRIBE/MONITOR enter streaming
+// args as one command; with no args it is a REPL — readline-based with
+// vi/emacs editing modes when stdin is a terminal, line-oriented
+// otherwise. SUBSCRIBE/PSUBSCRIBE/MONITOR enter streaming
 // mode, printing pushes until Ctrl-C.
 //
 //	ultima-cli [-h host] [-p port] [-a password] [-n db] [-3] [command [arg ...]]
@@ -107,11 +108,10 @@ func run(argv []string) int {
 	if len(args) > 0 {
 		return r.OneShot(strings.Join(args, " "))
 	}
-	prompt := ""
 	if isTerminal() {
-		prompt = fmt.Sprintf("ultima %s:%s> ", host, port)
+		return r.REPLReadline(fmt.Sprintf("ultima %s:%s> ", host, port))
 	}
-	return r.REPL(os.Stdin, prompt)
+	return r.REPL(os.Stdin, "")
 }
 
 // streamRESP runs SUBSCRIBE/PSUBSCRIBE/MONITOR and prints every frame

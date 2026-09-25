@@ -62,8 +62,6 @@ github.com/prometheus/common v0.70.1 h1:1HvjP4D5oL3t8RsPlwxA9onvvStjtIHYE5XuuwOi
 github.com/prometheus/common v0.70.1/go.mod h1:VdFUQDMZK3VLkurFUVhia6uys/0suUp86TJz5qbJRhc=
 github.com/prometheus/procfs v0.21.1 h1:GljZCt+zSTS+NZq88cyQ1LjZ+RCHp3uVuabBWA5+OJI=
 github.com/prometheus/procfs v0.21.1/go.mod h1:aB55Cww9pdSJVHk0hUf0inxWyyjPogFIjmHKYgMKmtY=
-github.com/pschlump/gopher-lua v0.0.6 h1:Kvz/Ad0RYSnZH60NWaf/fpk5h+CuVI7WqKmr88P7fhg=
-github.com/pschlump/gopher-lua v0.0.6/go.mod h1:s/txDf1BajbO3jVgV21AC4Ul1KWVlytHA4HbQt7PHu8=
 github.com/pschlump/htotp v1.1.2 h1:xWIqe4Q/8GZxwwSwzu0g5A7Enrm7DkZf68Ozv4Q2vdE=
 github.com/pschlump/htotp v1.1.2/go.mod h1:0T7Ax+5QwKPjpRZ7Xjli5MsOPd9I5z0ES8Vm8PmxJs0=
 github.com/pschlump/pluto v0.1.5 h1:BRi7tMjXttbu9txB7nTI9Xvtwr1wtjitsB7v2Q906z0=

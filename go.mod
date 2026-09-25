@@ -3,6 +3,7 @@ module github.com/pschlump/ultima
 go 1.27.0
 
 require (
+	github.com/ergochat/readline v0.1.3
 	github.com/flowchartsman/swaggerui v0.0.0-20221017034628-909ed4f3701b
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-playground/validator/v10 v10.30.4
@@ -46,3 +47,5 @@ require (
 // replace github.com/pschlump/htotp => ../htotp
 
 replace github.com/pschlump/gopher-lua => ../gopher-lua
+
+replace github.com/ergochat/readline => ./third_party/readline

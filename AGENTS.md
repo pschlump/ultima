@@ -114,10 +114,15 @@ compatibility version 7.2.7 (`commands.CompatVersion`).
 ```
 cmd/ultima-server/   main binary: main.go, startup.go (wiring), router.go (chi), version.go (build stamp)
 cmd/ultima-cli/      operator CLIs (§6.4) — RESP, WebSocket, gRPC; thin shells
-cmd/ultima-ws-cli/   over clients/go/ultima (one-shot + REPL, push streaming)
-cmd/ultima-grpc-cli/
+cmd/ultima-ws-cli/   over clients/go/ultima (one-shot + REPL, push streaming).
+cmd/ultima-grpc-cli/ Terminal REPLs use ergochat/readline: tab completion, the
+                     client-side `help` command, and vi/emacs modes via `\mode`
 clients/go/ultima/   Go client library (§11.1): RESP/gRPC/WS/REST behind one umbrella
-                     Client, typed helpers, §9.4 session recovery on WS, token manager
+                     Client, typed helpers, §9.4 session recovery on WS, token manager.
+                     Also the shared CLI REPL machinery: repl.go (scanner REPL),
+                     repl_readline.go (readline REPL), cmdhelp.go + generated
+                     cmdhelp_data.go (bin/gen-cli-help.py: table.go + Redis 7.2.7
+                     command JSON → help/completion data)
 clients/typescript/  @ultima/client (§11.2): framework-agnostic TS client (WS + REST +
                      auth); the web UI consumes it via a file: dep
 clients/javascript/  plain-JS ESM+CJS distribution of @ultima/client (§11.3)
@@ -171,8 +176,13 @@ tests/ts-roundtrip/  protobuf-es TS round-trip (bun; `bun install` first)
 tests/differential/  the parity gate: scripted diffs of replies incl. error strings
                      against a real redis-server
 tests/cli-matrix/    CLI command matrix (cases/*.txt) through redis-cli + the three CLIs
+third_party/readline/ vendored + patched fork of ergochat/readline v0.1.3 (go.mod
+                     `replace`); patch: bare ESC is delivered as its own keypress so
+                     vi-mode ESC+<key> works (upstream swallowed both bytes); kept
+                     close to upstream — excluded from lint
 bin/                 gen.sh, gen-api.sh, gen-build-stamp.sh, bench*.sh, gen-jwt-keys.sh,
-                     test-cli-matrix.sh
+                     gen-cli-help.py (regenerates clients/go/ultima/cmdhelp_data.go;
+                     needs a Redis 7.2.7 checkout via REDIS_SRC), test-cli-matrix.sh
 docs/                ULTIMA-DESIGN.md, implementation-history.md, pluto/ specs, benchmarks/
 note/                scratch/reference; gitignored, lint-excluded
 ```
@@ -181,6 +191,9 @@ Adding a new command: implement a handler in the appropriate
 `lib/commands/*.go` file, register it in `table.go`'s `init()`, and carry
 **Redis-exact semantics and error strings** (see `engine.go` helpers like
 `parseIntStrict`, `errUnknownCommand` for the byte-exact conventions).
+Then rerun `python3 bin/gen-cli-help.py` (needs `REDIS_SRC`, default
+`note/redis-7.2.7`) so the CLI `help`/completion data in
+`clients/go/ultima/cmdhelp_data.go` picks it up.
 
 ## Build and Test Commands
 
@@ -250,7 +263,7 @@ Running `go test ./...` also compiles `note/grpc-vs-text-benchmark` and
 - Standard Go; `gofmt`/`goimports` enforced via golangci-lint formatters.
 - Enabled linters: errcheck, govet, ineffassign, staticcheck, unused,
   misspell, revive.
-- Lint/format **exclusions**: `gen/`, `note/`, `docs/`, and `lib/resp/`
+- Lint/format **exclusions**: `gen/`, `note/`, `docs/`, `third_party/`, and `lib/resp/`
   (vendored redcon fork — keep it close to upstream; do not restyle it).
 - Package doc comments reference design-doc sections (`design doc §N.N`)
   and decision numbers (D1–D20); keep that convention, and update or add

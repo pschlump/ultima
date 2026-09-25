@@ -16,6 +16,7 @@ linters:
       - note/
       - docs/
       - lib/resp/ # vendored redcon fork: kept close to upstream
+      - third_party/ # vendored ergochat/readline fork: kept close to upstream
 
 formatters:
   enable:
@@ -27,6 +28,7 @@ formatters:
       - note/
       - docs/
       - lib/resp/
+      - third_party/
 
 run:
   timeout: 5m

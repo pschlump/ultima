@@ -72,11 +72,10 @@ func run() int {
 	if len(args) > 0 {
 		return r.OneShot(strings.Join(args, " "))
 	}
-	prompt := ""
 	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-		prompt = fmt.Sprintf("ultima-ws %s> ", *addr)
+		return r.REPLReadline(fmt.Sprintf("ultima-ws %s> ", *addr))
 	}
-	return r.REPL(os.Stdin, prompt)
+	return r.REPL(os.Stdin, "")
 }
 
 // streamWS runs SUBSCRIBE/PSUBSCRIBE (tracked by the client, so §9.4

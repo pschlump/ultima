@@ -67,11 +67,10 @@ func run() int {
 		}
 		return r.OneShot(strings.Join(args, " "))
 	}
-	prompt := ""
 	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-		prompt = fmt.Sprintf("ultima-grpc %s> ", *addr)
+		return r.REPLReadline(fmt.Sprintf("ultima-grpc %s> ", *addr))
 	}
-	return r.REPL(os.Stdin, prompt)
+	return r.REPL(os.Stdin, "")
 }
 
 // streamGRPC opens the Subscribe/Monitor server streams (§6.2) and prints

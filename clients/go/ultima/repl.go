@@ -41,6 +41,11 @@ func (r *Runner) OneShot(line string) int {
 	if len(args) == 0 {
 		return 0
 	}
+	if isHelpVerb(args[0]) {
+		// Client-side, like redis-cli; never reaches the server.
+		r.printHelp(args[1:])
+		return 0
+	}
 	if StreamingVerb(args) {
 		if err := r.Stream(args); err != nil && !errors.Is(err, errInterrupted) {
 			_, _ = fmt.Fprintln(r.ErrOut, err)
@@ -83,25 +88,39 @@ func (r *Runner) REPL(in io.Reader, prompt string) int {
 			_, _ = fmt.Fprintln(r.Out, err)
 			continue
 		}
-		if len(args) == 0 {
-			continue
-		}
-		if isQuit(args[0]) {
+		if r.runLine(args) {
 			return 0
 		}
-		if StreamingVerb(args) {
-			if err := r.Stream(args); err != nil && !errors.Is(err, errInterrupted) {
-				_, _ = fmt.Fprintln(r.ErrOut, err)
-			}
-			continue
-		}
-		v, err := r.Exec(args)
-		if err != nil {
-			_, _ = fmt.Fprintln(r.ErrOut, err)
-			continue
-		}
-		Fprint(r.Out, v)
 	}
+}
+
+// runLine executes one parsed REPL line; it reports quit/exit. Error
+// replies print inline (to Out) and transport errors to ErrOut — unlike
+// one-shot mode, neither ends the loop.
+func (r *Runner) runLine(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	if isHelpVerb(args[0]) {
+		r.printHelp(args[1:])
+		return false
+	}
+	if isQuit(args[0]) {
+		return true
+	}
+	if StreamingVerb(args) {
+		if err := r.Stream(args); err != nil && !errors.Is(err, errInterrupted) {
+			_, _ = fmt.Fprintln(r.ErrOut, err)
+		}
+		return false
+	}
+	v, err := r.Exec(args)
+	if err != nil {
+		_, _ = fmt.Fprintln(r.ErrOut, err)
+		return false
+	}
+	Fprint(r.Out, v)
+	return false
 }
 
 // errInterrupted marks a Stream return caused by the CLI's own Ctrl-C
