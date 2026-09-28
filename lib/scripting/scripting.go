@@ -28,8 +28,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/yuin/gopher-lua/host"
 	"github.com/pschlump/ultima/lib/resp"
+	"github.com/yuin/gopher-lua/host"
 )
 
 // ChunkName is the Lua chunk name scripts are compiled under. Redis

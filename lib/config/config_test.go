@@ -39,6 +39,12 @@ func TestFromFileAppliesDefaults(t *testing.T) {
 	if cfg.Server.PprofEnabled {
 		t.Error("pprof_enabled = true, want default false")
 	}
+	if cfg.Server.PubsubClientBufferMB != 32 {
+		t.Errorf("pubsub_client_buffer_mb = %d, want default 32", cfg.Server.PubsubClientBufferMB)
+	}
+	if cfg.Server.PubsubClientBufferBytes() != 32<<20 {
+		t.Errorf("PubsubClientBufferBytes = %d, want %d", cfg.Server.PubsubClientBufferBytes(), 32<<20)
+	}
 }
 
 func TestFromFileFileOverridesDefaults(t *testing.T) {
@@ -65,6 +71,22 @@ func TestFromFileFileOverridesDefaults(t *testing.T) {
 	// Untouched fields keep their defaults.
 	if cfg.Server.GrpcAddr != ":6380" {
 		t.Errorf("grpc_addr = %q, want default :6380", cfg.Server.GrpcAddr)
+	}
+	if cfg.Server.PubsubClientBufferMB != 32 {
+		t.Errorf("pubsub_client_buffer_mb = %d, want default 32", cfg.Server.PubsubClientBufferMB)
+	}
+}
+
+func TestFromFilePubsubClientBufferOverride(t *testing.T) {
+	var cfg Config
+	if err := FromFile(writeCfg(t, `{"server": {"pubsub_client_buffer_mb": 4}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.PubsubClientBufferMB != 4 {
+		t.Errorf("pubsub_client_buffer_mb = %d, want 4 from file", cfg.Server.PubsubClientBufferMB)
+	}
+	if cfg.Server.PubsubClientBufferBytes() != 4<<20 {
+		t.Errorf("PubsubClientBufferBytes = %d, want %d", cfg.Server.PubsubClientBufferBytes(), 4<<20)
 	}
 }
 

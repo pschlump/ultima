@@ -140,6 +140,12 @@ type Conn interface {
 	// connection's protocol version and flushes under the connection's
 	// write mutex, so pushes interleave safely with in-order replies.
 	PushValue(v Value) error
+	// PushValues writes a batch of out-of-band messages under one write
+	// mutex acquisition and one flush (fork: M9c) — see conn.PushValues.
+	PushValues(vs []Value) error
+	// CloseHard closes the underlying socket immediately without flushing
+	// (fork: M9c) — the slow-consumer teardown path; see conn.CloseHard.
+	CloseHard() error
 }
 
 // NewServer returns a new Redcon server configured on "tcp" network net.
@@ -497,6 +503,16 @@ func (c *conn) Close() error {
 	c.closed = true
 	return c.conn.Close()
 }
+
+// CloseHard closes the underlying socket immediately, without flushing
+// pending writes (fork: M9c). Slow-consumer teardown uses it: a graceful
+// Close flushes under the write mutex, which can block forever behind a
+// push writer that is itself blocked on a full client socket — a
+// publisher-goroutine deadlock (lib/respserver TestPushQueueSlowConsumer).
+func (c *conn) CloseHard() error {
+	c.closed = true
+	return c.conn.Close()
+}
 func (c *conn) Context() interface{}        { return c.ctx }
 func (c *conn) SetContext(v interface{})    { c.ctx = v }
 func (c *conn) SetReadBuffer(n int)         {}
@@ -548,6 +564,18 @@ func (c *conn) PushValue(v Value) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	c.wr.WriteValue(c.ProtocolVersion(), v)
+	return c.wr.Flush()
+}
+
+// PushValues renders and flushes a batch of out-of-band pushes under ONE
+// write-mutex acquisition (fork: M9c) — pub/sub fan-out drains its queue
+// in batches so N queued messages cost one flush/write syscall, not N.
+func (c *conn) PushValues(vs []Value) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	for _, v := range vs {
+		c.wr.WriteValue(c.ProtocolVersion(), v)
+	}
 	return c.wr.Flush()
 }
 
@@ -654,8 +682,11 @@ type Writer struct {
 // NewWriter creates a new RESP writer.
 func NewWriter(wr io.Writer) *Writer {
 	return &Writer{
-		w:    wr,
-		buff: bufio.NewWriter(wr),
+		w: wr,
+		// fork (M9c): 64KB buffer (upstream default is 4KB) — pub/sub
+		// fan-out flushes in batches and small writes cap both the
+		// server and the client's read loop on syscall rate.
+		buff: bufio.NewWriterSize(wr, 64<<10),
 	}
 }
 
@@ -988,14 +1019,22 @@ func (rd *Reader) readCommands(leftover *int) ([]Command, error) {
 					if len(marks) == count*2 {
 						rd.marks = marks // fork: retain grown scratch (M9b)
 						var cmd Command
-						if rd.rd != nil {
-							// make a raw copy of the entire command when
-							// there's a underlying reader.
-							cmd.Raw = append([]byte(nil), b[:i+1]...)
-						} else {
-							// just assign the slice
-							cmd.Raw = b[:i+1]
-						}
+						// fork (M9c): alias the read buffer instead of
+						// copying — ~100 B + one malloc per command was
+						// 42% of front-end allocation under pipelined load.
+						// Invariant: every command of one read batch is
+						// fully consumed before the next Read refills the
+						// buffer (the handle loop drains the batch first,
+						// incl. PeekPipeline/ReadPipeline remainders), so
+						// the aliased bytes are stable for a command's
+						// whole execution. Cross-batch retainers must
+						// clone — audited: MULTI queue (cloneArgs), WATCH
+						// and blocking waiters (string()), stored values
+						// (dupBytes), pub/sub channels (string()),
+						// PUBLISH payload (dupBytes in cmdPublish),
+						// MONITOR events (cloneArgs), AOF records
+						// (serialized synchronously in appendSeq).
+						cmd.Raw = b[:i+1]
 						cmd.Args = make([][]byte, len(marks)/2)
 						// slice up the raw command into the args based on
 						// the recorded marks.

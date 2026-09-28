@@ -7,8 +7,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/yuin/gopher-lua/host"
 	"github.com/pschlump/ultima/lib/resp"
+	"github.com/yuin/gopher-lua/host"
 )
 
 func TestNumToInt(t *testing.T) {

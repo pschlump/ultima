@@ -63,7 +63,7 @@ func m8RESP(t *testing.T, cfg scripting.Config) (string, *commands.Engine) {
 	t.Helper()
 	lis := listen(t, "127.0.0.1:0")
 	eng := m8Engine(t, cfg)
-	srv := respserver.New("127.0.0.1:0", eng)
+	srv := respserver.New("127.0.0.1:0", eng, 0)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return lis.Addr().String(), eng
@@ -89,7 +89,7 @@ func TestM8EvalGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := grpcsrv.New(eng, nil)
+	srv := grpcsrv.New(eng, nil, 0)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.GracefulStop)
 	t.Cleanup(func() { _ = lis.Close() })
@@ -126,7 +126,7 @@ func TestM8EvalWS(t *testing.T) {
 	reg := wssession.NewRegistry(eng, 0, 0, testLogger())
 	t.Cleanup(reg.Close)
 	r := chi.NewRouter()
-	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, testLogger(), nil))
+	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, testLogger(), nil, 0))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	c := wsDial(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws/v1")

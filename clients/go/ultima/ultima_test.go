@@ -63,13 +63,13 @@ func newTestEnv(t *testing.T, withAuth bool, wsWindow time.Duration) *testEnv {
 
 	// RESP surface.
 	respLis := listen(t)
-	respSrv := respserver.New(respLis.Addr().String(), eng)
+	respSrv := respserver.New(respLis.Addr().String(), eng, 0)
 	go func() { _ = respSrv.Serve(respLis) }()
 	t.Cleanup(func() { _ = respSrv.Close() })
 
 	// gRPC surface.
 	grpcLis := listen(t)
-	grpcSrv := grpcsrv.New(eng, svc)
+	grpcSrv := grpcsrv.New(eng, svc, 0)
 	go func() { _ = grpcSrv.Serve(grpcLis) }()
 	t.Cleanup(grpcSrv.GracefulStop)
 
@@ -78,7 +78,7 @@ func newTestEnv(t *testing.T, withAuth bool, wsWindow time.Duration) *testEnv {
 	httpapi.NewServer(eng, nil, svc, logger, nil).Register(r)
 	reg := wssession.NewRegistry(eng, wsWindow, 0, logger)
 	t.Cleanup(reg.Close)
-	r.Get("/ws/v1", wssrv.Handler(eng, svc, reg, logger, nil))
+	r.Get("/ws/v1", wssrv.Handler(eng, svc, reg, logger, nil, 0))
 	httpSrv := httptest.NewServer(r)
 	t.Cleanup(httpSrv.Close)
 

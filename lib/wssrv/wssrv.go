@@ -7,11 +7,13 @@
 // Pub/sub pushes (SUBSCRIBE via the generic envelope) are delivered as
 // unsolicited CommandResponse frames with seq 0 carrying a RESP3 push
 // value — the same slow-consumer rule as the RESP surface applies: the
-// per-connection outbound queue is bounded and a full queue closes the
-// connection. JWT auth at upgrade (§9.3) landed with M6a — when the auth
-// service is enabled the client presents its access token as the
-// `access_token` query parameter or as `Sec-WebSocket-Protocol: bearer,
-// <token>` (browsers cannot set arbitrary headers on a WebSocket).
+// per-connection outbound queue is byte-capped (lib/pushq, M9c,
+// server.pubsub_client_buffer_mb) and a queue pushed past its ceiling
+// closes the connection. JWT auth at upgrade (§9.3) landed with M6a —
+// when the auth service is enabled the client presents its access token
+// as the `access_token` query parameter or as `Sec-WebSocket-Protocol:
+// bearer, <token>` (browsers cannot set arbitrary headers on a
+// WebSocket).
 //
 // Resumable sessions (§9.4, decision D18) landed with M6b: the first
 // frame on a connection may be a handshake (empty Command for a fresh
@@ -40,14 +42,15 @@ import (
 	"github.com/pschlump/ultima/lib/auth"
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/envelope"
+	"github.com/pschlump/ultima/lib/pushq"
 	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/wssession"
 )
 
-// pushQueueCap bounds a connection's outbound frame queue (replies plus
-// pub/sub pushes); beyond it the client is a slow consumer and the
-// connection is closed, matching lib/respserver.
-const pushQueueCap = 4096
+// wsFrameOverhead is the flat per-frame cost added to the marshaled
+// protobuf length for queue byte accounting (the WebSocket frame header
+// and the wsFrame bookkeeping itself). Estimates are monotone, not exact.
+const wsFrameOverhead = 32
 
 // bearerSubprotocol is the WebSocket subprotocol name a client offers to
 // carry its access token: `Sec-WebSocket-Protocol: bearer, <token>`.
@@ -63,8 +66,10 @@ const bearerSubprotocol = "bearer"
 // comma-separated full origins or hosts, "*" for any): it applies only
 // when authSvc != nil — a missing Origin header (non-browser clients)
 // and same-host origins always pass. With auth disabled the endpoint
-// keeps its pre-M6 no-origin-policy posture.
-func Handler(eng *commands.Engine, authSvc *auth.Service, reg *wssession.Registry, logger *slog.Logger, originAllow []string) http.HandlerFunc {
+// keeps its pre-M6 no-origin-policy posture. pushBufBytes caps each
+// connection's outbound queue in bytes (M9c,
+// server.pubsub_client_buffer_mb); 0 resolves to the lib/pushq default.
+func Handler(eng *commands.Engine, authSvc *auth.Service, reg *wssession.Registry, logger *slog.Logger, originAllow []string, pushBufBytes int) http.HandlerFunc {
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			if authSvc == nil {
@@ -91,7 +96,7 @@ func Handler(eng *commands.Engine, authSvc *auth.Service, reg *wssession.Registr
 			logger.Warn("ws: upgrade failed", "err", err)
 			return
 		}
-		serve(eng, reg, conn, r.RemoteAddr, id)
+		serve(eng, reg, conn, r.RemoteAddr, id, pushBufBytes)
 	}
 }
 
@@ -150,11 +155,12 @@ type wsFrame struct {
 }
 
 // wsConn serializes all writes to the websocket through one writer
-// goroutine fed by a bounded queue; replies (from the read loop) and
-// broker pushes (from publisher goroutines) both enqueue here.
+// goroutine fed by a byte-capped queue (lib/pushq, M9c); replies (from
+// the read loop) and broker pushes (from publisher goroutines) both
+// enqueue here.
 type wsConn struct {
 	conn *websocket.Conn
-	send chan wsFrame
+	q    *pushq.Q[wsFrame]
 	done chan struct{}
 	once sync.Once
 	wg   sync.WaitGroup // the writer goroutine
@@ -174,10 +180,10 @@ func (ws *wsConn) setOnDrop(f func(seq uint64)) {
 	ws.dropMu.Unlock()
 }
 
-func serve(eng *commands.Engine, reg *wssession.Registry, conn *websocket.Conn, addr string, id auth.Identity) {
+func serve(eng *commands.Engine, reg *wssession.Registry, conn *websocket.Conn, addr string, id auth.Identity, pushBufBytes int) {
 	ws := &wsConn{
 		conn: conn,
-		send: make(chan wsFrame, pushQueueCap),
+		q:    pushq.New[wsFrame](pushBufBytes),
 		done: make(chan struct{}),
 	}
 	defer ws.close()
@@ -218,15 +224,14 @@ func serve(eng *commands.Engine, reg *wssession.Registry, conn *websocket.Conn, 
 		}
 		var lost []uint64
 		for {
-			select {
-			case fr := <-ws.send:
-				if !fr.isPush {
-					lost = append(lost, fr.seq)
-				}
-			default:
+			fr, ok := ws.q.TryDequeue()
+			if !ok {
 				sess.RecordAborted(lost...)
 				sess.Detach(ws)
 				return
+			}
+			if !fr.isPush {
+				lost = append(lost, fr.seq)
 			}
 		}
 	}()
@@ -358,9 +363,9 @@ func (ws *wsConn) sink() wssession.Sink {
 	}
 }
 
-// enqueue marshals r and queues the frame; a full queue marks the client a
-// slow consumer and tears the connection down. Reports whether the frame
-// was queued.
+// enqueue marshals r and queues the frame; a queue pushed past its byte
+// ceiling marks the client a slow consumer and tears the connection down.
+// Reports whether the frame was queued.
 func (ws *wsConn) enqueue(r *ultimav1.CommandResponse) bool {
 	return ws.enqueueFrame(replyFrame(r))
 }
@@ -372,7 +377,8 @@ func replyFrame(r *ultimav1.CommandResponse) wsFrame {
 	return wsFrame{resp: r, isPush: r.GetPushSeq() != 0}
 }
 
-// enqueueFrame queues fr; see enqueue.
+// enqueueFrame queues fr; see enqueue. The byte cost is the marshaled
+// frame length plus a flat per-frame overhead.
 func (ws *wsConn) enqueueFrame(fr wsFrame) bool {
 	b, err := proto.Marshal(fr.resp)
 	if err != nil {
@@ -380,36 +386,33 @@ func (ws *wsConn) enqueueFrame(fr wsFrame) bool {
 	}
 	fr.data = b
 	fr.seq = fr.resp.GetSeq()
-	select {
-	case ws.send <- fr:
-		return true
-	default:
+	if !ws.q.Enqueue(fr, len(b)+wsFrameOverhead) {
 		ws.close()
 		return false
 	}
+	return true
 }
 
 func (ws *wsConn) writer() {
 	defer ws.wg.Done()
 	for {
-		select {
-		case fr := <-ws.send:
-			if fr.flush != nil {
-				close(fr.flush)
-				continue
-			}
-			if err := ws.conn.WriteMessage(websocket.BinaryMessage, fr.data); err != nil {
-				if !fr.isPush {
-					ws.dropMu.Lock()
-					if ws.onDrop != nil {
-						ws.onDrop(fr.seq)
-					}
-					ws.dropMu.Unlock()
+		fr, ok := ws.q.Dequeue(ws.done)
+		if !ok {
+			return
+		}
+		if fr.flush != nil {
+			close(fr.flush)
+			continue
+		}
+		if err := ws.conn.WriteMessage(websocket.BinaryMessage, fr.data); err != nil {
+			if !fr.isPush {
+				ws.dropMu.Lock()
+				if ws.onDrop != nil {
+					ws.onDrop(fr.seq)
 				}
-				ws.close()
-				return
+				ws.dropMu.Unlock()
 			}
-		case <-ws.done:
+			ws.close()
 			return
 		}
 	}
@@ -418,21 +421,23 @@ func (ws *wsConn) writer() {
 func (ws *wsConn) close() {
 	ws.once.Do(func() {
 		close(ws.done)
+		ws.q.Close()
 		_ = ws.conn.Close()
 	})
 }
 
 // flushWait blocks until every frame queued so far has been written to the
 // wire (or the connection is already closing). The read loop calls it
-// before honoring QUIT so the OK reply is not lost to the teardown.
+// before honoring QUIT so the OK reply is not lost to the teardown. The
+// flush marker carries no byte cost, so a full-but-not-overflowed queue
+// cannot refuse it.
 func (ws *wsConn) flushWait() {
 	ch := make(chan struct{})
+	if !ws.q.Enqueue(wsFrame{flush: ch}, 0) {
+		return
+	}
 	select {
-	case ws.send <- wsFrame{flush: ch}:
-		select {
-		case <-ch:
-		case <-ws.done:
-		}
+	case <-ch:
 	case <-ws.done:
 	}
 }

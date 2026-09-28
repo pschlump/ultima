@@ -162,6 +162,23 @@ func (e *Engine) EvictNow(tok uint64) (stillOver bool) {
 // Call only from inside the shard goroutine.
 func (s *Shard) used() int64 { return s.usedTotal.Load() }
 
+// warmEvictTrackers seeds the LRU trackers with every live key on this
+// shard (see maybeEvict). O(keys); runs once per 0→N maxmemory
+// transition, inside the shard goroutine.
+func (s *Shard) warmEvictTrackers() {
+	for d := range s.eng.dbs {
+		tab := s.tab(d)
+		tab.StripeWalk(s.id, func(_ int, it item) bool {
+			k := tombKey{d, it.Key}
+			s.lruAll.Put(k, struct{}{})
+			if it.E.ExpireAtMs > 0 {
+				s.lruVol.Put(k, struct{}{})
+			}
+			return true
+		})
+	}
+}
+
 // maybeEvict evicts keys until the shard is back under its per-shard
 // quota (maxmemory / shardCount) or no victim is available. It runs
 // after every shard task (the run and park loops); with maxmemory unset
@@ -170,7 +187,18 @@ func (s *Shard) used() int64 { return s.usedTotal.Load() }
 func (s *Shard) maybeEvict() {
 	mm := s.eng.maxMemory.Load()
 	if mm <= 0 {
+		s.trackWarm = false // re-arm the warm-up for the next 0→N transition
 		return
+	}
+	if !s.trackWarm {
+		// maxmemory was (re)enabled after a period at 0, during which
+		// trackAccess fed the trackers nothing: seed the LRU trackers
+		// from the keyspace or allkeys-lru/volatile-lru would find no
+		// victims (the M9b oom_test failure). All keys seed equally
+		// recent — the cold-start state; the LFU counters need no seed
+		// (untracked reads as counter 0 = coldest, Redis's semantic).
+		s.warmEvictTrackers()
+		s.trackWarm = true
 	}
 	pol := EvictPolicy(s.eng.policy.Load())
 	if pol == PolicyNoEviction {

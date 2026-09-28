@@ -37,7 +37,8 @@ formats), D18 (§9.4 WS session recovery — CDC rides on it), D20 (auth).
 model (§4.1/§4.3). If profiling shows the 4× gate requires changing a settled
 decision, amend `docs/ULTIMA-DESIGN.md` §15 explicitly as part of that phase.
 
-**Status: M9a, M9b done (2026-09-23).** M9a: pprof under `/debug/pprof/`
+**Status: M9a, M9b done (2026-09-23); M9c done (2026-09-28).**
+M9a: pprof under `/debug/pprof/`
 (`server.pprof_enabled`, metrics_allow + JWT guarded; `lib/httpapi/pprof.go`),
 hardened harness `bin/bench-m9.sh`, baseline
 `docs/benchmarks/M9-baseline-2026-09-23.md`. M9b (round 1): pipelined-burst
@@ -47,6 +48,23 @@ maxmemory set or in MULTI), pooled DoTok completion channels, AOF capture
 check-only mode when appendonly is off, reader/execSegment scratch.
 Campaign report `docs/benchmarks/M9-campaign-2026-09-23.md`: fixed-key GET
 0.43×→0.88×, SET 0.44×→0.58×, random-key rows 1.05–1.37× vs Redis.
+M9c so far: harness knobs (BENCH_SHARDS/BENCH_GOMAXPROCS/BENCH_DRIVERS/
+BENCH_CONNS_SWEEP + battery gate + ephemeral-port backoff), caller-side
+`ShardStat.QueueDepth` (was always ≈0 by construction), mutex/block pprof
+under pprof_enabled, `trackAccess` skipped with maxmemory=0 (+ lazy LRU
+warm-up on 0→N; fixed-key SET +40% A/B), redcon per-command `cmd.Raw`
+copy eliminated (args alias the read buffer; audited retainers clone),
+burst-path tests (`lib/commands/burst_test.go`), byte-capped push queues
+(`lib/pushq`, config `server.pubsub_client_buffer_mb` default 32 MB, all
+three front-ends) + batched push flushes (`resp.Conn.PushValues`) +
+`CloseHard` slow-consumer teardown (pre-existing writeMu deadlock fix).
+Campaign log `docs/benchmarks/M9-campaign-2026-09-28.md`, gate report
+`docs/benchmarks/M9-gate-2026-09-28.md`: -c50→-c200 regression removed
+(flat curve to -c400), fixed-key GET 1.04×/0.91× (c50/c200), SET
+0.74×/0.76×, random-key 1.42–1.62×, pub/sub 0.40× with zero drops.
+**The 4× gate is not met** (best 1.62×) — reported per the honesty
+clause with profiles; the remaining gap is the settled dispatch model
+(§4.1/§4.3), changeable only via an explicit §15 amendment.
 
 ---
 

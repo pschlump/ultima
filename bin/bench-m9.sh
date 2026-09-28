@@ -11,6 +11,16 @@
 # Knobs: BENCH_REPS (3), BENCH_REQUESTS (300000), BENCH_PAYLOADS ("3 64
 # 1024"), BENCH_MEMTIER=0, BENCH_MEMTIER_SECS (15), BENCH_PROFILE=0,
 # BENCH_M9_TAG, BENCH_ULTIMA_PORT/BENCH_REDIS_PORT/BENCH_HTTP_PORT.
+# M9c knobs: BENCH_SHARDS (shard_count written into the bench config;
+# default 0 = 4×GOMAXPROCS rounded up to a power of two), BENCH_GOMAXPROCS
+# (env passthrough to ultima-server; default ncpu), BENCH_DRIVERS (1; N
+# parallel redis-benchmark processes per row, throughputs summed — breaks
+# the ~1-1.9M ops/s single-driver ceiling), BENCH_CONNS_SWEEP (1; 0 skips
+# the -c 100/-c 400 regression-curve rows).
+# Battery gate (ported from bench-m8.sh, same BENCH_M8_BATTERY_* knobs):
+# between rows the battery is checked with the sibling battery-check tool
+# — below BENCH_M8_BATTERY_LOW (50) the run pauses until the charge
+# recovers to BENCH_M8_BATTERY_HIGH (60). No tool or no battery = off.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -22,7 +32,54 @@ HPORT="${BENCH_HTTP_PORT:-7381}"
 REQUESTS="${BENCH_REQUESTS:-300000}"
 REPS="${BENCH_REPS:-3}"
 PAYLOADS="${BENCH_PAYLOADS:-3 64 1024}"
+DRIVERS="${BENCH_DRIVERS:-1}"
 TAG="${BENCH_M9_TAG:-baseline}"
+
+# Battery gate setup (see header comment; identical semantics to bench-m8.sh).
+BATTERY_LOW="${BENCH_M8_BATTERY_LOW:-50}"
+BATTERY_HIGH="${BENCH_M8_BATTERY_HIGH:-60}"
+BATTERY_POLL="${BENCH_M8_BATTERY_POLL:-60}"
+BATTERY_CHECK="${BENCH_M8_BATTERY_CHECK:-}"
+if [[ -z "$BATTERY_CHECK" ]]; then
+	if [[ -x ../battery-check/battery-check ]]; then
+		BATTERY_CHECK=../battery-check/battery-check
+	elif command -v battery-check >/dev/null 2>&1; then
+		BATTERY_CHECK=battery-check
+	fi
+fi
+
+# battery_gate blocks while the battery is below BATTERY_LOW until it
+# recovers to BATTERY_HIGH. Tool errors (exit 2) disable gating rather
+# than stall the run; exit 1 = below level.
+battery_gate() {
+	[[ -n "$BATTERY_CHECK" ]] && [[ -x "$BATTERY_CHECK" || -n "$(command -v "$BATTERY_CHECK" 2>/dev/null)" ]] || return 0
+	local out rc
+	if out=$("$BATTERY_CHECK" --level "$BATTERY_LOW" 2>&1); then
+		return 0
+	else
+		rc=$? # must be captured in the else: after fi, $? is the if's own status (0)
+	fi
+	if (( rc != 1 )); then
+		echo "battery-check failed (rc=$rc): $out — battery gating disabled" >&2
+		BATTERY_CHECK=""
+		return 0
+	fi
+	echo "$(date +%H:%M:%S) battery low: $out — pausing until ${BATTERY_HIGH}%"
+	while :; do
+		sleep "$BATTERY_POLL"
+		if out=$("$BATTERY_CHECK" --level "$BATTERY_HIGH" 2>&1); then
+			echo "$(date +%H:%M:%S) battery recovered: $out — resuming"
+			return 0
+		else
+			rc=$?
+		fi
+		if (( rc != 1 )); then
+			echo "battery-check failed (rc=$rc): $out — resuming without gating" >&2
+			BATTERY_CHECK=""
+			return 0
+		fi
+	done
+}
 REPORT="${BENCH_M9_REPORT:-docs/benchmarks/M9-${TAG}-$(date +%Y-%m-%d).md}"
 PDIR="docs/benchmarks/profiles/$(date +%Y-%m-%d)-${TAG}"
 
@@ -38,11 +95,24 @@ go build -ldflags "$(sh bin/gen-build-stamp.sh)" -o ./ultima-server ./cmd/ultima
 CFG=$(mktemp /tmp/ultima-bench-m9-XXXX.json)
 DDIR=$(mktemp -d /tmp/ultima-bench-m9-data-XXXX)
 # pprof_enabled: the M9a profile-capture endpoint (server.pprof_enabled).
+# shard_count 0 = the default resolution (4×GOMAXPROCS, power of two).
+SHARDS="${BENCH_SHARDS:-0}"
 cat > "$CFG" <<EOF
-{"server":{"resp_addr":"127.0.0.1:$UPORT","grpc_addr":"127.0.0.1:0","http_addr":"127.0.0.1:$HPORT","pprof_enabled":true,"log_level":"error"},"persist":{"dir":"$DDIR","save":""}}
+{"server":{"resp_addr":"127.0.0.1:$UPORT","grpc_addr":"127.0.0.1:0","http_addr":"127.0.0.1:$HPORT","pprof_enabled":true,"log_level":"error","shard_count":$SHARDS},"persist":{"dir":"$DDIR","save":""}}
 EOF
 
-./ultima-server --cfg "$CFG" 2>/tmp/ultima-bench-m9.log &
+# Resolved shard count for the report preamble (mirrors
+# shard.ResolveShardCount: 4×GOMAXPROCS rounded up to a power of two).
+GOMAXPROCS_VAL="${BENCH_GOMAXPROCS:-$(sysctl -n hw.ncpu)}"
+if [[ "$SHARDS" != "0" ]]; then
+	RESOLVED_SHARDS="$SHARDS"
+else
+	p=1
+	while (( p < 4 * GOMAXPROCS_VAL )); do p=$((p * 2)); done
+	RESOLVED_SHARDS=$p
+fi
+
+GOMAXPROCS="$GOMAXPROCS_VAL" ./ultima-server --cfg "$CFG" 2>/tmp/ultima-bench-m9.log &
 UPID=$!
 "$REDIS_BIN" --port "$RPORT" --save '' --appendonly no --logfile /tmp/redis-bench-m9.log --daemonize yes
 cleanup() {
@@ -65,13 +135,56 @@ wait_port "$UPORT"
 wait_port "$RPORT"
 wait_port "$HPORT"
 
-# rps port args... → median/min/max requests-per-sec over REPS runs
+# rps port args... → median/min/max requests-per-sec over REPS runs.
+# With BENCH_DRIVERS > 1 each rep runs that many redis-benchmark
+# processes concurrently against the same server and sums their
+# throughputs — a single driver process caps ~1-1.9M ops/s itself, which
+# would hide the server's real ceiling (M9c).
 rps() {
 	local port="$1"
 	shift
+	# One rep: DRIVERS concurrent benchmarks, throughput summed. Retried
+	# with backoff when a driver yields nothing — with DRIVERS>1 plus the
+	# -c 200/-c 400 rows, TIME_WAIT accumulation can exhaust the ephemeral
+	# port range ("Can't assign requested address"); a pause lets it drain.
+	run_rep() {
+		local attempt
+		for attempt in 1 2 3; do
+			local -a pids=()
+			for d in $(seq 1 "$DRIVERS"); do
+				"$BENCH_BIN" -p "$port" "$@" 2>"/tmp/bench-m9-drv-err-$$-$d" \
+					| grep -E 'throughput summary: [0-9.]+ requests per second' \
+					| awk '{print $3}' > "/tmp/bench-m9-drv-$$-$d" &
+				pids+=($!)
+			done
+			for p in "${pids[@]}"; do wait "$p"; done
+			total=0
+			local empty=0
+			for d in $(seq 1 "$DRIVERS"); do
+				v=$(cat "/tmp/bench-m9-drv-$$-$d" 2>/dev/null)
+				if [[ -z "$v" ]]; then
+					empty=1
+					if (( attempt == 3 )); then
+						echo "rps: empty driver output (port $port, driver $d, args: $*); driver stderr:" >&2
+						head -3 "/tmp/bench-m9-drv-err-$$-$d" >&2
+					fi
+					v=0
+				fi
+				total=$(awk "BEGIN{print $total + $v}")
+				rm -f "/tmp/bench-m9-drv-$$-$d" "/tmp/bench-m9-drv-err-$$-$d"
+			done
+			if (( empty == 0 )); then
+				return 0
+			fi
+			echo "rps: port $port args [$*] attempt $attempt failed (driver connect error); backing off 15s" >&2
+			sleep 15
+		done
+	}
 	local vals=""
-	for _ in $(seq 1 "$REPS"); do
-		vals="$vals $("$BENCH_BIN" -p "$port" "$@" 2>/dev/null | grep -E 'throughput summary: [0-9.]+ requests per second' | awk '{print $3}' | paste -sd' ' -)"
+	local _rep d p v total
+	for _rep in $(seq 1 "$REPS"); do
+		run_rep "$@"
+		vals="$vals $total"
 	done
 	# shellcheck disable=SC2086
 	printf '%s\n' $vals | sort -n | awk '{a[NR]=$1} END{if(NR%2) med=a[(NR+1)/2]; else med=(a[NR/2]+a[NR/2+1])/2; printf "%.2f %.2f %.2f", med, a[1], a[NR]}'
@@ -80,6 +193,7 @@ rps() {
 declare -a ROWS
 run_pair() {
 	local name="$1"; shift
+	battery_gate
 	local u r
 	u=$(rps "$UPORT" "$@")
 	r=$(rps "$RPORT" "$@")
@@ -105,6 +219,17 @@ for d in $PAYLOADS; do
 	run_pair "SET -d $d, -c 200 -P 16" -c 200 -P 16 -n "$REQUESTS" -t set -d "$d"
 	run_pair "GET -d $d, -c 200 -P 16" -c 200 -P 16 -n "$REQUESTS" -t get -d "$d"
 done
+
+# M9c regression-curve rows: the ratio worsens from -c50 to -c200; -c100
+# and -c400 fill in the curve. Skip with BENCH_CONNS_SWEEP=0.
+if [[ "${BENCH_CONNS_SWEEP:-1}" != "0" ]]; then
+	d="${PAYLOADS%% *}" # first payload keeps the sweep cheap
+	seed "$UPORT" "$d"; seed "$RPORT" "$d"
+	run_pair "SET -d $d, -c 100 -P 16" -c 100 -P 16 -n "$REQUESTS" -t set -d "$d"
+	run_pair "GET -d $d, -c 100 -P 16" -c 100 -P 16 -n "$REQUESTS" -t get -d "$d"
+	run_pair "SET -d $d, -c 400 -P 16" -c 400 -P 16 -n "$REQUESTS" -t set -d "$d"
+	run_pair "GET -d $d, -c 400 -P 16" -c 400 -P 16 -n "$REQUESTS" -t get -d "$d"
+fi
 
 # Randomized-key rows (M9b): shard parallelism is the design's lever; the
 # fixed-key rows above measure the single-shard path. SET populates the
@@ -144,10 +269,15 @@ if [[ "${BENCH_PROFILE:-1}" != "0" ]]; then
 	curl -s "http://127.0.0.1:$HPORT/debug/pprof/profile?seconds=10" > "$PDIR/cpu.pprof" || true
 	curl -s "http://127.0.0.1:$HPORT/debug/pprof/heap" > "$PDIR/heap.pprof" || true
 	curl -s "http://127.0.0.1:$HPORT/debug/pprof/goroutine?debug=1" > "$PDIR/goroutine.txt" || true
+	# M9c: contention + scheduler evidence (enabled under pprof_enabled in
+	# cmd/ultima-server/startup.go).
+	curl -s "http://127.0.0.1:$HPORT/debug/pprof/mutex" > "$PDIR/mutex.pprof" || true
+	curl -s "http://127.0.0.1:$HPORT/debug/pprof/block" > "$PDIR/block.pprof" || true
+	curl -s "http://127.0.0.1:$HPORT/debug/pprof/trace?seconds=5" > "$PDIR/trace.out" || true
 	kill "$LOADPID" 2>/dev/null || true
 	wait "$LOADPID" 2>/dev/null || true
 	if [[ -s "$PDIR/cpu.pprof" ]]; then
-		PROFILE_NOTE="captured under SET -c 50 -P 16 -d 64 load: \`$PDIR/{cpu.pprof,heap.pprof,goroutine.txt}\` (view: \`go tool pprof -http=:0 $PDIR/cpu.pprof\`)."
+		PROFILE_NOTE="captured under SET -c 50 -P 16 -d 64 load: \`$PDIR/{cpu.pprof,heap.pprof,mutex.pprof,block.pprof,goroutine.txt,trace.out}\` (view: \`go tool pprof -http=:0 $PDIR/cpu.pprof\`, \`go tool trace $PDIR/trace.out\`)."
 	else
 		PROFILE_NOTE="capture attempted but $PDIR/cpu.pprof is empty — is pprof_enabled on?"
 	fi
@@ -180,12 +310,12 @@ mkdir -p docs/benchmarks
 	echo "## Environment"
 	echo
 	echo "- Machine: $HW_MODEL, $HW_CORES cores, ${MEM_GB} GB RAM ($(uname -s | tr '[:upper:]' '[:lower:]')/$(uname -m))"
-	echo "- Ultima: \`$UV\` (shards: 4×GOMAXPROCS, power of two)"
+	echo "- Ultima: \`$UV\` (shards: $RESOLVED_SHARDS, GOMAXPROCS: $GOMAXPROCS_VAL)"
 	echo "- Redis: \`$RV\` (via REDIS_BIN=$REDIS_BIN; \`--save '' --appendonly no\`)"
-	echo "- Driver: \`$BV\`, -n $REQUESTS per run, $REPS reps"
+	echo "- Driver: \`$BV\`, -n $REQUESTS per run, $REPS reps, $DRIVERS parallel driver(s) per rep"
 	echo "- memtier: $MEMTIER_NOTE"
 	echo "- pprof: $PROFILE_NOTE"
-	echo "- Ultima config: \`{\"server\":{\"resp_addr\":\"127.0.0.1:$UPORT\",\"http_addr\":\"127.0.0.1:$HPORT\",\"pprof_enabled\":true,\"log_level\":\"error\"},\"persist\":{\"dir\":\"<tmp>\",\"save\":\"\"}\}\`"
+	echo "- Ultima config: \`{\"server\":{\"resp_addr\":\"127.0.0.1:$UPORT\",\"http_addr\":\"127.0.0.1:$HPORT\",\"pprof_enabled\":true,\"log_level\":\"error\",\"shard_count\":$SHARDS},\"persist\":{\"dir\":\"<tmp>\",\"save\":\"\"}\}\`"
 	echo
 	echo "## Target-workload matrix (requests/sec, median of $REPS)"
 	echo

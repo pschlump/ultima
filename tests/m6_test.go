@@ -95,7 +95,7 @@ func newM6Env(t *testing.T) *m6Env {
 	httpapi.NewServer(eng, nil, svc, testLogger(), nil).Register(r)
 	reg := wssession.NewRegistry(eng, 0, 0, testLogger())
 	t.Cleanup(reg.Close)
-	r.Get("/ws/v1", wssrv.Handler(eng, svc, reg, testLogger(), nil))
+	r.Get("/ws/v1", wssrv.Handler(eng, svc, reg, testLogger(), nil, 0))
 	httpSrv := httptest.NewServer(r)
 	t.Cleanup(httpSrv.Close)
 
@@ -103,7 +103,7 @@ func newM6Env(t *testing.T) *m6Env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	grpcSrv := grpcsrv.New(eng, svc)
+	grpcSrv := grpcsrv.New(eng, svc, 0)
 	go func() { _ = grpcSrv.Serve(lis) }()
 	t.Cleanup(grpcSrv.GracefulStop)
 	t.Cleanup(func() { _ = lis.Close() })

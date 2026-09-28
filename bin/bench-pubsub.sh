@@ -11,8 +11,9 @@
 #   b3. K subscribers,            -c  1 -P  1   (single client)
 # Subscribers are the note/pubsub-bench-sub Go driver: redis-cli formats
 # every message as text and cannot drain fast enough, which trips
-# Ultima's slow-consumer close (lib/respserver pushQueueCap 4096) even at
-# moderate rates — a subscriber artifact, not a server limit. After every
+# Ultima's slow-consumer close (lib/pushq byte cap,
+# server.pubsub_client_buffer_mb) even at moderate rates — a subscriber
+# artifact, not a server limit. After every
 # fan-out run the script verifies subscriber survival (PUBSUB NUMSUB) and
 # per-subscriber delivered-message counts.
 set -euo pipefail
@@ -194,16 +195,14 @@ mkdir -p docs/benchmarks
 	echo
 	echo "Delivery check: subscriber connections still attached after the run"
 	echo "(PUBSUB NUMSUB) and per-subscriber received-message counts from the"
-	echo "driver. Ultima closes a subscribed connection whose push queue exceeds"
-	echo "4096 messages (slow consumer, the analogue of Redis's"
-	echo "client-output-buffer-limit pubsub 32mb/8mb/60, which is far more"
-	echo "generous), so at full publisher speed some or all Ultima subscribers"
-	echo "are dropped by design; subscribers that stay attached receive every"
-	echo "message. The \`-c 50 -P 16\` fan-out row is therefore unstable"
-	echo "run-to-run for Ultima — the mean blends throttled fan-out with fast"
-	echo "zero-subscriber publishing after the drops. The \`-P 1\` rows, where"
-	echo "all subscribers on both servers received all messages, are the stable"
-	echo "apples-to-apples comparison."
+	echo "driver. Since M9c, a subscribed connection's push queue is"
+	echo "byte-capped (lib/pushq, server.pubsub_client_buffer_mb, default"
+	echo "32 MB — Redis's client-output-buffer-limit pubsub hard-limit"
+	echo "default) and the push writer flushes in batches (lib/resp"
+	echo "PushValues), so full publisher speed no longer drops subscribers"
+	echo "on these legs; a connection is closed only when its queued bytes"
+	echo "pass the ceiling (slow consumer), and subscribers that stay"
+	echo "attached receive every message."
 } > "$REPORT"
 
 echo "wrote $REPORT"

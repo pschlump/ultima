@@ -79,7 +79,7 @@ func TestM7TSClientRoundTrip(t *testing.T) {
 
 	r := chi.NewRouter()
 	httpapi.NewServer(eng, nil, nil, testLogger(), nil).Register(r)
-	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, testLogger(), nil))
+	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, testLogger(), nil, 0))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 

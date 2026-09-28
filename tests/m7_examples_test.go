@@ -50,7 +50,7 @@ func newM7ExampleServer(t *testing.T) *m7ExampleServer {
 	httpapi.NewServer(eng, nil, nil, logger, nil).Register(r)
 	reg := wssession.NewRegistry(eng, 0, 0, logger)
 	t.Cleanup(reg.Close)
-	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, logger, nil))
+	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, logger, nil, 0))
 	httpSrv := &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = httpSrv.Serve(httpLis) }()
 	t.Cleanup(func() { _ = httpSrv.Close() })

@@ -151,7 +151,7 @@ func cmdPublish(e *Engine, cs *ConnState, args [][]byte) resp.Value {
 	// Self-addressed deliveries are postponed behind the :count reply
 	// via the outbox; the count includes them (Redis counts deliveries,
 	// not unique clients).
-	n := e.PubSub.Publish(string(args[1]), args[2], cs.ID, cs.deferPush)
+	n := e.PubSub.Publish(string(args[1]), dupBytes(args[2]), cs.ID, cs.deferPush)
 	return resp.Int(int64(n))
 }
 

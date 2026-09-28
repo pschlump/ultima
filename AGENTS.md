@@ -90,8 +90,10 @@ Request flow: each front-end parses its wire format, calls
 - **Blocking ops**: waiters register in the owning shard's FIFO registry;
   the connection goroutine parks on a channel — never a shard goroutine.
 - **Pub/sub**: `lib/pubsub` broker, delivery on the publisher's goroutine
-  into per-connection bounded push queues; full queue = slow consumer →
-  connection closed.
+  into per-connection push queues (`lib/pushq`, M9c) that grow to a byte
+  ceiling — `server.pubsub_client_buffer_mb`, default 32 MB, the Redis
+  `client-output-buffer-limit pubsub` analogue; past the ceiling = slow
+  consumer → connection closed.
 - **Persistence** (`lib/persist`, D9 own formats): per-(db,shard) snapshot
   segments + per-shard seq-stamped AOF with global sequence merge at
   replay; restore-before-serve.
@@ -137,13 +139,18 @@ clients/javascript/  plain-JS ESM+CJS distribution of @ultima/client (§11.3)
 examples/            leaderboard + chat example apps (§11.4), e2e-tested in tests/m7_examples_test.go
 lib/config/          JSON config: `default:"..."` struct tags via reflection + `$ENV$NAME` substitution (D6)
 lib/resp/            vendored + extended fork of tidwall/redcon v1.6.4 (D2); RESP3 emitters,
-                     per-connection protocol versioning; kept close to upstream — excluded from lint
+                     per-connection protocol versioning; fork additions: writeMu-guarded
+                     push writes (M3), PushValues batched push flush + CloseHard
+                     no-flush close + 64KB write buffer + Raw-copy-free parse (M9c);
+                     kept close to upstream — excluded from lint
 lib/respserver/      shared RESP front-end wiring (§6.1, D3); used by cmd and both test harnesses
 lib/shard/           sharded keyspace engine, owner goroutines, routing, expiry heap,
                      WATCH tracking, PauseAll, blocking-waiter registry; evict.go (maxmemory)
 lib/types/           collection value types (Hash/List/Set/ZSet, Redis-like promotion
                      thresholds); memusage.go: O(1) per-type memory estimators
 lib/pubsub/          classic pub/sub broker
+lib/pushq/           growable byte-capped outbound push queue (M9c) shared by the
+                     three front-ends' pub/sub slow-consumer policy
 lib/commands/        front-end-agnostic command engine; table.go is the registry
                      (def(name, arity, flags, first, last, step, group, handler));
                      coll.go shared parsing helpers; tx.go, pubsub.go, block.go,
@@ -234,9 +241,15 @@ All via the Makefile (default goal is `build`):
   `BENCH_M8_POOL_SIZE` (VM-pool A/B), battery gate via `../battery-check`
   (pauses below 50%, resumes at 60%). bench-m9.sh (M9a harness) knobs:
   `BENCH_REPS` (median-of-N, default 3), `BENCH_PAYLOADS`, `BENCH_MEMTIER=0`,
-  `BENCH_PROFILE=0`, `BENCH_M9_TAG`; captures pprof snapshots into
-  `docs/benchmarks/profiles/` via the `server.pprof_enabled`
-  `/debug/pprof/` endpoints.
+  `BENCH_PROFILE=0`, `BENCH_M9_TAG`; M9c additions: `BENCH_SHARDS`
+  (shard_count in the bench config), `BENCH_GOMAXPROCS`, `BENCH_DRIVERS`
+  (N parallel redis-benchmark processes per row, throughputs summed —
+  single driver caps ~1–1.9M ops/s), `BENCH_CONNS_SWEEP=0` (skips the
+  -c100/-c400 regression-curve rows), and the bench-m8 battery gate
+  (same `BENCH_M8_BATTERY_*` knobs). Captures pprof snapshots (cpu, heap,
+  goroutine, mutex, block, trace — mutex/block profiling is enabled at
+  startup whenever `server.pprof_enabled` is true) into
+  `docs/benchmarks/profiles/` via the `/debug/pprof/` endpoints.
 - `make tidy`, `make clean`.
 
 Configuration: JSON file (`ultima.cfg.json` by default). Defaults come

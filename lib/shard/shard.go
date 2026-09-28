@@ -536,6 +536,14 @@ type ShardStat struct {
 // this is O(keys) — a management-endpoint call, not a hot path.
 func (e *Engine) ShardStats() []ShardStat {
 	out := make([]ShardStat, e.n)
+	// Queue depth is sampled caller-side, before the report tasks are
+	// enqueued: sampled inside the shard goroutine it would always read ≈0
+	// (the sampler task itself was dequeued first), which hid the M9c
+	// -c50→-c200 backlog. len() on a channel from outside is safe; the
+	// value is racy-but-useful for a management snapshot.
+	for i, s := range e.shard {
+		out[i].QueueDepth = len(s.queue)
+	}
 	var wg sync.WaitGroup
 	now := e.NowMs()
 	for i := range e.shard {
@@ -545,8 +553,10 @@ func (e *Engine) ShardStats() []ShardStat {
 			st := ShardStat{
 				Index:      s.id,
 				MemBytes:   s.usedTotal.Load(),
-				QueueDepth: len(s.queue),
 				ExpiryHeap: s.exp.Len(),
+				// Caller-side sample from the pre-enqueue loop above (only
+				// this task reads/writes out[s.id]).
+				QueueDepth: out[s.id].QueueDepth,
 			}
 			for d := range e.dbs {
 				tab := s.tab(d)
@@ -624,9 +634,12 @@ type Shard struct {
 
 	// Eviction recency/frequency trackers (M5b, D14): lruAll/lfuAll hold
 	// every key, lruVol/lfuVol only keys with a TTL. Maintained by
-	// Lookup/Store/Touch/PushExpire/Delete below — always on, like
-	// Redis's per-object LRU clock, so CONFIG SET maxmemory-policy never
-	// starts cold. Stale entries (deleted/flushed keys) are self-healing:
+	// Lookup/Store/Touch/PushExpire/Delete below, but ONLY while maxmemory
+	// is set (M9c: with maxmemory 0 the tracker work is pure overhead —
+	// ~6% of SET-path CPU — so trackAccess skips it; maybeEvict re-warms
+	// the LRU trackers from the keyspace on the 0→N transition, gated by
+	// trackWarm, so a runtime CONFIG SET maxmemory never evicts cold).
+	// Stale entries (deleted/flushed keys) are self-healing:
 	// the eviction loop validates every candidate against the keyspace.
 	// Keys are tombKey{db,key} — the same (db,key) pair the tombstones
 	// and the waiter registry use. Shard-goroutine only, so the _ts
@@ -635,6 +648,11 @@ type Shard struct {
 	lruVol *lru_ts.Lru[tombKey, struct{}]
 	lfuAll *lfu_ts.Lfu[tombKey]
 	lfuVol *lfu_ts.Lfu[tombKey]
+
+	// trackWarm records that the LRU trackers were seeded for the current
+	// maxmemory-enabled period (false after any period with maxmemory 0).
+	// Shard-goroutine only (set/reset inside maybeEvict).
+	trackWarm bool
 
 	// rng feeds victim sampling (random/LFU policies). Shard-goroutine
 	// only; seeded per shard so tests are reproducible enough.
@@ -808,7 +826,17 @@ func (s *Shard) addMem(db int, delta int64) {
 // recency in the allkeys/volatile LRU, frequency in the LFU counters
 // (Redis's per-object LRU/LFU clock update analogue). Call only from
 // inside the shard goroutine.
+//
+// M9c: skipped entirely while maxmemory is 0 — the trackers exist only to
+// feed eviction, and with no limit configured the LRU/LFU work is pure
+// overhead (measured ~6% of total CPU on the pipelined SET path). The LRU
+// trackers are re-seeded from the keyspace by maybeEvict on the 0→N
+// transition (trackWarm), so enabling maxmemory at runtime never starts
+// eviction cold.
 func (s *Shard) trackAccess(db int, key string, e *Entry) {
+	if s.eng.maxMemory.Load() <= 0 {
+		return
+	}
 	k := tombKey{db, key}
 	s.lruAll.Put(k, struct{}{})
 	s.lfuAll.Touch(k)

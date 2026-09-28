@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/yuin/gopher-lua/host"
 	"github.com/pschlump/ultima/lib/resp"
+	"github.com/yuin/gopher-lua/host"
 )
 
 // NumToArg renders a Lua number as a redis.call argument (probed 7.2.7):

@@ -30,7 +30,7 @@ func m3Server(t *testing.T) (addr string, eng *commands.Engine) {
 	shards := shard.NewEngine(4, 16)
 	t.Cleanup(shards.Close)
 	eng = commands.NewEngine(shards, "test", 0)
-	srv := respserver.New("127.0.0.1:0", eng)
+	srv := respserver.New("127.0.0.1:0", eng, 0)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return lis.Addr().String(), eng

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -195,14 +196,14 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 		}
 	}
 
-	s.respSrv = respserver.New(cfg.Server.RespAddr, eng)
+	s.respSrv = respserver.New(cfg.Server.RespAddr, eng, cfg.Server.PubsubClientBufferBytes())
 	go func() {
 		if err := s.respSrv.Serve(s.respLis); err != nil {
 			logger.Error("resp listener died", "err", err)
 		}
 	}()
 
-	grpcServer := grpcsrv.New(eng, authSvc)
+	grpcServer := grpcsrv.New(eng, authSvc, cfg.Server.PubsubClientBufferBytes())
 	s.grpcSrv = grpcServer
 	go func() {
 		if err := grpcServer.Serve(s.grpcLis); err != nil {
@@ -232,8 +233,16 @@ func start(cfg *config.Config, logger *slog.Logger) (*servers, error) {
 		}
 	}
 
+	// M9c: with pprof on, also sample mutex contention and block events so
+	// /debug/pprof/mutex + /debug/pprof/block are meaningful — the scaling
+	// campaign's primary evidence. Runtime cost only when pprof_enabled.
+	if cfg.Server.PprofEnabled {
+		runtime.SetMutexProfileFraction(10) // ~10% of contention events
+		runtime.SetBlockProfileRate(1000)   // blocking ≥ 1µs, sampled per ns
+	}
+
 	s.httpSrv = &http.Server{
-		Handler:           newRouter(logger, eng, s.persist, authSvc, s.wssess, metricsAllow, originAllow, cfg.Server.PprofEnabled),
+		Handler:           newRouter(logger, eng, s.persist, authSvc, s.wssess, metricsAllow, originAllow, cfg.Server.PprofEnabled, cfg.Server.PubsubClientBufferBytes()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	// One http.Server over every bound listener; Shutdown(ctx) closes them

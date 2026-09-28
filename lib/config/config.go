@@ -112,6 +112,12 @@ type ServerConfig struct {
 	// host, "*" allows any origin. Same-origin upgrades and requests
 	// without an Origin header always pass.
 	WSOriginAllow string `json:"ws_origin_allow" default:""`
+	// PubsubClientBufferMB caps each pub/sub connection's outbound push
+	// queue in megabytes (M9c, lib/pushq) — the analogue of Redis's
+	// client-output-buffer-limit pubsub hard limit, whose default is also
+	// 32 MB; a client that stays past the cap is disconnected as a slow
+	// consumer. 0 resolves to the default.
+	PubsubClientBufferMB int `json:"pubsub_client_buffer_mb" default:"32"`
 }
 
 // HTTPListenAddrs resolves every address the HTTP surface binds: http_addr
@@ -140,6 +146,13 @@ func (c ServerConfig) HTTPListenAddrs() ([]string, error) {
 		out = append(out, net.JoinHostPort(host, port))
 	}
 	return out, nil
+}
+
+// PubsubClientBufferBytes is PubsubClientBufferMB in bytes, the form the
+// three front-ends hand to lib/pushq (0 resolves to pushq.DefaultCapBytes
+// there).
+func (c ServerConfig) PubsubClientBufferBytes() int {
+	return c.PubsubClientBufferMB << 20
 }
 
 // DebugConfig holds feature flags (§8 debug.enabled map).

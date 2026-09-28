@@ -2,9 +2,10 @@ package respserver
 
 // Package-local tests for the RESP front-end push-queue contract: once a
 // connection subscribes, every write (subscribe acks, command replies,
-// async broker pushes) flows through the single bounded push queue in
-// issue order, and a full queue — a slow consumer — closes the connection
-// (the Redis client-output-buffer-limit analogue for pub/sub clients).
+// async broker pushes) flows through the single byte-capped push queue
+// (lib/pushq, M9c) in issue order, and a queue pushed past its byte
+// ceiling — a slow consumer — closes the connection (the Redis
+// client-output-buffer-limit analogue for pub/sub clients).
 
 import (
 	"bufio"
@@ -20,6 +21,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/pschlump/ultima/lib/commands"
+	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/shard"
 )
 
@@ -28,8 +30,9 @@ func TestMain(m *testing.M) {
 }
 
 // newTestServer boots the RESP surface on an ephemeral port, wired exactly
-// like cmd/ultima-server (New over a small shard engine).
-func newTestServer(t *testing.T) (addr string, eng *commands.Engine) {
+// like cmd/ultima-server (New over a small shard engine). pushBufBytes is
+// the per-connection push-queue byte cap; 0 is the 32 MB default.
+func newTestServer(t *testing.T, pushBufBytes int) (addr string, eng *commands.Engine) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -38,7 +41,7 @@ func newTestServer(t *testing.T) (addr string, eng *commands.Engine) {
 	shards := shard.NewEngine(4, 16)
 	t.Cleanup(shards.Close)
 	eng = commands.NewEngine(shards, "test", 0)
-	srv := New("127.0.0.1:0", eng)
+	srv := New("127.0.0.1:0", eng, pushBufBytes)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return lis.Addr().String(), eng
@@ -150,7 +153,7 @@ func (c *testClient) do(t *testing.T, args ...string) string {
 // replies and async pushes share the one queue and reach the client in
 // exact issue order.
 func TestPushModeHappyPathOrdering(t *testing.T) {
-	addr, _ := newTestServer(t)
+	addr, _ := newTestServer(t, 0)
 	sub, pub := dial(t, addr), dial(t, addr)
 
 	if got := sub.do(t, "HELLO", "3"); !strings.HasPrefix(got, "%(") {
@@ -201,31 +204,41 @@ func TestPushModeHappyPathOrdering(t *testing.T) {
 	}
 }
 
-// TestPushQueueBoundaryHolds: exactly pushQueueCap undrained messages must
-// NOT close the connection — enqueue only drops when the queue is already
-// full, and the buffered channel holds exactly cap items. The client stops
-// reading, the queue (plus kernel buffers) absorbs the burst, and every
-// frame is delivered when the client starts reading again.
+// TestPushQueueBoundaryHolds: a burst totaling exactly the byte cap of
+// undrained messages must NOT close the connection — enqueue only fails
+// once queued bytes would exceed the ceiling, and the queue holds exactly
+// cap bytes. The client stops reading, the queue (plus kernel buffers)
+// absorbs the burst, and every frame is delivered when the client starts
+// reading again.
 func TestPushQueueBoundaryHolds(t *testing.T) {
-	addr, eng := newTestServer(t)
+	payload := strings.Repeat("x", 32)
+	// The per-message queued cost, computed with the same estimator the
+	// front-end uses, so the burst fills the byte cap exactly.
+	frame := resp.Value{Arr: []resp.Value{
+		{Blob: []byte("message")},
+		{Blob: []byte("bounded")},
+		{Blob: []byte(payload)},
+	}}
+	per := respValueBytes(frame)
+	const n = 64
+	addr, eng := newTestServer(t, n*per)
 	sub := dial(t, addr)
 
 	if got := sub.do(t, "SUBSCRIBE", "bounded"); got != "*(subscribe bounded :1)" {
 		t.Fatalf("subscribe ack = %q", got)
 	}
 
-	// Never read during the burst. Publish exactly cap messages; none may
-	// be dropped and the connection must survive.
-	payload := strings.Repeat("x", 32)
-	for i := 0; i < pushQueueCap; i++ {
-		if n := eng.PubSub.Publish("bounded", []byte(payload), 0, nil); n != 1 {
-			t.Fatalf("publish %d delivered to %d subscribers, want 1 (connection dropped at/below cap)", i, n)
+	// Never read during the burst. Publish n messages totaling exactly the
+	// byte cap; none may be dropped and the connection must survive.
+	for i := 0; i < n; i++ {
+		if got := eng.PubSub.Publish("bounded", []byte(payload), 0, nil); got != 1 {
+			t.Fatalf("publish %d delivered to %d subscribers, want 1 (connection dropped at/below cap)", i, got)
 		}
 	}
 
-	// Drain: exactly pushQueueCap push frames, all intact and in order.
+	// Drain: exactly n push frames, all intact and in order.
 	want := "*(message bounded " + payload + ")"
-	for i := 0; i < pushQueueCap; i++ {
+	for i := 0; i < n; i++ {
 		if got := sub.recv(t); got != want {
 			t.Fatalf("frame %d = %q, want %q", i, got, want)
 		}
@@ -237,12 +250,14 @@ func TestPushQueueBoundaryHolds(t *testing.T) {
 }
 
 // TestPushQueueSlowConsumer: a subscriber that never reads its socket must
-// be disconnected once the outbound queue overflows. Publishing far beyond
-// pushQueueCap (the writer stalls on a full socket buffer, the queue fills,
-// the next enqueue closes the connection) must trip the limit; the blocked
-// reader observes the queued frames followed by end-of-stream, not a hang.
+// be disconnected once the outbound queue overflows its byte ceiling.
+// Publishing far beyond the cap (the writer stalls on a full socket
+// buffer, the queue fills, the next enqueue closes the connection) must
+// trip the limit; the blocked reader observes the queued frames followed
+// by end-of-stream, not a hang.
 func TestPushQueueSlowConsumer(t *testing.T) {
-	addr, eng := newTestServer(t)
+	const pushBufBytes = 64 << 10 // small byte cap so the flood trips fast
+	addr, eng := newTestServer(t, pushBufBytes)
 	sub := dial(t, addr)
 
 	if got := sub.do(t, "SUBSCRIBE", "slow"); got != "*(subscribe slow :1)" {
@@ -250,11 +265,11 @@ func TestPushQueueSlowConsumer(t *testing.T) {
 	}
 	// From here on the client reads nothing.
 
-	// Flood well past the queue cap. Publish's delivery count drops to 0
+	// Flood well past the byte cap. Publish's delivery count drops to 0
 	// once the closed callback has deregistered the subscription, which is
 	// the observable signal that the connection was torn down.
 	payload := []byte(strings.Repeat("x", 64))
-	const maxPublishes = 64 * pushQueueCap
+	const maxPublishes = 64 * 4096
 	closed := false
 	published := 0
 	for ; published < maxPublishes; published++ {
@@ -274,7 +289,7 @@ func TestPushQueueSlowConsumer(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
-	t.Logf("connection closed after %d publishes (queue cap %d)", published, pushQueueCap)
+	t.Logf("connection closed after %d publishes (byte cap %d)", published, pushBufBytes)
 
 	// The blocked reader drains what the queue and kernel buffers held,
 	// then sees the stream terminate (FIN after a graceful close), within

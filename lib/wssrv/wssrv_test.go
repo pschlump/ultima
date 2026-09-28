@@ -3,8 +3,9 @@ package wssrv
 // Package-local tests for the WebSocket front-end frame contract
 // (design doc §6.3): binary protobuf Command frames, seq-correlated
 // replies, pub/sub pushes as unsolicited seq-0 frames, error replies for
-// malformed frames, and the shared slow-consumer rule — a full outbound
-// queue closes the connection, as in lib/respserver.
+// malformed frames, and the shared slow-consumer rule — an outbound queue
+// pushed past its byte ceiling closes the connection, as in
+// lib/respserver.
 
 import (
 	"errors"
@@ -33,7 +34,9 @@ func TestMain(m *testing.M) {
 
 // newTestServer boots the /ws/v1 handler on an httptest server over a
 // small shard engine and returns the engine and the ws:// URL.
-func newTestServer(t *testing.T) (*commands.Engine, string) {
+// pushBufBytes is the per-connection push-queue byte cap; 0 is the 32 MB
+// default.
+func newTestServer(t *testing.T, pushBufBytes int) (*commands.Engine, string) {
 	t.Helper()
 	shards := shard.NewEngine(4, 16)
 	t.Cleanup(shards.Close)
@@ -41,7 +44,7 @@ func newTestServer(t *testing.T) (*commands.Engine, string) {
 	reg := wssession.NewRegistry(eng, 0, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(reg.Close)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws/v1", Handler(eng, nil, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil))
+	mux.HandleFunc("/ws/v1", Handler(eng, nil, reg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, pushBufBytes))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return eng, "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/v1"
@@ -98,7 +101,7 @@ func generic(seq uint64, name string, args ...string) *ultimav1.Command {
 // TestSeqCorrelatedReplies: every reply echoes its command's seq, for both
 // the typed envelope and the generic escape hatch.
 func TestSeqCorrelatedReplies(t *testing.T) {
-	_, url := newTestServer(t)
+	_, url := newTestServer(t, 0)
 	c := dial(t, url)
 
 	sendCmd(t, c, &ultimav1.Command{Seq: 41, Cmd: &ultimav1.Command_Set{Set: &ultimav1.SetCommand{
@@ -124,7 +127,7 @@ func TestSeqCorrelatedReplies(t *testing.T) {
 // the seq-correlated reply; broker deliveries then arrive as unsolicited
 // seq-0 push frames, and ordinary commands keep working between pushes.
 func TestPubSubPush(t *testing.T) {
-	eng, url := newTestServer(t)
+	eng, url := newTestServer(t, 0)
 	sub := dial(t, url)
 
 	sendCmd(t, sub, generic(1, "subscribe", "ws-news"))
@@ -162,7 +165,7 @@ func TestPubSubPush(t *testing.T) {
 // TestMalformedFrame: text frames and non-protobuf binary frames get an
 // error reply, not a dropped connection — and the server must not die.
 func TestMalformedFrame(t *testing.T) {
-	_, url := newTestServer(t)
+	_, url := newTestServer(t, 0)
 	c := dial(t, url)
 
 	if err := c.WriteMessage(websocket.TextMessage, []byte("PING")); err != nil {
@@ -185,20 +188,22 @@ func TestMalformedFrame(t *testing.T) {
 }
 
 // TestSlowConsumerClosesConnection: a client that stops reading must be
-// disconnected once the outbound queue overflows. Flooding publishes far
-// past pushQueueCap trips the limit; the client then observes the queued
-// frames followed by a terminal read error, within a bounded time.
+// disconnected once the outbound queue overflows its byte ceiling.
+// Flooding publishes far past the cap trips the limit; the client then
+// observes the queued frames followed by a terminal read error, within a
+// bounded time.
 func TestSlowConsumerClosesConnection(t *testing.T) {
-	eng, url := newTestServer(t)
+	const pushBufBytes = 64 << 10 // small byte cap so the flood trips fast
+	eng, url := newTestServer(t, pushBufBytes)
 	sub := dial(t, url)
 
 	sendCmd(t, sub, generic(1, "subscribe", "ws-slow"))
 	_ = recv(t, sub) // subscribe ack; from here on the client reads nothing
 
-	// Flood well past the queue cap. Publish's delivery count drops to 0
+	// Flood well past the byte cap. Publish's delivery count drops to 0
 	// once the closed connection's cleanup deregisters the subscription.
 	payload := []byte(strings.Repeat("x", 64))
-	const maxPublishes = 64 * pushQueueCap
+	const maxPublishes = 64 * 4096
 	closed := false
 	published := 0
 	for ; published < maxPublishes; published++ {
@@ -218,7 +223,7 @@ func TestSlowConsumerClosesConnection(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
-	t.Logf("connection closed after %d publishes (queue cap %d)", published, pushQueueCap)
+	t.Logf("connection closed after %d publishes (byte cap %d)", published, pushBufBytes)
 
 	// The stalled client reads the frames the queue and kernel buffers
 	// held, then a terminal error (the server closes the TCP connection

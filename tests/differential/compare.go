@@ -59,7 +59,7 @@ func startUltima(t *testing.T, requirepass string) string {
 		t.Fatalf("persist manager start: %v", err)
 	}
 	t.Cleanup(pm.Close) // registered after sh.Close → runs first
-	srv := respserver.New(lisAddr, eng)
+	srv := respserver.New(lisAddr, eng, 0)
 	ready := make(chan error, 1)
 	go func() {
 		ln, err := net.Listen("tcp", lisAddr)

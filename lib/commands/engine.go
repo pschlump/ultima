@@ -639,9 +639,12 @@ func monitorArgs(args [][]byte) [][]byte {
 	case "auth":
 		return [][]byte{[]byte("auth")}
 	case "hello":
-		out := [][]byte{args[0]}
+		// Clone: the event outlives the command's read batch (async
+		// monitor streams), and M9c redcon aliases args into the read
+		// buffer (see the fork note in lib/resp/redcon.go readCommands).
+		out := cloneArgs(args[:1])
 		if len(args) > 1 && (string(args[1]) == "2" || string(args[1]) == "3") {
-			out = append(out, args[1])
+			out = append(out, dupBytes(args[1]))
 		}
 		return out
 	default:

@@ -32,7 +32,7 @@ func grpcTestClient(t *testing.T) ultimav1.UltimaClient {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := grpcsrv.New(eng, nil)
+	srv := grpcsrv.New(eng, nil, 0)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.GracefulStop)
 	t.Cleanup(func() { _ = lis.Close() })

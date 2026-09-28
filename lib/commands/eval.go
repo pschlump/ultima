@@ -15,9 +15,9 @@ package commands
 import (
 	"context"
 
-	"github.com/yuin/gopher-lua/host"
 	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/scripting"
+	"github.com/yuin/gopher-lua/host"
 )
 
 var errNoscript = resp.Err("NOSCRIPT No matching script. Please use EVAL.")

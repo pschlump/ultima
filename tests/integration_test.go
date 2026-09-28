@@ -78,7 +78,7 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 	shards := shard.NewEngine(cfg.Server.ShardCount, cfg.Server.MaxDBs)
 	t.Cleanup(shards.Close)
 	eng := commands.NewEngine(shards, "test", 0)
-	respSrv := respserver.New(cfg.Server.RespAddr, eng)
+	respSrv := respserver.New(cfg.Server.RespAddr, eng, 0)
 	go func() { _ = respSrv.Serve(respLis) }()
 	t.Cleanup(func() { _ = respSrv.Close() })
 
@@ -155,7 +155,7 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 
 	// --- gRPC surface ---
 	grpcLis := listen(t, cfg.Server.GrpcAddr)
-	grpcSrv := grpcsrv.New(eng, nil)
+	grpcSrv := grpcsrv.New(eng, nil, 0)
 	go func() {
 		if err := grpcSrv.Serve(grpcLis); err != nil {
 			t.Errorf("grpc serve: %v", err)
@@ -194,7 +194,7 @@ func TestPingAllThreeSurfaces(t *testing.T) {
 	httpapi.NewServer(eng, nil, nil, logger, nil).Register(r)
 	reg := wssession.NewRegistry(eng, 0, 0, logger)
 	t.Cleanup(reg.Close)
-	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, logger, nil))
+	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, logger, nil, 0))
 	httpSrv := &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		if err := httpSrv.Serve(httpLis); err != nil && err != http.ErrServerClosed {

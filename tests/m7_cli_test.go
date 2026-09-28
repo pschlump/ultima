@@ -45,12 +45,12 @@ func newM7Server(t *testing.T) *m7Server {
 	eng := commands.NewEngine(shards, "test", 0)
 
 	respLis := listen(t, "127.0.0.1:0")
-	respSrv := respserver.New(respLis.Addr().String(), eng)
+	respSrv := respserver.New(respLis.Addr().String(), eng, 0)
 	go func() { _ = respSrv.Serve(respLis) }()
 	t.Cleanup(func() { _ = respSrv.Close() })
 
 	grpcLis := listen(t, "127.0.0.1:0")
-	grpcSrv := grpcsrv.New(eng, nil)
+	grpcSrv := grpcsrv.New(eng, nil, 0)
 	go func() { _ = grpcSrv.Serve(grpcLis) }()
 	t.Cleanup(grpcSrv.GracefulStop)
 
@@ -59,7 +59,7 @@ func newM7Server(t *testing.T) *m7Server {
 	httpapi.NewServer(eng, nil, nil, logger, nil).Register(r)
 	reg := wssession.NewRegistry(eng, 0, 0, logger)
 	t.Cleanup(reg.Close)
-	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, logger, nil))
+	r.Get("/ws/v1", wssrv.Handler(eng, nil, reg, logger, nil, 0))
 	httpSrv := &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = httpSrv.Serve(httpLis) }()
 	t.Cleanup(func() { _ = httpSrv.Shutdown(context.Background()) })

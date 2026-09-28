@@ -23,6 +23,7 @@ import (
 	"github.com/pschlump/ultima/lib/auth"
 	"github.com/pschlump/ultima/lib/commands"
 	"github.com/pschlump/ultima/lib/envelope"
+	"github.com/pschlump/ultima/lib/pushq"
 	"github.com/pschlump/ultima/lib/resp"
 )
 
@@ -30,6 +31,9 @@ import (
 type Server struct {
 	ultimav1.UnimplementedUltimaServer
 	eng *commands.Engine
+	// pushBufBytes caps each Subscribe/Monitor stream's outbound queue in
+	// bytes (M9c, server.pubsub_client_buffer_mb).
+	pushBufBytes int
 }
 
 // New returns a *grpc.Server with the Ultima service registered against
@@ -37,8 +41,9 @@ type Server struct {
 // similar tooling work unconfigured. When authSvc is non-nil (M6a,
 // auth.enabled), unary and stream interceptors demand a valid
 // `authorization: bearer …` access token (§9.3) and the verified identity
-// lands on each ConnState (Authed/User).
-func New(eng *commands.Engine, authSvc *auth.Service) *grpc.Server {
+// lands on each ConnState (Authed/User). pushBufBytes caps the push
+// streams' outbound queues in bytes; 0 resolves to the lib/pushq default.
+func New(eng *commands.Engine, authSvc *auth.Service, pushBufBytes int) *grpc.Server {
 	var opts []grpc.ServerOption
 	if authSvc != nil {
 		opts = append(opts,
@@ -47,7 +52,7 @@ func New(eng *commands.Engine, authSvc *auth.Service) *grpc.Server {
 		)
 	}
 	s := grpc.NewServer(opts...)
-	ultimav1.RegisterUltimaServer(s, &Server{eng: eng})
+	ultimav1.RegisterUltimaServer(s, &Server{eng: eng, pushBufBytes: pushBufBytes})
 	reflection.Register(s)
 	return s
 }
@@ -132,18 +137,34 @@ func (s *Server) ExecGeneric(ctx context.Context, req *ultimav1.CommandRequest) 
 	return rs[0], nil
 }
 
-// pushQueueCap bounds a Subscribe stream's outbound queue; beyond it the
-// client is a slow consumer and the stream is torn down — the same rule
-// lib/respserver and lib/wssrv apply.
-const pushQueueCap = 4096
+// pushEventOverhead is the flat per-event cost in the byte estimate of
+// every queued PushEvent/CommandEvent (protobuf field tags, lengths, and
+// the message struct itself). Estimates are monotone, not exact — the
+// same philosophy as the lib/types memory estimators (D10).
+const pushEventOverhead = 32
+
+// pushEventBytes estimates the queued cost of one PushEvent: its string
+// and byte payload fields plus per-event overhead.
+func pushEventBytes(ev *ultimav1.PushEvent) int {
+	return pushEventOverhead + len(ev.Channel) + len(ev.Pattern) + len(ev.Payload)
+}
+
+// commandEventBytes estimates the queued cost of one CommandEvent.
+func commandEventBytes(ce *ultimav1.CommandEvent) int {
+	n := pushEventOverhead + len(ce.Command) + len(ce.ClientAddr)
+	for _, a := range ce.Args {
+		n += len(a)
+	}
+	return n
+}
 
 // Subscribe is the pub/sub push stream (§6.2): the request lists channels
 // and patterns, the replies are the subscribe acks followed by one
 // PushEvent per published message until the client goes away. Deliveries
-// arrive on publisher goroutines, so they flow through a bounded queue
-// drained by a single sender goroutine (stream.Send is not safe for
-// concurrent use). Closing the stream drops all of its subscriptions via
-// CloseConn.
+// arrive on publisher goroutines, so they flow through a byte-capped
+// queue (lib/pushq, M9c) drained by a single sender goroutine
+// (stream.Send is not safe for concurrent use). Closing the stream drops
+// all of its subscriptions via CloseConn.
 func (s *Server) Subscribe(req *ultimav1.SubscribeRequest, stream ultimav1.Ultima_SubscribeServer) error {
 	if len(req.Channels) == 0 && len(req.Patterns) == 0 {
 		return status.Error(codes.InvalidArgument, "Subscribe needs at least one channel or pattern")
@@ -156,13 +177,12 @@ func (s *Server) Subscribe(req *ultimav1.SubscribeRequest, stream ultimav1.Ultim
 	applyIdentity(ctx, cs)
 	defer s.eng.CloseConn(cs) // drops this stream's subscriptions
 
-	events := make(chan *ultimav1.PushEvent, pushQueueCap)
+	events := pushq.New[*ultimav1.PushEvent](s.pushBufBytes)
+	defer events.Close() // late broker deliveries fail fast
 	cs.StartPush = func() func(resp.Value) {
 		return func(v resp.Value) {
-			select {
-			case events <- pushEventOf(v):
-			case <-ctx.Done():
-			default:
+			ev := pushEventOf(v)
+			if !events.Enqueue(ev, pushEventBytes(ev)) {
 				// Slow consumer: cancel the stream, which unsubscribes via
 				// the deferred CloseConn.
 				cancel()
@@ -173,14 +193,13 @@ func (s *Server) Subscribe(req *ultimav1.SubscribeRequest, stream ultimav1.Ultim
 	sendErr := make(chan error, 1)
 	go func() {
 		for {
-			select {
-			case ev := <-events:
-				if err := stream.Send(ev); err != nil {
-					sendErr <- err
-					return
-				}
-			case <-ctx.Done():
+			ev, ok := events.Dequeue(ctx.Done())
+			if !ok {
 				sendErr <- nil
+				return
+			}
+			if err := stream.Send(ev); err != nil {
+				sendErr <- err
 				return
 			}
 		}
@@ -202,7 +221,10 @@ func (s *Server) Subscribe(req *ultimav1.SubscribeRequest, stream ultimav1.Ultim
 			return status.Errorf(codes.InvalidArgument, "%s failed: %s", name, first.Str)
 		}
 		for _, f := range append([]resp.Value{first}, cs.DrainOutbox()...) {
-			events <- pushEventOf(f)
+			ev := pushEventOf(f)
+			if !events.Enqueue(ev, pushEventBytes(ev)) {
+				return status.Error(codes.Canceled, "push queue closed")
+			}
 		}
 		return nil
 	}
@@ -254,13 +276,14 @@ func pushEventOf(v resp.Value) *ultimav1.PushEvent {
 // Monitor is the MONITOR-equivalent stream (§6.2): one CommandEvent per
 // command executed anywhere on the server, until the client goes away.
 // Engine sinks run on the executing connection's goroutine, so events flow
-// through a bounded queue; a slow consumer's stream is cancelled rather
-// than stalling the engine.
+// through a byte-capped queue (lib/pushq, M9c); a slow consumer's stream
+// is cancelled rather than stalling the engine.
 func (s *Server) Monitor(_ *ultimav1.MonitorRequest, stream ultimav1.Ultima_MonitorServer) error {
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
 
-	events := make(chan *ultimav1.CommandEvent, pushQueueCap)
+	events := pushq.New[*ultimav1.CommandEvent](s.pushBufBytes)
+	defer events.Close() // late engine-sink calls fail fast
 	detach := s.eng.AddMonitor(func(ev commands.MonitorEvent) {
 		ce := &ultimav1.CommandEvent{
 			UnixMs:     ev.When.UnixMilli(),
@@ -271,23 +294,19 @@ func (s *Server) Monitor(_ *ultimav1.MonitorRequest, stream ultimav1.Ultima_Moni
 			ce.Command = string(ev.Args[0])
 			ce.Args = ev.Args[1:]
 		}
-		select {
-		case events <- ce:
-		case <-ctx.Done():
-		default:
+		if !events.Enqueue(ce, commandEventBytes(ce)) {
 			cancel() // slow consumer
 		}
 	})
 	defer detach()
 
 	for {
-		select {
-		case ce := <-events:
-			if err := stream.Send(ce); err != nil {
-				return err
-			}
-		case <-ctx.Done():
+		ce, ok := events.Dequeue(ctx.Done())
+		if !ok {
 			return nil
+		}
+		if err := stream.Send(ce); err != nil {
+			return err
 		}
 	}
 }

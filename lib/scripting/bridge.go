@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/yuin/gopher-lua/host"
 	"github.com/pschlump/ultima/lib/resp"
+	"github.com/yuin/gopher-lua/host"
 )
 
 // raiseErr raises a redis.call-class error: a plain STRING whose text
