@@ -10,33 +10,44 @@
 // script is injected per run as a CallPath closure (S10: this package
 // knows nothing about the command engine).
 //
+// Engine (N5 cutover, 2026-11-01): the pschlump gopher-lua fork — the
+// pure-Go Lua 5.5.1 VM carved out of glasm (Option A) — via its host
+// embed package (sibling replace in go.mod). Lua semantics are stock
+// 5.5.1, byte-exact against PUC Lua 5.5.1 by that repo's gates: integer/
+// float subtypes (redis.call replies stage as true integers), 5.4+
+// error texts. Redis embeds Lua 5.1; where a probed Redis text embeds a
+// 5.1-era Lua message, the 5.5.1 text supersedes it (ledgered in
+// docs/Redis-Errors.md).
+//
 // Lifecycle (S4, amended by M8e R3): VMs come from a per-script pool
 // (pool.go) — a pooled bound VM is reused across runs (CheckoutVM /
-// ReleaseVM), recycled periodically because guest GC is stopped; a fresh
-// VM per run remains the pool-disabled fallback. Checkout happens BEFORE
-// the shard pause (a miss instantiates, which is the slow part and
-// touches no keyspace); only vm.Run runs under PauseAll. Compiled scripts
-// (wasm bytes) are cached process-wide by SHA-1.
+// ReleaseVM), recycled periodically because the memory gauge the budget
+// enforces is monotone by design; a fresh VM per run remains the
+// pool-disabled fallback. Checkout happens BEFORE the shard pause (a
+// miss builds a fresh LState, which touches no keyspace); only vm.Run
+// runs under PauseAll. Compiled scripts (FunctionProto, immutable and
+// safely shared) are cached process-wide by SHA-1.
 package scripting
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/pschlump/gopher-lua/host"
 	"github.com/pschlump/ultima/lib/resp"
-	"github.com/yuin/gopher-lua/host"
 )
 
 // ChunkName is the Lua chunk name scripts are compiled under. Redis
-// compiles with "@user_script" and its messages strip the '@'; the
-// gopher-lua frontend renders the name verbatim, so we compile under the
-// stripped form and add the '@' back only in the error-reply suffix.
-const ChunkName = "user_script"
+// compiles with "@user_script" and its messages strip the '@'; stock
+// Lua chunkids strip a leading '=' (the literal-name form), so compiling
+// under "=user_script" renders every position prefix as "user_script:N:"
+// — the Redis shape; a bare name would render '[string "user_script"]:'
+// prefixes. The '@' is added back only in the error-reply suffix.
+const ChunkName = "=user_script"
 
 // Config carries the script.* configuration group (§5.1 of the M8
 // integration guide) plus the server values the Lua surface mirrors.
@@ -48,8 +59,9 @@ type Config struct {
 	// divergence: Redis cannot preempt, we kill at the deadline and keep
 	// partial effects). 0 disables the watchdog.
 	HardDeadlineMs int
-	// MaxMemoryMB is the per-VM Lua allocation budget (rt_set_memlimit);
-	// 0 = unlimited (the blob's 256 MiB linear-memory max still applies).
+	// MaxMemoryMB is the per-VM Lua allocation budget (the engine's
+	// accounted seam budget — table/string allocation charges, monotone);
+	// 0 = unlimited.
 	MaxMemoryMB int
 	// RngSeed bases math.random seeding (S6): 0 = derive from RunID.
 	RngSeed int64
@@ -132,9 +144,10 @@ type run struct {
 	killed atomic.Bool // SCRIPT KILL requested (drives the client error text)
 }
 
-// New builds the scripting engine: the SHA-pinned production blob, the
-// per-VM memory budget, and the redis.* function/constant surface
+// New builds the scripting engine: the host engine (memory budget +
+// globals protection), and the redis.* function/constant surface
 // (registered before the first VM — the host registry then freezes).
+// NewEngine cannot fail natively (no runtime blob to verify).
 func New(cfg Config) (*Manager, error) {
 	logger := cfg.Logger
 	if logger == nil {
@@ -148,17 +161,13 @@ func New(cfg Config) (*Manager, error) {
 		pool:   map[string][]*poolEntry{},
 		vmMeta: map[*host.VM]*poolEntry{},
 	}
-	eng, err := host.NewEngine(
+	m.eng = host.NewEngine(
 		host.WithMemoryBudgetBytes(int64(cfg.MaxMemoryMB)<<20),
 		// Redis 7.2.7 script environment lockdown (script_lua.c +
 		// deps/lua readonly patch): undefined-global reads and global
 		// writes raise the byte-exact probed errors.
 		host.WithGlobalsProtection(true),
 	)
-	if err != nil {
-		return nil, fmt.Errorf("scripting: %w", err)
-	}
-	m.eng = eng
 	m.timeLimitMs.Store(int64(cfg.LuaTimeLimitMs))
 	m.hardDeadlineMs.Store(int64(cfg.HardDeadlineMs))
 	seed := cfg.RngSeed
@@ -233,12 +242,12 @@ func (m *Manager) registerRedisSurface() error {
 
 // --- script cache -----------------------------------------------------------
 
-// Compile parses+lowers source (cached by SHA-1) and returns its script
+// Compile parses+compiles source (cached by SHA-1) and returns its script
 // identity. Compile errors are the frontend's message verbatim; the
 // caller wraps them in Redis's "Error compiling script" form. Pointer
 // identity per SHA-1 is guaranteed: concurrent Compiles of the same
-// source return the same *host.Script (the VM pool's one-script law,
-// host.ErrScriptBound, binds VMs by pointer).
+// source return the same *host.Script (the engine's compile-cache law;
+// the pool below keys VMs by that pointer's SHA).
 func (m *Manager) Compile(source []byte) (sha string, s *host.Script, err error) {
 	s, err = m.eng.Compile(source, ChunkName)
 	if err != nil {
@@ -274,7 +283,7 @@ func (m *Manager) Exists(shas ...string) []bool {
 }
 
 // Flush drops the cache (SCRIPT FLUSH). A script currently running keeps
-// its wasm bytes alive via its *host.Script reference — only future
+// its compiled proto alive via its *host.Script reference — only future
 // lookups miss, matching Redis's tolerance of FLUSH mid-script. The VM
 // pool is invalidated with it: idle VMs are closed, the epoch bump recycles
 // leased VMs on release — otherwise a flushed script would keep executing
@@ -331,8 +340,8 @@ func (m *Manager) VMRecycleRuns() int { return m.cfg.VMRecycleRuns }
 // VMRecyclePct returns the heap-watermark percent (script-vm-recycle-pct).
 func (m *Manager) VMRecyclePct() int { return m.cfg.VMRecyclePct }
 
-// NewVM builds a fresh script image. Slow (runtime + Lua state setup) —
-// callers create the VM BEFORE taking the shard pause.
+// NewVM builds a fresh VM (LState + stdlib open + host staging — µs).
+// Callers create the VM BEFORE taking the shard pause.
 func (m *Manager) NewVM() (*host.VM, error) { return m.eng.NewVM() }
 
 // --- execution ---------------------------------------------------------------

@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pschlump/gopher-lua/host"
 	"github.com/pschlump/ultima/lib/resp"
-	"github.com/yuin/gopher-lua/host"
 )
 
 // raiseErr raises a redis.call-class error: a plain STRING whose text
@@ -68,6 +68,8 @@ func (m *Manager) redisCallCommon(vm *host.VM, args []host.Value, pcall bool) ([
 			argv[i] = a.Str
 		case host.KindNumber:
 			argv[i] = NumToArg(a.Num) // S7 host-side formatting (probed rules)
+		case host.KindInteger:
+			argv[i] = strconv.FormatInt(a.Int, 10)
 		default:
 			return fail("ERR Lua redis lib command arguments must be strings or integers")
 		}
@@ -121,6 +123,8 @@ func (m *Manager) luaSHA1Hex(_ *host.VM, args []host.Value) ([]host.Value, error
 		s = args[0].Str
 	case host.KindNumber:
 		s = NumToArg(args[0].Num)
+	case host.KindInteger:
+		s = strconv.FormatInt(args[0].Int, 10)
 	default:
 		return nil, raiseErr("ERR wrong number of arguments")
 	}
@@ -130,15 +134,26 @@ func (m *Manager) luaSHA1Hex(_ *host.VM, args []host.Value) ([]host.Value, error
 
 // luaLog is redis.log(level, message): routed to the server log at the
 // matching slog level; LOG_DEBUG/VERBOSE map to slog debug, NOTICE to
-// info, WARNING to warn.
+// info, WARNING to warn. The staged redis.LOG_* constants are 5.5.1
+// integers, so the level arrives as KindInteger (KindNumber accepted
+// too — a computed level may be a float).
 func (m *Manager) luaLog(_ *host.VM, args []host.Value) ([]host.Value, error) {
 	if len(args) != 2 {
 		return nil, raiseErr("ERR wrong number of arguments")
 	}
-	if args[0].Kind != host.KindNumber || args[1].Kind != host.KindString {
+	var level float64
+	switch args[0].Kind {
+	case host.KindNumber:
+		level = args[0].Num
+	case host.KindInteger:
+		level = float64(args[0].Int)
+	default:
 		return nil, raiseErr("ERR wrong number or type of arguments")
 	}
-	switch int(args[0].Num) {
+	if args[1].Kind != host.KindString {
+		return nil, raiseErr("ERR wrong number or type of arguments")
+	}
+	switch int(level) {
 	case 0, 1: // LOG_DEBUG, LOG_VERBOSE
 		m.logger.Debug("lua", "msg", args[1].Str)
 	case 2: // LOG_NOTICE
@@ -163,6 +178,8 @@ func (m *Manager) luaSetResp(vm *host.VM, args []host.Value) ([]host.Value, erro
 	switch args[0].Kind {
 	case host.KindNumber:
 		v = int(args[0].Num)
+	case host.KindInteger:
+		v = int(args[0].Int)
 	case host.KindString:
 		n, err := strconv.Atoi(args[0].Str)
 		if err != nil {
@@ -182,20 +199,17 @@ func (m *Manager) luaSetResp(vm *host.VM, args []host.Value) ([]host.Value, erro
 }
 
 // RunErrorReply maps a Run error to the client reply: a ScriptError is
-// shaped per the probed rules (ErrorReply); a TrapError or host failure
-// is, by contract, a backend bug — logged with the module SHA, answered
-// with an internal error, never surfaced as a script error.
+// shaped per the probed rules (ErrorReply); any other error is an
+// engine-level failure (a Go panic outside the Lua error protocol — the
+// old TrapError class — or a host/lifecycle fault), logged with the
+// module SHA, answered with an internal error, never surfaced as a
+// script error.
 func (m *Manager) RunErrorReply(sha string, err error) resp.Value {
 	var se *host.ScriptError
 	if errors.As(err, &se) {
 		return ErrorReply(sha, se)
 	}
-	var te *host.TrapError
-	if errors.As(err, &te) {
-		m.logger.Error("lua backend trap (backend bug class)", "sha", sha, "err", te.Err)
-	} else {
-		m.logger.Error("lua host error", "sha", sha, "err", err)
-	}
+	m.logger.Error("lua engine-level failure", "sha", sha, "err", err)
 	return resp.Err("ERR Internal error running script")
 }
 

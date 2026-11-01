@@ -1,27 +1,32 @@
 package scripting
 
 // The M8e R3 per-script VM pool (docs/m8-detailed-plan.md, guide risk R3):
-// a fresh host.VM costs ~44 ms of wazero instantiation while a re-run on a
-// bound image costs ~16-31 µs, so hot scripts keep a bound VM checked out
-// per run instead of building one per EVAL. The host's one-script law
-// (host.ErrScriptBound) makes the pool per-SHA by construction.
+// a fresh host.VM costs the LState build + stdlib open (µs-scale; the
+// engine's embedcmp run of 2026-11-01 put the fresh-VM posture at
+// ~24-28 µs/run vs ~3-8 µs pool-hit) while a reused VM skips both, so hot
+// scripts keep a bound VM checked out per run instead of building one per
+// EVAL. Natively the pool is an optimization, not feasibility (the wasm
+// engine's ~44 ms instantiation made it load-bearing); it stays because
+// the checkout order — VM before the shard pause — also keeps even that
+// µs cost off PauseAll.
 //
 // Byte-exactness is preserved by construction: the M8d globals lockdown
 // blocks cross-run global leakage, KEYS/ARGV are restaged per run, the RNG
 // is reseeded per run (S6), and setresp state is Go-side per run. The
 // differential suite (tests/differential/scripts_m8.go) gates this.
 //
-// Recycling is mandatory, not optional: guest GC is permanently stopped
-// (host/vm.go — "register cells are not GC roots"), so a reused VM's Lua
-// heap and wasm linear memory grow monotonically. A pooled VM is recycled
-// (closed; the next checkout pays one fresh instantiation) when any of:
+// Recycling stays mandatory: the budget's accounting gauge is monotone by
+// design (never refunded — it is the charge total, not the live set), so
+// a reused VM's gauge climbs run over run and the heap watermark would
+// eventually trip false positives. A pooled VM is recycled (closed; the
+// next checkout pays one fresh build) when any of:
 //
 //  1. its run ended in SCRIPT KILL / the hard deadline / "not enough
-//     memory" (partial guest state + consumed heap — IsVMFatal);
+//     memory" (partial guest state — IsVMFatal);
 //  2. it has served script_vm_recycle_runs runs;
-//  3. its heap (VM.UsedBytes) crosses script_vm_recycle_pct % of the
-//     script_max_memory_mb budget — the direct measure of the GC-stopped
-//     growth;
+//  3. its accounted charge (VM.UsedBytes) crosses script_vm_recycle_pct %
+//     of the script_max_memory_mb budget — the direct measure of the
+//     monotone growth;
 //  4. a SCRIPT FLUSH landed while it was leased (stale epoch).
 //
 // Idle capacity is bounded per SHA (script_vm_pool_size; 0 disables
@@ -30,12 +35,11 @@ package scripting
 // grow the pool without bound.
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"time"
 
-	"github.com/yuin/gopher-lua/host"
+	"github.com/pschlump/gopher-lua/host"
 )
 
 // poolEntry is one pooled VM: bound to entry.sha on its first Run.
@@ -48,11 +52,12 @@ type poolEntry struct {
 }
 
 // IsVMFatal reports whether a run error leaves the VM unfit for reuse:
-// the kill/deadline class (partial Lua state mid-execution, heap partially
-// consumed), an uncaught "not enough memory" (the VM sits at its budget),
-// or a wasm trap (runtime-level failure). Ordinary script errors are
-// pcall-caught inside the guest and cleared by the next Run's hygiene
-// (rt_err_clear), so they do not recycle the VM.
+// the kill/deadline class (partial Lua state mid-execution), an uncaught
+// "not enough memory" (the VM sits at its budget), or an engine-level
+// failure (a Go panic outside the Lua error protocol — the trap class;
+// natively a plain non-ScriptError error, the host maps those itself).
+// Ordinary script errors unwind the Lua stack to base and stack hygiene
+// cleans per-run state, so they do not recycle the VM.
 func IsVMFatal(err error) bool {
 	var se *host.ScriptError
 	if errors.As(err, &se) {
@@ -63,13 +68,16 @@ func IsVMFatal(err error) bool {
 		return strings.HasPrefix(msg, "ERR Script killed by") ||
 			strings.Contains(msg, "not enough memory")
 	}
-	var te *host.TrapError
-	return errors.As(err, &te)
+	// engine-level failure (a Go panic outside the Lua error protocol,
+	// closed VM) or a pre-run context abort: unknown or dead state —
+	// never reuse
+	return true
 }
 
 // CheckoutVM leases a VM bound to s — a pooled bound VM on a hit (µs), a
-// fresh instantiation on a miss (~44 ms). Call BEFORE taking the shard
-// pause: a miss must not instantiate under PauseAll. Pair with ReleaseVM.
+// fresh LState build on a miss (µs-scale, but off-PauseAll all the same).
+// Call BEFORE taking the shard pause: a miss must not build under
+// PauseAll. Pair with ReleaseVM.
 func (m *Manager) CheckoutVM(s *host.Script) (*host.VM, error) {
 	if m.cfg.VMPoolSize > 0 {
 		m.poolMu.Lock()
@@ -110,7 +118,7 @@ func (m *Manager) ReleaseVM(vm *host.VM, sha string, discard bool) {
 	recycle := discard || m.closed || e.epoch != m.poolEpoch ||
 		(m.cfg.VMRecycleRuns > 0 && e.runs >= m.cfg.VMRecycleRuns)
 	if !recycle && m.cfg.VMRecyclePct > 0 && m.budgetBytes > 0 {
-		used := vm.UsedBytes(context.Background())
+		used := vm.UsedBytes()
 		if used*100 >= m.budgetBytes*int64(m.cfg.VMRecyclePct) {
 			recycle = true
 		}

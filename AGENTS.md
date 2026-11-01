@@ -27,6 +27,8 @@ auth/WS sessions M6b, scripting M8, VM pool M8e).
   by `CGO_ENABLED=0 go build ./...`; no Docker/CI config in the repo.
 - Sibling checkouts pulled in via `replace` directives — they must exist
   for the module to build:
+  - `../gopher-lua` — `github.com/pschlump/gopher-lua` (branch `v5.5`),
+    the Lua 5.5.1 scripting engine (see the N5 note below)
   - `../pluto` — `github.com/pschlump/pluto`, generic data-structure
     library (thread-safe `_ts` variants); per-structure specs in
     `docs/pluto/`. **Standing permission**: when the efficient way to
@@ -34,13 +36,16 @@ auth/WS sessions M6b, scripting M8, VM pool M8e).
     add it there — with tests — rather than working around its API here,
     and update the matching `docs/pluto/` spec.
   - `../htotp` — `github.com/pschlump/htotp`, TOTP 2FA (D17).
-- **BRANCH NOTE (`gopher_lua_original`)**: this experiment replaces the
-  `../gopher-lua` sibling (wasm host) with the ORIGINAL pure-Go
-  gopher-lua, vendored at `third_party/gopher-lua` (yuin/gopher-lua
-  @75f4976) plus a pure-Go drop-in reimplementation of the `host`
-  package API (`third_party/gopher-lua/host`) and small core mods
-  (readonly tables, approximate memlimit accounting). M8 Lua scripting
-  (D12) runs on the interpreter directly — no wazero, no wasm blob.
+- **Scripting engine (`N5 cutover`)**: M8 Lua scripting (D12) runs on
+  the pschlump fork of gopher-lua — the pure-Go **Lua 5.5.1** embed
+  engine carved out of glasm (`../gopher-lua`, branch `v5.5`), consumed
+  through its `host` package via a sibling `replace` (like `../pluto`).
+  This supersedes the `gopher_lua_original` experiment (vendored
+  yuin/gopher-lua 5.1 + a pure-Go host shim at `third_party/gopher-lua`
+  — deleted) and, before it, the wasm host (wazero blob). The engine's
+  own laws (byte-exactness with stock C Lua 5.5.1, golden gate,
+  perf record) live in that repo (`docs/Option-A-Plan.md`,
+  `docs/Embedded-EVAL-Perf.md`).
 - Other key deps (`go.mod`): `go-chi/chi/v5` (HTTP router),
   `gorilla/websocket`, `google.golang.org/grpc` + `protobuf`,
   `go.uber.org/goleak` (leak detection in tests), `golang-jwt/jwt/v5` +
@@ -97,16 +102,17 @@ Request flow: each front-end parses its wire format, calls
 - **Persistence** (`lib/persist`, D9 own formats): per-(db,shard) snapshot
   segments + per-shard seq-stamped AOF with global sequence merge at
   replay; restore-before-serve.
-- **Scripting** (`lib/scripting`, D12): gopher-lua — on THIS branch the
-  vendored pure-Go interpreter (`third_party/gopher-lua/host` shim; on
-  main, the wasm host). EVAL runs
-  under PauseAll; VMs come from the per-script pool (`pool.go` — guest GC
-  is stopped, so pooled VMs are recycled on run count / heap watermark /
-  fatal errors / SCRIPT FLUSH; knobs `script_vm_pool_size` (0 disables),
-  `script_vm_pool_max`, `script_vm_recycle_runs`, `script_vm_recycle_pct`).
-  On this branch VM creation is cheap (a fresh `lua.LState`), so
-  `script_vm_pool_size: 0` is a viable configuration — see
-  `docs/benchmarks/M8-lua-compare-*.md`.
+- **Scripting** (`lib/scripting`, D12): the pure-Go Lua 5.5.1 engine
+  (`../gopher-lua` via `host`; N5 cutover). EVAL runs
+  under PauseAll; VMs come from the per-script pool (`pool.go` — an
+  optimization natively, not a feasibility requirement: a VM builds in
+  ~µs, where the wasm host's ~44 ms build made pooling load-bearing.
+  Recycling stays because the memory budget's accounting gauge is
+  monotone — charges are never refunded, so a reused VM visibly drops
+  below its own high-water mark; pooled VMs are recycled on run count /
+  heap watermark / fatal errors / SCRIPT FLUSH; knobs
+  `script_vm_pool_size` (0 disables), `script_vm_pool_max`,
+  `script_vm_recycle_runs`, `script_vm_recycle_pct`).
 - Shard count: config `shard_count`, `0` = 4×GOMAXPROCS, rounded up to a
   power of two (`shard.ResolveShardCount`).
 - Graceful shutdown: SIGINT/SIGTERM → drain gRPC, close HTTP and RESP,
@@ -195,10 +201,6 @@ third_party/readline/ vendored + patched fork of ergochat/readline v0.1.3 (go.mo
                      `replace`); patch: bare ESC is delivered as its own keypress so
                      vi-mode ESC+<key> works (upstream swallowed both bytes); kept
                      close to upstream — excluded from lint
-third_party/gopher-lua/ THIS BRANCH: vendored original yuin/gopher-lua @75f4976
-                     (go.mod `replace`) + pure-Go `host` shim package replacing
-                     the wasm host; core mods: readonly tables (Redis globals
-                     lockdown), approximate memlimit accounting. Excluded from lint
 bin/                 gen.sh, gen-api.sh, gen-build-stamp.sh, bench*.sh, gen-jwt-keys.sh,
                      gen-cli-help.py (regenerates clients/go/ultima/cmdhelp_data.go;
                      needs a Redis 7.2.7 checkout via REDIS_SRC), test-cli-matrix.sh

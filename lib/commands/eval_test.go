@@ -100,6 +100,11 @@ func TestEvalScriptErrors(t *testing.T) {
 	if v := e.Execute(cs, evalArgs("return error({})", "0")); v.Kind != resp.KindError {
 		t.Errorf("error({{}}) = %+v, want a clean error", v)
 	}
+	// error(nil): stock 5.5.1 replaces the nil error object with
+	// "<no error object>" at the pcall boundary — Redis 7.2's 5.1
+	// runtime renders "nil" (N5 divergence, docs/Redis-Errors.md §11).
+	wantErrPrefix(t, e.Execute(cs, evalArgs("return error(nil)", "0")),
+		"ERR <no error object> script: ")
 	// Compile error shape (inner wording is the gopher-lua frontend's —
 	// ledgered divergence, docs/Redis-Errors.md §11).
 	wantErrPrefix(t, e.Execute(cs, evalArgs("this is not lua", "0")),
@@ -162,6 +167,12 @@ func TestEvalRedisCall(t *testing.T) {
 	// Blocking commands run non-blocking from scripts (probed).
 	if v := e.Execute(cs, evalArgs("return redis.call('blpop','emptylist',0)", "0")); v.Kind != resp.KindNull {
 		t.Errorf("blpop empty = %+v, want null", v)
+	}
+	// N5: integer literals beyond 2^53 stage losslessly through
+	// redis.call (the 5.5.1 integer subtype) — Redis 7.2's float-only
+	// 5.1 rounds to ...580 (docs/Redis-Errors.md §11).
+	if v := e.Execute(cs, evalArgs("redis.call('set','nk',123456789012345678) return redis.call('get','nk')", "0")); string(v.Blob) != "123456789012345678" {
+		t.Errorf("int64 arg round-trip = %+v, want the lossless literal", v)
 	}
 	e.Execute(cs, [][]byte{[]byte("RPUSH"), []byte("bl"), []byte("x")})
 	if v := e.Execute(cs, evalArgs("return redis.call('blpop','bl',0)", "0")); v.Kind != resp.KindArray || len(v.Arr) != 2 {

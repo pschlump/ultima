@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pschlump/gopher-lua/host"
 	"github.com/pschlump/ultima/lib/resp"
-	"github.com/yuin/gopher-lua/host"
 )
 
 // NumToArg renders a Lua number as a redis.call argument (probed 7.2.7):
@@ -55,7 +55,10 @@ func ToReply(res host.Result, respVer int) resp.Value {
 }
 
 // LuaToRESP converts one Lua value per the probed rules
-// (docs/Redis-Errors.md §4).
+// (docs/Redis-Errors.md §4). KindInteger is the Lua-5.3+ integer subtype:
+// the 5.5.1 engine surfaces integers as their own seam kind (script
+// literals, redis.call replies staged lossless, script-built array keys),
+// so every number path handles both kinds.
 func LuaToRESP(v host.Value, respVer int) resp.Value {
 	switch v.Kind {
 	case host.KindNil, host.KindFunction:
@@ -72,6 +75,8 @@ func LuaToRESP(v host.Value, respVer int) resp.Value {
 		return resp.Int(1)
 	case host.KindNumber:
 		return resp.Int(NumToInt(v.Num))
+	case host.KindInteger:
+		return resp.Int(v.Int)
 	case host.KindString:
 		return resp.BlobStr(v.Str)
 	case host.KindTable:
@@ -147,21 +152,37 @@ func tableFieldTable(v host.Value, name string) (host.Value, bool) {
 	return host.Value{}, false
 }
 
-// tableFieldNum returns the number value of a named table field.
+// tableFieldNum returns the number value of a named table field (either
+// number kind — {double=3} stages as an integer in 5.5.1).
 func tableFieldNum(v host.Value, name string) (float64, bool) {
 	for _, p := range v.Pairs {
-		if p.Key.Kind == host.KindString && p.Key.Str == name && p.Val.Kind == host.KindNumber {
+		if p.Key.Kind != host.KindString || p.Key.Str != name {
+			continue
+		}
+		switch p.Val.Kind {
+		case host.KindNumber:
 			return p.Val.Num, true
+		case host.KindInteger:
+			return float64(p.Val.Int), true
 		}
 	}
 	return 0, false
 }
 
 // tableArrayElem returns the value of the integral array key i (1-based).
+// 5.5.1 normalizes integral float keys to integer keys inside Lua tables,
+// so script-built arrays carry KindInteger keys; both kinds are accepted.
 func tableArrayElem(v host.Value, i int) (host.Value, bool) {
 	for _, p := range v.Pairs {
-		if p.Key.Kind == host.KindNumber && p.Key.Num == float64(i) {
-			return p.Val, true
+		switch p.Key.Kind {
+		case host.KindInteger:
+			if p.Key.Int == int64(i) {
+				return p.Val, true
+			}
+		case host.KindNumber:
+			if p.Key.Num == float64(i) {
+				return p.Val, true
+			}
 		}
 	}
 	return host.Value{}, false
@@ -181,7 +202,9 @@ func respToLua(v resp.Value, respVer int) host.Value {
 		}
 		return host.Bool(false)
 	case resp.KindInt:
-		return host.Number(float64(v.Int))
+		// lossless int64 (the seam's integer kind) — the guest sees a
+		// true 5.5.1 integer, never a narrowed float
+		return host.Int(v.Int)
 	case resp.KindSimpleString:
 		return okTable(v.Str)
 	case resp.KindBlobString, resp.KindVerbatim:
@@ -300,6 +323,8 @@ func luaErrorMessage(v host.Value, line int) string {
 		return v.Str
 	case host.KindNumber:
 		return fmt.Sprintf("user_script:%d: %s", line, NumToArg(v.Num))
+	case host.KindInteger:
+		return fmt.Sprintf("user_script:%d: %d", line, v.Int)
 	case host.KindTrue:
 		return "true"
 	case host.KindFalse:

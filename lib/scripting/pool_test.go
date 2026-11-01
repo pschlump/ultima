@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/yuin/gopher-lua/host"
+	"github.com/pschlump/gopher-lua/host"
 )
 
 func newPoolManager(t *testing.T, cfg Config) *Manager {
@@ -320,7 +320,10 @@ func TestIsVMFatal(t *testing.T) {
 		{"hard deadline", scriptErr("ERR Script killed by the hard execution deadline (script_hard_deadline_ms)"), true},
 		{"oom plain", scriptErr("not enough memory"), true},
 		{"oom with position", scriptErr("user_script:5: not enough memory"), true},
-		{"trap", &host.TrapError{}, true},
+		// engine-level failure: a non-ScriptError is the trap class
+		// natively (the host maps panics itself)
+		{"engine-level failure", errors.New("host: engine-level failure (backend bug class): boom"), true},
+		{"pre-run context abort", context.DeadlineExceeded, true},
 		{"error table (pcall-style)", &host.ScriptError{ErrValue: host.Table(host.KV{Key: host.String("err"), Val: host.String("boom")})}, false},
 	}
 	for _, c := range cases {

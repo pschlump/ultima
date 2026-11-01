@@ -7,17 +7,17 @@ package commands
 // PauseAll token, so it is atomic across shards; effects replicate
 // per-command through the bridge (S2 — EVAL itself is never logged).
 //
-// Cost split: the host VM (wazero runtime + Lua state) is checked out of
-// the per-script pool BEFORE the pause (M8e R3) — a pool miss pays the
-// ~44 ms instantiation, which touches no keyspace and must not happen
-// under PauseAll; only the compiled script's run happens inside the pause.
+// Cost split: the host VM (LState + stdlib + host staging) is checked out
+// of the per-script pool BEFORE the pause (M8e R3) — a pool miss pays the
+// fresh build, which touches no keyspace and must not happen under
+// PauseAll; only the compiled script's run happens inside the pause.
 
 import (
 	"context"
 
+	"github.com/pschlump/gopher-lua/host"
 	"github.com/pschlump/ultima/lib/resp"
 	"github.com/pschlump/ultima/lib/scripting"
-	"github.com/yuin/gopher-lua/host"
 )
 
 var errNoscript = resp.Err("NOSCRIPT No matching script. Please use EVAL.")
@@ -88,16 +88,17 @@ func evalImpl(e *Engine, cs *ConnState, args [][]byte, input evalInputKind, ro b
 		argv = append(argv, string(a))
 	}
 
-	// VM checkout before the pause: a pool hit is µs; a miss is the slow
-	// wazero instantiation, which must not happen under PauseAll.
+	// VM checkout before the pause: a pool hit is µs; a miss builds a
+	// fresh LState — µs-scale, but off-PauseAll regardless.
 	vm, err := e.Scripts.CheckoutVM(script)
 	if err != nil {
 		e.logger().Error("scripting: VM creation failed", "err", err)
 		return resp.Err("ERR Internal error running script")
 	}
 	// discard is set when the run ends in an error class that leaves the
-	// VM unfit for reuse (kill/deadline/OOM/trap — scripting.IsVMFatal);
-	// ReleaseVM then closes it instead of returning it to the pool.
+	// VM unfit for reuse (kill/deadline/OOM/engine failure —
+	// scripting.IsVMFatal); ReleaseVM then closes it instead of returning
+	// it to the pool.
 	discard := false
 	defer func() { e.Scripts.ReleaseVM(vm, script.SHA1, discard) }()
 

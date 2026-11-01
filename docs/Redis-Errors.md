@@ -270,6 +270,18 @@ the default INFO output.
 - `error(42, 0)`-style level-sensitive position rendering of **number**
   error values is not tracked (the staged value carries no level);
   Ultima renders number errors with the position (`error(42)` form).
+- **N5 cutover (5.5.1 semantics, engine law):** `error(nil)` renders
+  `ERR <no error object>` — stock Lua 5.5.1 replaces a nil error object
+  with that literal at the pcall boundary; Redis 7.2's 5.1 runtime
+  passes nil through and renders `ERR nil`. Byte-exactness with stock
+  5.5.1 wins over 5.1 parity (pinned in eval_test.go).
+- **N5 cutover (deliberate):** `redis.call` arguments that are integer
+  literals beyond 2^53 stage **losslessly** (the 5.5.1 integer subtype,
+  int64) — `redis.call('set','nk',123456789012345678)` stores the exact
+  literal; Redis 7.2's float-only 5.1 rounds to `123456789012345680`.
+  Integer **replies** also stage as true integers now, not floats
+  (pinned in convert_test.go; see docs/Embedded-EVAL-Perf.md in the
+  gopher-lua repo for the engine record).
 - Redis marks raised `redis.call` error strings with an **error-object
   metatable**; Ultima cannot attach metatables to raised values, so the
   verbatim error class is recognized by text (an error-code word prefix
@@ -294,12 +306,15 @@ the default INFO output.
   (script_hard_deadline_ms)` and keeps its partial, already-AOF-captured
   effects. Redis cannot preempt; there is no parity text.
 - The killed-script reply line for deadline-class errors is reported as
-  1 when the runtime stages no line (gopher-lua ledger row 37).
-- Performance: on darwin/arm64 the wazero engine runs the wasm backend
-  interpreted — a `while i<N do i=i+1 end` loop is >100x slower than PUC
-  Lua (Redis 7.2.7 does ~230M simple iterations/s; the backend ~1.1M/s).
-  Correctness is unaffected; M8e benchmarks/trip-wires track this
-  (integration-guide risk R3).
+  1: the N5 host engine normalizes the deadline/kill/cancel class to
+  `Line: 0` by contract (bare `context deadline exceeded`), and
+  ErrorReply's fallback renders line 1 (the shape glasm's ledger row 37
+  established, now a deliberate daemon contract).
+- ~~Performance: the wazero engine ran the wasm backend interpreted~~ —
+  obsolete since the N5 cutover: scripting runs on the pure-Go Lua
+  5.5.1 embed engine (`../gopher-lua`, the glasm carve); its embedded
+  run record is docs/Embedded-EVAL-Perf.md in that repo (pool posture
+  3.4–16.5× stock C; VM build ~µs).
 - `redis.pcall`'s error table carries `ignore_error_stats_update=1`
   (reproduced); the metatable on raised strings is not (above).
 - `CONFIG GET *` exposes the Ultima-only `script-*` keys.

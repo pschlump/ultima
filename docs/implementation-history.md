@@ -386,3 +386,48 @@ Detail in `docs/m8-detailed-plan.md`; the probing ground truth is
   FLUSHDB/FLUSHALL/DBSIZE fan out shard tasks and must carry the
   caller's pause token under PauseAll (a latent MULTI+FLUSHALL+EXEC
   deadlock smoked out by `redis.call('flushall')`).
+
+## N5 architecture notes (engine cutover, 2026-11-01)
+
+**N5: EVAL/SCRIPT now runs on the native Lua 5.5.1 embed engine** — the
+pschlump gopher-lua fork (`../gopher-lua`, branch `v5.5`, the glasm
+carve; `docs/Option-A-Plan.md` there) consumed through its `host`
+package via a sibling `replace`. The wasm host (wazero + the glasm
+blob, SHA `b4b7d2b7…`) and the `gopher_lua_original` experiment
+(vendored yuin/gopher-lua 5.1 + pure-Go host shim at
+`third_party/gopher-lua`) are both deleted — `git log 86fccc6..` for the
+experiment's lifetime. The daemon-facing `host` API is unchanged in
+shape (Engine/VM/Script/RunOptions/ScriptError/Value), so `lib/scripting`
+kept its structure; what changed:
+
+- **5.5.1 semantics inside scripts** (byte-exactness with stock C Lua
+  5.5.1 is the engine's law): integer subtype — integer replies and the
+  `redis.LOG_*` constants stage as true integers (`KindInteger`), script
+  integer literals cross `redis.call` losslessly beyond 2^53, and
+  integral table keys normalize to integer keys. Ledgered divergences
+  vs Redis 7.2's 5.1 runtime: `docs/Redis-Errors.md` §11 (error(nil) →
+  `<no error object>`; lossless int64 args/replies).
+- **Deadline/kill normalization** (engine contract): a fired
+  run-context (timer, `SCRIPT KILL`, caller cancel) crosses as
+  `ScriptError{String("context deadline exceeded"), Line: 0}`;
+  `RunOnVM`/`IsVMFatal` keep their shapes — kills/deadlines/OOM are
+  fatal, ordinary script errors pool the VM.
+- **Raise lines**: prefixless raises (hostfn errors — `redis.call`
+  command failures, level-0 `error()`) report the raise-time traceback
+  top frame ("on @user_script:N" matches Redis's error handler).
+  `rawset` on a protected table raises bare (Redis's C builtin adds no
+  position); bytecode-path readonly raises keep the "chunk:N:" prefix —
+  both per the probed table in `docs/Redis-Errors.md` §6a.
+- **The pool is an optimization, not feasibility** (M8e note revised):
+  a VM builds in ~µs natively (the wasm host's ~44 ms build made
+  pooling load-bearing). Recycling stays: the budget's accounting gauge
+  is monotone (charges never refunded), so a reused VM visibly drops
+  below its own high-water mark — the watermark recycle keeps reading
+  `UsedBytes` correctly. Engine perf record:
+  `docs/Embedded-EVAL-Perf.md` in the gopher-lua repo (pool posture
+  3.4–16.5× stock C Lua, embedcmp harness `cmd/embedcmp`).
+
+Gates: `go test ./...` green, `-race` over lib/scripting, lib/commands,
+tests/; **differential M8 corpus 332 comparisons, 0 mismatches** against
+live redis-server 7.2.7 (`tests/differential/scripts_m8.go` — the two
+engine-law divergences are ledgered and unit-pinned instead).

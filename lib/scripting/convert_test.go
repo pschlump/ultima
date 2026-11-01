@@ -7,8 +7,8 @@ import (
 	"math"
 	"testing"
 
+	"github.com/pschlump/gopher-lua/host"
 	"github.com/pschlump/ultima/lib/resp"
-	"github.com/yuin/gopher-lua/host"
 )
 
 func TestNumToInt(t *testing.T) {
@@ -164,7 +164,9 @@ func TestRespToLua(t *testing.T) {
 	}{
 		{"null v2", resp.Null(), 2, host.Bool(false)},
 		{"null v3", resp.Null(), 3, host.Nil()},
-		{"int", resp.Int(7), 2, host.Number(7)},
+		// integer replies stage lossless (5.5.1 integer subtype), not as
+		// floats — the N5 cutover's deliberate change
+		{"int", resp.Int(7), 2, host.Int(7)},
 		{"simple", resp.Simple("OK"), 2, okTable("OK")},
 		{"blob", resp.BlobStr("v"), 2, host.String("v")},
 		{"double v2 as string", resp.Double(1.5), 2, host.String("1.5")},
@@ -173,7 +175,7 @@ func TestRespToLua(t *testing.T) {
 		{"array", resp.Arr(resp.BlobStr("a"), resp.Int(2)), 2,
 			host.Table(
 				host.KV{Key: host.Int(1), Val: host.String("a")},
-				host.KV{Key: host.Int(2), Val: host.Number(2)},
+				host.KV{Key: host.Int(2), Val: host.Int(2)},
 			)},
 		{"map v2 flattened", resp.Map(resp.BlobStr("f"), resp.BlobStr("v")), 2,
 			host.Table(
@@ -195,7 +197,7 @@ func TestRespToLua(t *testing.T) {
 }
 
 func hostEqual(a, b host.Value) bool {
-	if a.Kind != b.Kind || a.Num != b.Num || a.Str != b.Str || len(a.Pairs) != len(b.Pairs) {
+	if a.Kind != b.Kind || a.Num != b.Num || a.Int != b.Int || a.Str != b.Str || len(a.Pairs) != len(b.Pairs) {
 		return false
 	}
 	for i := range a.Pairs {

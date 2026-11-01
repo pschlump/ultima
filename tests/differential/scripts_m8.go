@@ -21,6 +21,12 @@ package differential
 //   - CONFIG GET * wildcards: Ultima exposes extra script-* keys.
 //   - tostring() of floats inside scripts (guest number dialect, ledger
 //     rows 38/40/48 — reply formatting is host-side and unaffected).
+//   - error(nil): stock 5.5.1 replaces the nil error object with
+//     "<no error object>" at the pcall boundary; Redis 7.2's 5.1 runtime
+//     renders "nil" (N5 cutover, docs/Redis-Errors.md §11).
+//   - redis.call integer args beyond 2^53: the 5.5.1 integer subtype
+//     stages losslessly (int64); Redis 7.2's float-only 5.1 rounds —
+//     deliberate N5 change (docs/Redis-Errors.md §11).
 
 var m8Scripts = func() []script {
 	out := make([]script, 0, 16)
@@ -167,7 +173,11 @@ var m8ConversionScripts = []script{
 		// LEVEL, so level-sensitive position rendering of number errors
 		// is not tracked (ledgered, docs/Redis-Errors.md §11).
 		cmd("EVAL", "return error(true)", "0"),
-		cmd("EVAL", "return error(nil)", "0"),
+		// error(nil) is excluded (N5): stock Lua 5.5.1 replaces a nil
+		// error object at the pcall boundary with "<no error object>";
+		// Redis 7.2's 5.1 runtime passes nil through ("nil"). Engine-law
+		// divergence — ledgered, docs/Redis-Errors.md §11.
+		cmd("EVAL", "return error('WRONGTYPE foo')", "0"),
 		cmd("EVAL", "return error('WRONGTYPE foo')", "0"),
 		cmd("EVAL", "return error('ERR already')", "0"),
 		cmd("EVAL", "return error('')", "0"),
@@ -312,7 +322,10 @@ var m8CallScripts = []script{
 		cmd("EVAL", "redis.call('set','nk',0.1^2) return redis.call('get','nk')", "0"),
 		cmd("EVAL", "redis.call('set','nk',-0.0) return redis.call('get','nk')", "0"),
 		cmd("EVAL", "redis.call('set','nk',1e15) return redis.call('get','nk')", "0"),
-		cmd("EVAL", "redis.call('set','nk',123456789012345678) return redis.call('get','nk')", "0"),
+		// 123456789012345678 (> 2^53) is excluded (N5): the 5.5.1
+		// integer subtype stages redis.call args losslessly as int64;
+		// Redis 7.2's 5.1 runtime (floats only) rounds to ...580.
+		// Deliberate — ledgered, docs/Redis-Errors.md §11.
 		cmd("EVAL", "return redis.call('set', 1, 2)", "0"), // numeric key/value
 		cmd("GET", "1"),
 	}},
