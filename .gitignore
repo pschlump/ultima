@@ -14,3 +14,6 @@ cmd/ultima-cli/ultima-cli
 cmd/ultima-ws-cli/ultima-ws-cli
 cmd/ultima-grpc-cli/ultima-grpc-cli
 /data/
+
+# raw execution traces exceed GitHub's 100MB limit — keep local only
+docs/benchmarks/profiles/**/*.out
