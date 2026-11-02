@@ -11,7 +11,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/oapi-codegen/runtime v1.6.0
 	github.com/prometheus/client_golang v1.24.1
-	github.com/pschlump/gopher-lua v0.0.0
+	github.com/pschlump/gopher-lua v0.0.7
 	github.com/pschlump/htotp v1.1.2
 	github.com/pschlump/pluto v0.1.5
 	go.uber.org/goleak v1.3.0
@@ -44,10 +44,5 @@ require (
 // replace github.com/pschlump/pluto => ../pluto
 
 // replace github.com/pschlump/htotp => ../htotp
-
-// The Lua scripting engine: the pschlump fork of gopher-lua — the pure-Go
-// Lua 5.5.1 virtual machine carved out of glasm (Option A), consumed
-// through its host embed package. Sibling checkout required.
-replace github.com/pschlump/gopher-lua => ../gopher-lua
 
 replace github.com/ergochat/readline => ./third_party/readline
