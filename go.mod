@@ -11,7 +11,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/oapi-codegen/runtime v1.6.0
 	github.com/prometheus/client_golang v1.24.1
-	github.com/pschlump/gopher-lua v0.0.7
+	github.com/pschlump/gopher-lua v0.0.8
 	github.com/pschlump/htotp v1.1.2
 	github.com/pschlump/pluto v0.1.5
 	go.uber.org/goleak v1.3.0
